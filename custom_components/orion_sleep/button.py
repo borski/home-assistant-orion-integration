@@ -1,66 +1,77 @@
 """Button platform for Orion Sleep — one-shot device actions.
 
-Wraps `POST /v1/devices/{deviceId}/action` for the actions that have no
-readable state, so a stateful entity would have to lie about them.
+Each button is *gated* on the device's `permissions.allowed_actions` but
+*dispatched* to its own endpoint. Those are two different things, and
+conflating them is what broke the first cut of this platform:
 
-⚠️ Two deliberate omissions. `device_forget_wifi` and `device_deactivate`
-are in the account's allowed_actions but are **NOT** exposed here:
-forgetting WiFi drops the bed off the network (and the only path to it
-is the network — see the project notes on the BLE dead end), and
-deactivate unpairs it from the account. Neither is recoverable from
-Home Assistant. `device_reset` is not exposed either; the server does
-not grant it.
+  `allowed_actions` is a **UI capability list** — the right question for
+  "should this control exist?", the wrong answer for "what do I call?".
+  `POST /v1/devices/{id}/action` accepts only `reboot` / `forget_wifi`
+  (measured 2026-07-26); everything else has a dedicated endpoint.
 
-⚠️ The `value` payload for each action is UNVERIFIED. `openapi.yaml`
-documents it only as "action-specific payload (e.g. brightness level)",
-so the shapes below are the best reading of the enum, not observed
-traffic. A rejected action surfaces as a 400 and changes nothing.
+⚠️ `device_forget_wifi` and `device_deactivate` are permitted by the
+account and deliberately NOT exposed. Forgetting WiFi strands the bed —
+the network is the only path to it, there is no BLE surface and every TCP
+port is closed — and deactivate unpairs it. Neither is recoverable from
+Home Assistant. `device_reset` the server does not grant.
 """
 
 from __future__ import annotations
 
 import logging
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 
-from homeassistant.components.button import ButtonEntity, ButtonEntityDescription
+from homeassistant.components.button import ButtonEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
+from .api import OrionApiClient
 from .coordinator import OrionDataUpdateCoordinator
 from .entity import OrionBaseEntity
 
 _LOGGER = logging.getLogger(__name__)
 
-# (description, api action name). The entity only gets created when the
-# action name is present in the device's own permissions.allowed_actions.
-_BUTTONS: tuple[tuple[ButtonEntityDescription, str], ...] = (
-    (
-        ButtonEntityDescription(
-            key="reboot",
-            name="Reboot Control Tower",
-            icon="mdi:restart",
-            entity_category=EntityCategory.CONFIG,
+
+@dataclass(frozen=True, kw_only=True)
+class OrionButtonDef:
+    """A button, its display gate, and how it is actually invoked."""
+
+    key: str
+    name: str
+    icon: str
+    # Capability name in permissions.allowed_actions — the DISPLAY gate.
+    gate: str
+    # How to perform it — the DISPATCH. Takes (client, device_id).
+    call: Callable[[OrionApiClient, str], Awaitable[dict]]
+
+
+BUTTONS: tuple[OrionButtonDef, ...] = (
+    OrionButtonDef(
+        key="reboot",
+        name="Reboot Control Tower",
+        icon="mdi:restart",
+        gate="device_reboot",
+        # Bare "reboot" — NOT the enum spelling "device_reboot".
+        call=lambda client, device_id: client.device_action(
+            device_id=device_id, action="reboot"
         ),
-        "device_reboot",
     ),
-    (
-        ButtonEntityDescription(
-            key="split_zones",
-            name="Split Zones",
-            icon="mdi:call-split",
-            entity_category=EntityCategory.CONFIG,
-        ),
-        "split",
+    OrionButtonDef(
+        key="split_zones",
+        name="Split Zones",
+        icon="mdi:call-split",
+        gate="split",
+        call=lambda client, device_id: client.split_user_zones(device_id),
     ),
-    (
-        ButtonEntityDescription(
-            key="swap_sides",
-            name="Swap Sides",
-            icon="mdi:swap-horizontal",
-            entity_category=EntityCategory.CONFIG,
-        ),
-        "swap",
+    OrionButtonDef(
+        key="swap_sides",
+        name="Swap Sides",
+        icon="mdi:swap-horizontal",
+        gate="swap",
+        call=lambda client, device_id: client.swap_user_sides(device_id),
     ),
 )
 
@@ -79,16 +90,14 @@ async def async_setup_entry(
         if not device_id:
             continue
         allowed = coordinator.device_allowed_actions(device_id)
-        for description, action in _BUTTONS:
-            if action not in allowed:
+        for definition in BUTTONS:
+            if definition.gate not in allowed:
                 _LOGGER.debug(
                     "Orion device %s does not permit '%s'; button not created",
-                    device_id, action,
+                    device_id, definition.gate,
                 )
                 continue
-            entities.append(
-                OrionActionButton(coordinator, device_id, description, action)
-            )
+            entities.append(OrionActionButton(coordinator, device_id, definition))
 
     async_add_entities(entities)
 
@@ -96,25 +105,24 @@ async def async_setup_entry(
 class OrionActionButton(OrionBaseEntity, ButtonEntity):
     """Fires one device action. No state — the API exposes none for these."""
 
+    _attr_entity_category = EntityCategory.CONFIG
+
     def __init__(
         self,
         coordinator: OrionDataUpdateCoordinator,
         device_id: str,
-        description: ButtonEntityDescription,
-        action: str,
+        definition: OrionButtonDef,
     ) -> None:
         super().__init__(coordinator, device_id)
-        self.entity_description = description
-        self._action = action
-        self._attr_unique_id = f"{device_id}_action_{description.key}"
+        self._def = definition
+        self._attr_name = definition.name
+        self._attr_icon = definition.icon
+        self._attr_unique_id = f"{device_id}_action_{definition.key}"
 
     async def async_press(self) -> None:
-        """Send the action. Uses the device UUID, not the serial."""
+        """Invoke this button's own endpoint."""
         _LOGGER.info(
-            "Orion device action '%s' on %s", self._action, self._device_id
+            "Orion button '%s' pressed on device %s", self._def.key, self._device_id
         )
-        await self.coordinator.api_client.device_action(
-            device_id=self._device_id,
-            action=self._action,
-        )
+        await self._def.call(self.coordinator.api_client, self._device_id)
         await self.coordinator.async_request_refresh()

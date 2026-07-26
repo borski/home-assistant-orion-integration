@@ -32,10 +32,6 @@ async def async_setup_entry(
         entities.append(OrionPowerSwitch(coordinator, device_id))
         entities.append(OrionAwayModeSwitch(coordinator, device_id))
         entities.append(OrionScheduleSwitch(coordinator, device_id))
-        # Gated on the server's own permissions, so an action this account
-        # cannot perform never appears as a control at all.
-        if "device_quiet_mode" in coordinator.device_allowed_actions(device_id):
-            entities.append(OrionQuietModeSwitch(coordinator, device_id))
 
     async_add_entities(entities)
 
@@ -211,56 +207,3 @@ class OrionScheduleSwitch(OrionBaseEntity, SwitchEntity):
             {"enabled": False}, action="disable"
         )
         await self.coordinator.async_request_refresh()
-
-
-class OrionQuietModeSwitch(OrionBaseEntity, SwitchEntity):
-    """Control Tower quiet mode.
-
-    Written via ``POST /v1/devices/{deviceId}/action`` with action
-    ``device_quiet_mode``; read back from the live snapshot's top-level
-    ``quiet_mode`` field.
-
-    ⚠️ The action endpoint takes the device **UUID**, unlike the live
-    power/temp endpoints which take the ``serial_number``.
-
-    ⚠️ The boolean ``value`` payload is inferred, not observed — the spec
-    documents ``value`` only as "action-specific payload". If the server
-    rejects it the call 400s and the device is unchanged.
-    """
-
-    _attr_name = "Quiet Mode"
-    _attr_icon = "mdi:volume-off"
-
-    def __init__(
-        self,
-        coordinator: OrionDataUpdateCoordinator,
-        device_id: str,
-    ) -> None:
-        super().__init__(coordinator, device_id)
-        self._attr_unique_id = f"{device_id}_quiet_mode"
-
-    @property
-    def available(self) -> bool:
-        """Only available once the live snapshot actually reports the field."""
-        return (
-            super().available
-            and self.coordinator.device_quiet_mode(self._device_id) is not None
-        )
-
-    @property
-    def is_on(self) -> bool | None:
-        return self.coordinator.device_quiet_mode(self._device_id)
-
-    async def _set(self, value: bool) -> None:
-        await self.coordinator.api_client.device_action(
-            device_id=self._device_id,
-            action="device_quiet_mode",
-            value=value,
-        )
-        await self.coordinator.async_request_refresh()
-
-    async def async_turn_on(self, **kwargs: Any) -> None:
-        await self._set(True)
-
-    async def async_turn_off(self, **kwargs: Any) -> None:
-        await self._set(False)

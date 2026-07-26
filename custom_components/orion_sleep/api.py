@@ -361,10 +361,29 @@ class OrionApiClient:
     ) -> dict:
         """POST /v1/devices/{deviceId}/action — perform device action.
 
-        Not a power endpoint. Valid actions (per DeviceAllowedAction enum):
-        split, swap, device_name, device_orientation, device_led_brightness,
-        device_quiet_mode, device_reboot, device_reset, device_forget_wifi,
-        device_deactivate, invite_user, add_new_guest, remove_guest.
+        🔴 MEASURED 2026-07-26, against the live API: this endpoint accepts
+        **only two** values, and it wants the BARE name::
+
+            reboot        forget_wifi
+
+        Anything else returns::
+
+            400 {"success": false,
+                 "error": "Invalid action_type. Must be \\"reboot\\" or \\"forget_wifi\\""}
+
+        The 12-member `DeviceAllowedAction` enum and the `allowed_actions`
+        array on `GET /v1/devices` are a **UI capability list** — they tell
+        the app which controls to render, NOT what this endpoint takes.
+        Each of those capabilities is performed by its own endpoint, e.g.::
+
+            split  -> POST /v1/sleep-configurations/user-split-user-zones
+            swap   -> POST /v1/sleep-configurations/user-swap-user-sides
+            name   -> PUT  /v1/devices/{deviceId}
+
+        `device_quiet_mode` and `device_led_brightness` are readable in the
+        live snapshot but have **no discovered write path at all**.
+
+        Not a power endpoint either — power is `PUT .../live[/zones/{id}]`.
         """
         await self.ensure_valid_token()
         body: dict[str, Any] = {"action": action}
@@ -372,6 +391,34 @@ class OrionApiClient:
             body["value"] = value
         return await self._request(
             "POST", f"/v1/devices/{device_id}/action", json_data=body
+        )
+
+    async def split_user_zones(self, device_id: str) -> dict:
+        """POST /v1/sleep-configurations/user-split-user-zones.
+
+        Splits the device into independent per-side temperature zones.
+        This is NOT reachable through `/action` — see the note on
+        `device_action` about `allowed_actions` being a UI capability
+        list rather than that endpoint's contract.
+        """
+        await self.ensure_valid_token()
+        return await self._request(
+            "POST",
+            "/v1/sleep-configurations/user-split-user-zones",
+            json_data={"deviceId": device_id},
+        )
+
+    async def swap_user_sides(self, device_id: str) -> dict:
+        """POST /v1/sleep-configurations/user-swap-user-sides.
+
+        Swaps which user is assigned to which side. Also not reachable
+        through `/action`.
+        """
+        await self.ensure_valid_token()
+        return await self._request(
+            "POST",
+            "/v1/sleep-configurations/user-swap-user-sides",
+            json_data={"deviceId": device_id},
         )
 
     async def activate_device(self, device_id: str, model: str) -> dict:
