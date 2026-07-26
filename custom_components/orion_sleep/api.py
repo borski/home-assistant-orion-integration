@@ -386,8 +386,15 @@ class OrionApiClient:
         Not a power endpoint either — power is `PUT .../live[/zones/{id}]`.
         """
         await self.ensure_valid_token()
-        body: dict[str, Any] = {"action": action}
+        # The request key is `action_type`, NOT `action`. Proven by two
+        # calls: `action="device_led_brightness"` and `action="reboot"`
+        # returned the *same* "Invalid action_type" error — so the server
+        # was never reading `action` at all. Sending `action` means this
+        # endpoint has never worked.
+        body: dict[str, Any] = {"action_type": action}
         if value is not None:
+            # No observed action takes a payload (`reboot`/`forget_wifi`
+            # are both bare), so this key name is still unverified.
             body["value"] = value
         return await self._request(
             "POST", f"/v1/devices/{device_id}/action", json_data=body
