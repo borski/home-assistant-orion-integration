@@ -26,6 +26,7 @@ from homeassistant.components.button import ButtonEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .api import OrionApiClient
@@ -44,8 +45,11 @@ class OrionButtonDef:
     icon: str
     # Capability name in permissions.allowed_actions — the DISPLAY gate.
     gate: str
-    # How to perform it — the DISPATCH. Takes (client, device_id).
-    call: Callable[[OrionApiClient, str], Awaitable[dict]]
+    # How to perform it — the DISPATCH. Takes (client, device_id, serial).
+    # Both identifiers are passed because the endpoints disagree about
+    # which one they want: /action needs the SERIAL, while the
+    # sleep-configuration endpoints take deviceId in the body.
+    call: Callable[[OrionApiClient, str, str], Awaitable[dict]]
 
 
 BUTTONS: tuple[OrionButtonDef, ...] = (
@@ -54,9 +58,10 @@ BUTTONS: tuple[OrionButtonDef, ...] = (
         name="Reboot Control Tower",
         icon="mdi:restart",
         gate="device_reboot",
-        # Bare "reboot" — NOT the enum spelling "device_reboot".
-        call=lambda client, device_id: client.device_action(
-            device_id=device_id, action="reboot"
+        # Bare "reboot" (not "device_reboot"), keyed as action_type,
+        # addressed by SERIAL. All three were wrong in the first cut.
+        call=lambda client, device_id, serial: client.device_action(
+            device_serial=serial, action="reboot"
         ),
     ),
     OrionButtonDef(
@@ -64,14 +69,14 @@ BUTTONS: tuple[OrionButtonDef, ...] = (
         name="Split Zones",
         icon="mdi:call-split",
         gate="split",
-        call=lambda client, device_id: client.split_user_zones(device_id),
+        call=lambda client, device_id, serial: client.split_user_zones(device_id),
     ),
     OrionButtonDef(
         key="swap_sides",
         name="Swap Sides",
         icon="mdi:swap-horizontal",
         gate="swap",
-        call=lambda client, device_id: client.swap_user_sides(device_id),
+        call=lambda client, device_id, serial: client.swap_user_sides(device_id),
     ),
 )
 
@@ -124,5 +129,10 @@ class OrionActionButton(OrionBaseEntity, ButtonEntity):
         _LOGGER.info(
             "Orion button '%s' pressed on device %s", self._def.key, self._device_id
         )
-        await self._def.call(self.coordinator.api_client, self._device_id)
+        serial = self._get_device().get("serial_number")
+        if not serial:
+            raise HomeAssistantError(
+                f"No serial_number for Orion device {self._device_id}"
+            )
+        await self._def.call(self.coordinator.api_client, self._device_id, str(serial))
         await self.coordinator.async_request_refresh()

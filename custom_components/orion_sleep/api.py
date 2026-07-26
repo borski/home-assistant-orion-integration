@@ -357,7 +357,7 @@ class OrionApiClient:
         )
 
     async def device_action(
-        self, device_id: str, action: str, value: Any | None = None
+        self, device_serial: str, action: str, value: Any | None = None
     ) -> dict:
         """POST /v1/devices/{deviceId}/action — perform device action.
 
@@ -383,6 +383,11 @@ class OrionApiClient:
         `device_quiet_mode` and `device_led_brightness` are readable in the
         live snapshot but have **no discovered write path at all**.
 
+        🔴 Takes the **serial_number**, NOT the UUID. Sending the UUID
+        returns `404 {"success": false, "error": "Device not found"}` —
+        the same identifier rule as the live endpoints, despite the spec
+        naming this path parameter `deviceId`.
+
         Not a power endpoint either — power is `PUT .../live[/zones/{id}]`.
         """
         await self.ensure_valid_token()
@@ -397,7 +402,7 @@ class OrionApiClient:
             # are both bare), so this key name is still unverified.
             body["value"] = value
         return await self._request(
-            "POST", f"/v1/devices/{device_id}/action", json_data=body
+            "POST", f"/v1/devices/{device_serial}/action", json_data=body
         )
 
     async def split_user_zones(self, device_id: str) -> dict:
