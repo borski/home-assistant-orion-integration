@@ -563,19 +563,14 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
                 ]
         return []
 
-    # ── Device-level actions (POST /v1/devices/{deviceId}/action) ─────
-    #
-    # NOTE the identifier flip: the action endpoint takes the device's
-    # UUID `id`, while the live endpoints take `serial_number`. Getting
-    # this backwards is a 403 on one and a 404 on the other.
+    # ── Device-level capabilities and diagnostics ─────────────────────
 
     def device_allowed_actions(self, device_id: str) -> set[str]:
-        """Actions the *server* says this account may perform.
+        """UI capabilities the server exposes for this account.
 
         Sourced from `permissions.allowed_actions` on `GET /v1/devices`.
-        Entities gate their own existence on this, so an action the
-        account cannot perform never appears as a control at all rather
-        than appearing and failing with a 400 when pressed.
+        These values determine which controls the app renders. They are not
+        accepted verbatim by the `/action` endpoint.
         """
         for device in self.devices:
             if device.get("id") == device_id:

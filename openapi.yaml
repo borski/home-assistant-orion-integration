@@ -332,7 +332,7 @@ paths:
       description: |
         Updates device-level metadata (name, orientation, timezone, etc.).
         Used for the "Device Settings" screen. Does **not** control power or
-        temperature — use `/v1/devices/{deviceId}/live[/zones/{zoneId}]` for that.
+        temperature — use `/v1/devices/{serial_number}/live[/zones/{zoneId}]` for that.
 
         Decompiled bytecode reference: `updateDevice` at line 488978 of the
         Hermes bundle; URL built via `HermesInternal.concat('/v1/devices/', id)`.
@@ -367,7 +367,7 @@ paths:
         "401":
           $ref: "#/components/responses/Unauthorized"
 
-  /v1/devices/{deviceId}/live:
+  /v1/devices/{serial_number}/live:
     put:
       operationId: updateLiveDeviceZones
       summary: Bulk update all zones (power / temperature)
@@ -390,7 +390,7 @@ paths:
         from fahrenheit or relative scales.
       tags: [Devices]
       parameters:
-        - $ref: "#/components/parameters/DeviceIdPath"
+        - $ref: "#/components/parameters/SerialNumberPath"
       requestBody:
         required: true
         content:
@@ -430,7 +430,7 @@ paths:
         "404":
           description: Device not found
 
-  /v1/devices/{deviceId}/live/zones/{zoneId}:
+  /v1/devices/{serial_number}/live/zones/{zoneId}:
     put:
       operationId: updateLiveDeviceZone
       summary: Update a single zone (power / temperature)
@@ -444,7 +444,7 @@ paths:
         At least one of `on` or `temp` must be provided.
       tags: [Devices]
       parameters:
-        - $ref: "#/components/parameters/DeviceIdPath"
+        - $ref: "#/components/parameters/SerialNumberPath"
         - name: zoneId
           in: path
           required: true
@@ -486,37 +486,40 @@ paths:
         "404":
           description: Device or zone not found
 
-  /v1/devices/{deviceId}/action:
+  /v1/devices/{serial_number}/action:
     post:
       operationId: deviceAction
       summary: Perform a device-level action
       description: |
-        Executes a named device action (quiet mode, reboot, LED brightness,
-        forget wifi, reset, etc.). The set of allowed actions is carried on
-        each device as `permissions.allowed_actions` in `GET /v1/devices`.
+        Executes one of the two actions accepted by this route: `reboot` or
+        `forget_wifi`.
 
         **This is NOT a power endpoint.** Turning the mattress on/off goes
-        through `PUT /v1/devices/{deviceId}/live[/zones/{zoneId}]`. The
-        `DeviceAllowedAction` enum in the bundle (line 518877) contains no
-        `turn_on` / `turn_off` / `power_*` member.
+        through `PUT /v1/devices/{serial_number}/live[/zones/{zoneId}]`.
 
-        Decompiled bytecode reference: `deviceAction` at line 489446;
-        URL `'/v1/devices/' + id + '/action'`.
+        MEASURED 2026-07-26: the path takes `serial_number`, not the device
+        UUID. The request key is `action_type`, not `action`. Any other action
+        returns `400 Invalid action_type. Must be "reboot" or "forget_wifi"`.
+        A successful `reboot` returned 200 and reset network uptime.
+
+        `permissions.allowed_actions` and the decompiled
+        `DeviceAllowedAction` enum are UI capability identifiers. They are not
+        the accepted values for this endpoint. LED brightness and quiet mode
+        are readable in live state but have no discovered write route.
       tags: [Devices]
       parameters:
-        - $ref: "#/components/parameters/DeviceIdPath"
+        - $ref: "#/components/parameters/SerialNumberPath"
       requestBody:
         required: true
         content:
           application/json:
             schema:
               type: object
-              required: [action]
+              additionalProperties: false
+              required: [action_type]
               properties:
-                action:
-                  $ref: "#/components/schemas/DeviceAllowedAction"
-                value:
-                  description: Action-specific payload (e.g. brightness level).
+                action_type:
+                  $ref: "#/components/schemas/DeviceActionType"
       responses:
         "200":
           description: Action accepted
@@ -524,6 +527,8 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: Device not found. A JSON response indicates a real route with the wrong serial.
 
   /v1/devices/{deviceId}/activate:
     post:
@@ -1610,6 +1615,14 @@ components:
         type: string
         format: uuid
 
+    SerialNumberPath:
+      name: serial_number
+      in: path
+      required: true
+      description: Device serial number returned by `GET /v1/devices`.
+      schema:
+        type: string
+
   schemas:
     AuthTokens:
       type: object
@@ -1669,7 +1682,7 @@ components:
       type: object
       description: |
         Partial update to a single zone's live state, sent to
-        `PUT /v1/devices/{deviceId}/live[/zones/{zoneId}]`.
+        `PUT /v1/devices/{serial_number}/live[/zones/{zoneId}]`.
         At least one of `on` or `temp` must be provided.
       minProperties: 1
       properties:
@@ -1677,7 +1690,7 @@ components:
           type: string
           description: |
             Zone id (e.g. `zone_a`, `zone_b`). Required when used inside
-            the `zones` array of `PUT /v1/devices/{deviceId}/live`;
+            the `zones` array of `PUT /v1/devices/{serial_number}/live`;
             omitted for the per-zone endpoint where the id is in the path.
         on:
           type: boolean
@@ -1687,16 +1700,25 @@ components:
           format: float
           description: Target temperature in the device's native unit (°C for OSCT001-1).
 
+    DeviceActionType:
+      type: string
+      description: |
+        Actions accepted by `POST /v1/devices/{serial_number}/action`.
+        Measured against the live API on 2026-07-26.
+      enum:
+        - reboot
+        - forget_wifi
+
     DeviceAllowedAction:
       type: string
       description: |
-        Action names accepted by `POST /v1/devices/{deviceId}/action`.
-        Extracted from the `DeviceAllowedAction` enum in the decompiled
-        bundle (line 518877) and the `permissions.allowed_actions` array
-        returned by `GET /v1/devices`.
+        UI capability identifiers extracted from the decompiled app and
+        returned by `permissions.allowed_actions` in `GET /v1/devices`.
+        These values tell the app which controls to render. They are not the
+        values accepted by `POST /v1/devices/{serial_number}/action`.
 
         **No on/off/power action exists in this enum** — power is controlled
-        via `PUT /v1/devices/{deviceId}/live[/zones/{zoneId}]`.
+        via `PUT /v1/devices/{serial_number}/live[/zones/{zoneId}]`.
       enum:
         - split
         - swap

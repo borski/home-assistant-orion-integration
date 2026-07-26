@@ -65,7 +65,7 @@ https://api1.orionbed.com
 | GET | `/v1/devices/{serial_number}/live` | Bearer | **Live runtime snapshot** (zones with `on`/`temp`, status, sensors, firmware). Path uses `serial_number`, NOT UUID. |
 | PUT | `/v1/devices/{serial_number}/live` | Bearer | **Canonical power/temp primitive.** Path uses `serial_number`, NOT UUID (UUID returns `403 "Device not found"`). Body: `{"zones": [{"id": "zone_a", "on": bool, "temp": float}, ...]}`. Each zone requires `id` and at least one of `on`/`temp` (Celsius). |
 | PUT | `/v1/devices/{serial_number}/live/zones/{zoneId}` | Bearer | Single-zone power/temp. Path uses `serial_number`. Body: `{on?, temp?}` with `minProperties: 1`. |
-| POST | `/v1/devices/{deviceId}/action` | Bearer | Device action (quiet_mode, reboot, LED brightness, etc.). **No power action** — `DeviceAllowedAction` enum contains no on/off. Body: `{"action": "...", "value"?: ...}`. |
+| POST | `/v1/devices/{serial_number}/action` | Bearer | **Measured.** Accepts only `{"action_type": "reboot"}` or `{"action_type": "forget_wifi"}`. Uses serial number, not UUID. LED brightness and quiet mode have no discovered write route. |
 | POST | `/v1/devices/{deviceId}/activate` | Bearer | Pair device to account. Body: `{"model": "OSCT001-1"}`. |
 | POST | `/v1/devices/{deviceId}/deactivate` | Bearer | Unpair device. |
 | POST | `/v1/devices/{deviceId}/update` | Bearer | Trigger firmware update. |
@@ -79,6 +79,8 @@ https://api1.orionbed.com
 | `/v1/sleep-configurations/temperature` | Unverified | PUT to set temp — not tested against live API |
 | `/v1/sleep-schedules?action=enable` | Unverified | Schedule enable/disable — body format `{"enabled": bool}` not confirmed |
 | `/v1/session-state` | Returns onboarding state | `{patch_step, is_survey_complete, ...}` — NOT sleep session state |
+| LED brightness write | No route discovered | Readable as `live.led_brightness`. The `/action` route rejects `device_led_brightness`. Capture the mobile app request before exposing a Number entity. |
+| Quiet mode write | No route discovered | Readable as `live.quiet_mode`. The `/action` route rejects `device_quiet_mode`. |
 
 ### Real API Response Shapes
 
@@ -232,7 +234,7 @@ Entities read from coordinator:
 ### Token Management
 - `_token_expired(margin_seconds=60)` — checks `time.time() + 60` against `expires_at`
 - `ensure_valid_token()` — auto-refreshes if expired
-- `_refresh_tokens()` — handles both nested (`response.session`) and flat response shapes
+- `_refresh_tokens()` — handles both nested (`response.session`) and flat response shapes. Calls are serialized so rotating refresh tokens cannot race.
 - `set_token_refresh_callback(callback)` — called after successful refresh to persist tokens
 
 ### Action Methods
@@ -241,9 +243,9 @@ Entities read from coordinator:
 | `set_temperature(device_id, temperature, zone_id)` | `PUT /v1/sleep-configurations/temperature` | **Unverified** (prefer `update_live_device_zone[s]`) |
 | `set_user_away(user_id, is_away)` | `POST /v1/sleep-configurations/user-away` | Working (used by away-mode switch; presence override) |
 | `update_device(device_id, **fields)` | `PUT /v1/devices/{deviceId}` | Metadata updates (name/orientation/timezone) |
-| `update_live_device_zones(device_id, zones)` | `PUT /v1/devices/{deviceId}/live` | **Canonical power primitive** (used by power switch) |
-| `update_live_device_zone(device_id, zone_id, on=, temp=)` | `PUT /v1/devices/{deviceId}/live/zones/{zoneId}` | Per-zone power/temp |
-| `device_action(device_id, action, value=)` | `POST /v1/devices/{deviceId}/action` | quiet_mode/reboot/etc. — NOT for power |
+| `update_live_device_zones(serial_number, zones)` | `PUT /v1/devices/{serial_number}/live` | **Canonical power primitive** (used by power switch) |
+| `update_live_device_zone(serial_number, zone_id, on=, temp=)` | `PUT /v1/devices/{serial_number}/live/zones/{zoneId}` | Per-zone power/temp |
+| `device_action(serial_number, action)` | `POST /v1/devices/{serial_number}/action` | Measured values: `reboot`, `forget_wifi`. Uses body key `action_type`. |
 | `activate_device(device_id, model)` | `POST /v1/devices/{deviceId}/activate` | Pair device |
 | `deactivate_device(device_id)` | `POST /v1/devices/{deviceId}/deactivate` | Unpair device |
 | `trigger_firmware_update(device_id)` | `POST /v1/devices/{deviceId}/update` | Firmware update |

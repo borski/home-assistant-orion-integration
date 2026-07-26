@@ -376,7 +376,7 @@ class OrionApiClient:
     async def device_action(
         self, device_serial: str, action: str, value: Any | None = None
     ) -> dict:
-        """POST /v1/devices/{deviceId}/action — perform device action.
+        """POST /v1/devices/{serial_number}/action — perform device action.
 
         🔴 MEASURED 2026-07-26, against the live API: this endpoint accepts
         **only two** values, and it wants the BARE name::
