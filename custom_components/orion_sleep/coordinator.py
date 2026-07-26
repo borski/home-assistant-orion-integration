@@ -68,9 +68,7 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
         self.user_id: str = ""
         self.partner_user: dict = {}
         self.partner_update_ok = False
-        self.partner_device_serial = str(
-            config_entry.data.get(CONF_PARTNER_DEVICE_SERIAL, "")
-        )
+        self.partner_device_serial = str(config_entry.data.get(CONF_PARTNER_DEVICE_SERIAL, ""))
         self.partner_mapping_valid = bool(self.partner_device_serial)
 
         # Maps device serial_number -> UUID so the WS message handler
@@ -91,9 +89,7 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
         try:
             self.user = await self.api_client.get_current_user()
             self.user_id = self.user.get("id", "")
-            self.devices = util.dedupe_devices_by_id(
-                await self.api_client.list_devices()
-            )
+            self.devices = util.dedupe_devices_by_id(await self.api_client.list_devices())
         except OrionAuthError as err:
             raise ConfigEntryAuthFailed(str(err)) from err
         except (OrionApiError, OrionConnectionError) as err:
@@ -114,8 +110,7 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
                 len(self.devices) == 1
                 and len(self.partner_devices) == 1
                 and self.devices[0].get("serial_number") == self.partner_device_serial
-                and self.partner_devices[0].get("serial_number")
-                == self.partner_device_serial
+                and self.partner_devices[0].get("serial_number") == self.partner_device_serial
             )
             if not self.partner_mapping_valid:
                 _LOGGER.warning(
@@ -151,9 +146,7 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
 
         # Re-fetch devices each poll so zone/user changes surface.
         try:
-            self.devices = util.dedupe_devices_by_id(
-                await self.api_client.list_devices()
-            )
+            self.devices = util.dedupe_devices_by_id(await self.api_client.list_devices())
         except OrionAuthError as err:
             raise ConfigEntryAuthFailed(str(err)) from err
         except (OrionApiError, OrionConnectionError) as err:
@@ -210,9 +203,7 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
             _LOGGER.warning("Failed to fetch sleep schedules: %s", err)
 
         try:
-            insights_days = self.config_entry.options.get(
-                CONF_INSIGHTS_DAYS, DEFAULT_INSIGHTS_DAYS
-            )
+            insights_days = self.config_entry.options.get(CONF_INSIGHTS_DAYS, DEFAULT_INSIGHTS_DAYS)
             data["insights"] = await self.api_client.get_insights(days=insights_days)
         except OrionAuthError as err:
             raise ConfigEntryAuthFailed(str(err)) from err
@@ -297,9 +288,7 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
     # ── WebSocket integration ─────────────────────────────────────────
 
     @callback
-    def _handle_ws_message(
-        self, serial: str, msg_type: str, payload: dict[str, Any]
-    ) -> None:
+    def _handle_ws_message(self, serial: str, msg_type: str, payload: dict[str, Any]) -> None:
         """Merge a ``live_device.{snapshot,update}`` frame into state.
 
         Called from the WS receive loop. Both event types carry the same
@@ -558,9 +547,7 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
             return ids
         for device in self.devices:
             if device.get("id") == device_id:
-                return [
-                    z.get("id") for z in device.get("zones", []) or [] if z.get("id")
-                ]
+                return [z.get("id") for z in device.get("zones", []) or [] if z.get("id")]
         return []
 
     # ── Device-level capabilities and diagnostics ─────────────────────
@@ -600,3 +587,11 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
     def wifi_rssi(self, device_id: str) -> int | None:
         """Return device Wi-Fi RSSI from the live snapshot."""
         return live_state.wifi_rssi(self.live_devices.get(device_id))
+
+    def safety_info(self, device_id: str) -> dict | None:
+        """Return device safety details from the live snapshot."""
+        return live_state.safety_info(self.live_devices.get(device_id))
+
+    def has_safety_error(self, device_id: str) -> bool | None:
+        """Return whether the device reports a safety problem."""
+        return live_state.safety_error(self.live_devices.get(device_id))

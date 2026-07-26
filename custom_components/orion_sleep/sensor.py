@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from homeassistant.components.sensor import (
+    SensorDeviceClass,
     SensorEntity,
     SensorEntityDescription,
     SensorStateClass,
@@ -170,41 +171,31 @@ INSIGHT_SENSOR_DESCRIPTIONS: tuple[OrionSensorEntityDescription, ...] = (
         key="total_sleep_time",
         translation_key="total_sleep_time",
         icon="mdi:sleep",
-        value_fn=lambda session: _minutes_to_hm(
-            _get_sleep_summary(session).get("time_asleep")
-        ),
+        value_fn=lambda session: _minutes_to_hm(_get_sleep_summary(session).get("time_asleep")),
     ),
     OrionSensorEntityDescription(
         key="deep_sleep_time",
         translation_key="deep_sleep_time",
         icon="mdi:power-sleep",
-        value_fn=lambda session: _minutes_to_hm(
-            _get_sleep_summary(session).get("deep_sleep")
-        ),
+        value_fn=lambda session: _minutes_to_hm(_get_sleep_summary(session).get("deep_sleep")),
     ),
     OrionSensorEntityDescription(
         key="rem_sleep_time",
         translation_key="rem_sleep_time",
         icon="mdi:eye-refresh-outline",
-        value_fn=lambda session: _minutes_to_hm(
-            _get_sleep_summary(session).get("rem_sleep")
-        ),
+        value_fn=lambda session: _minutes_to_hm(_get_sleep_summary(session).get("rem_sleep")),
     ),
     OrionSensorEntityDescription(
         key="light_sleep_time",
         translation_key="light_sleep_time",
         icon="mdi:weather-night",
-        value_fn=lambda session: _minutes_to_hm(
-            _get_sleep_summary(session).get("light_sleep")
-        ),
+        value_fn=lambda session: _minutes_to_hm(_get_sleep_summary(session).get("light_sleep")),
     ),
     OrionSensorEntityDescription(
         key="awake_time",
         translation_key="awake_time",
         icon="mdi:eye-outline",
-        value_fn=lambda session: _minutes_to_hm(
-            _get_sleep_summary(session).get("awake_time")
-        ),
+        value_fn=lambda session: _minutes_to_hm(_get_sleep_summary(session).get("awake_time")),
     ),
     OrionSensorEntityDescription(
         key="heart_rate_avg",
@@ -267,9 +258,7 @@ INSIGHT_SENSOR_DESCRIPTIONS: tuple[OrionSensorEntityDescription, ...] = (
         translation_key="restless_time",
         icon="mdi:motion-sensor",
         # Format as human-friendly string like the app (3m 36s)
-        value_fn=lambda session: _seconds_to_ms(
-            _get_movement(session).get("total_seconds")
-        ),
+        value_fn=lambda session: _seconds_to_ms(_get_movement(session).get("total_seconds")),
     ),
 )
 
@@ -370,27 +359,19 @@ async def async_setup_entry(
         for description in INSIGHT_SENSOR_DESCRIPTIONS:
             entities.append(OrionSensorEntity(coordinator, device_id, description))
         for description in SCHEDULE_SENSOR_DESCRIPTIONS:
-            entities.append(
-                OrionScheduleSensorEntity(coordinator, device_id, description)
-            )
+            entities.append(OrionScheduleSensorEntity(coordinator, device_id, description))
         entities.append(OrionCurrentTempOffsetSensor(coordinator, device_id))
         entities.append(OrionWebSocketStateSensor(coordinator, device_id))
         for sensor_name in _TOPPER_SENSORS:
-            entities.append(
-                OrionLiveHeartRateSensor(coordinator, device_id, sensor_name)
-            )
-            entities.append(
-                OrionLiveBreathRateSensor(coordinator, device_id, sensor_name)
-            )
-            entities.append(
-                OrionSensorStatusTextSensor(coordinator, device_id, sensor_name)
-            )
+            entities.append(OrionLiveHeartRateSensor(coordinator, device_id, sensor_name))
+            entities.append(OrionLiveBreathRateSensor(coordinator, device_id, sensor_name))
+            entities.append(OrionSensorStatusTextSensor(coordinator, device_id, sensor_name))
         entities.append(OrionLedBrightnessSensor(coordinator, device_id))
+        entities.append(OrionFirmwareSensor(coordinator, device_id))
+        entities.append(OrionWifiSignalSensor(coordinator, device_id))
         if coordinator.has_partner_for_device(device_id):
             for description in INSIGHT_SENSOR_DESCRIPTIONS:
-                entities.append(
-                    OrionPartnerInsightSensor(coordinator, device_id, description)
-                )
+                entities.append(OrionPartnerInsightSensor(coordinator, device_id, description))
 
     async_add_entities(entities)
 
@@ -620,10 +601,7 @@ class _OrionLiveSensorBase(OrionBaseEntity, SensorEntity):
     @property
     def available(self) -> bool:
         # Available whenever we've seen any live frame for this device.
-        return (
-            self.coordinator.sensor_status_text(self._device_id, self._sensor_name)
-            is not None
-        )
+        return self.coordinator.sensor_status_text(self._device_id, self._sensor_name) is not None
 
     @property
     def extra_state_attributes(self) -> dict[str, Any] | None:
@@ -752,3 +730,68 @@ class OrionLedBrightnessSensor(OrionBaseEntity, SensorEntity):
     @property
     def native_value(self) -> int | None:
         return self.coordinator.device_led_brightness(self._device_id)
+
+
+class OrionFirmwareSensor(OrionBaseEntity, SensorEntity):
+    """Control board firmware with interface and topper details."""
+
+    _attr_translation_key = "firmware_version"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_icon = "mdi:chip"
+
+    def __init__(self, coordinator: OrionDataUpdateCoordinator, device_id: str) -> None:
+        super().__init__(coordinator, device_id)
+        self._attr_unique_id = f"{device_id}_firmware_version"
+
+    @property
+    def native_value(self) -> str | None:
+        firmware = self.coordinator.firmware(self._device_id)
+        return str(firmware["cb"]) if firmware and firmware.get("cb") else None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any] | None:
+        attrs: dict[str, Any] = {}
+        firmware = self.coordinator.firmware(self._device_id)
+        if firmware and firmware.get("ib") is not None:
+            attrs["interface_board"] = firmware["ib"]
+        for sensor_name in _TOPPER_SENSORS:
+            block = self.coordinator._sensor_block(self._device_id, sensor_name)
+            if not block:
+                continue
+            if block.get("firmware_version") is not None:
+                attrs[f"{sensor_name}_firmware"] = block["firmware_version"]
+            if block.get("hardware_version") is not None:
+                attrs[f"{sensor_name}_hardware"] = block["hardware_version"]
+        return attrs or None
+
+
+class OrionWifiSignalSensor(OrionBaseEntity, SensorEntity):
+    """Control Tower Wi-Fi signal and connection details."""
+
+    _attr_translation_key = "wifi_signal"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_device_class = SensorDeviceClass.SIGNAL_STRENGTH
+    _attr_native_unit_of_measurement = "dBm"
+    _attr_state_class = SensorStateClass.MEASUREMENT
+
+    def __init__(self, coordinator: OrionDataUpdateCoordinator, device_id: str) -> None:
+        super().__init__(coordinator, device_id)
+        self._attr_unique_id = f"{device_id}_wifi_signal"
+
+    @property
+    def native_value(self) -> int | None:
+        return self.coordinator.wifi_rssi(self._device_id)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any] | None:
+        network = self.coordinator.network_info(self._device_id)
+        if not network:
+            return None
+        attrs = {
+            "ssid": network.get("name"),
+            "ip": network.get("ip"),
+            "mac": network.get("mac"),
+            "uptime": network.get("uptime"),
+            "last_seen": network.get("last_seen"),
+        }
+        return {key: value for key, value in attrs.items() if value is not None} or None

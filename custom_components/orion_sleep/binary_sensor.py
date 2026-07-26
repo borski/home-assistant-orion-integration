@@ -40,10 +40,9 @@ async def async_setup_entry(
             continue
         entities.append(OrionSessionActiveBinarySensor(coordinator, device_id))
         for sensor_name in _TOPPER_SENSORS:
-            entities.append(
-                OrionSensorOnBedBinarySensor(coordinator, device_id, sensor_name)
-            )
+            entities.append(OrionSensorOnBedBinarySensor(coordinator, device_id, sensor_name))
         entities.append(OrionQuietModeBinarySensor(coordinator, device_id))
+        entities.append(OrionSafetyProblemBinarySensor(coordinator, device_id))
 
     async_add_entities(entities)
 
@@ -121,10 +120,7 @@ class OrionSensorOnBedBinarySensor(OrionBaseEntity, BinarySensorEntity):
     def available(self) -> bool:
         # Report available whenever we have a live payload at all,
         # even if the individual sensor hasn't reported yet.
-        return (
-            self.coordinator.sensor_status_text(self._device_id, self._sensor_name)
-            is not None
-        )
+        return self.coordinator.sensor_status_text(self._device_id, self._sensor_name) is not None
 
 
 class OrionQuietModeBinarySensor(OrionBaseEntity, BinarySensorEntity):
@@ -154,11 +150,35 @@ class OrionQuietModeBinarySensor(OrionBaseEntity, BinarySensorEntity):
 
     @property
     def available(self) -> bool:
-        return (
-            super().available
-            and self.coordinator.device_quiet_mode(self._device_id) is not None
-        )
+        return super().available and self.coordinator.device_quiet_mode(self._device_id) is not None
 
     @property
     def is_on(self) -> bool | None:
         return self.coordinator.device_quiet_mode(self._device_id)
+
+
+class OrionSafetyProblemBinarySensor(OrionBaseEntity, BinarySensorEntity):
+    """Binary problem entity for Control Tower safety errors."""
+
+    _attr_translation_key = "safety_problem"
+    _attr_device_class = BinarySensorDeviceClass.PROBLEM
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(self, coordinator: OrionDataUpdateCoordinator, device_id: str) -> None:
+        super().__init__(coordinator, device_id)
+        self._attr_unique_id = f"{device_id}_safety_problem"
+
+    @property
+    def is_on(self) -> bool | None:
+        return self.coordinator.has_safety_error(self._device_id)
+
+    @property
+    def extra_state_attributes(self) -> dict | None:
+        safety = self.coordinator.safety_info(self._device_id)
+        if not safety:
+            return None
+        attrs = {
+            "error_codes": safety.get("error_codes"),
+            "error_descriptions": safety.get("error_descriptions"),
+        }
+        return {key: value for key, value in attrs.items() if value} or None

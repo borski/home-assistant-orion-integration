@@ -97,6 +97,13 @@ def safety_error(live: dict | None) -> bool | None:
     return bool(codes) if isinstance(codes, list) else False
 
 
+def safety_info(live: dict | None) -> dict | None:
+    """Return the full safety diagnostics block."""
+    status = live.get("status") if isinstance(live, dict) else None
+    value = status.get("safety") if isinstance(status, dict) else None
+    return value if isinstance(value, dict) else None
+
+
 def led_brightness(live: dict | None) -> int | None:
     """Return front-panel LED brightness from zero to one hundred."""
     value = live.get("led_brightness") if isinstance(live, dict) else None

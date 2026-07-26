@@ -3,12 +3,7 @@
 import importlib.util
 from pathlib import Path
 
-MODULE_PATH = (
-    Path(__file__).parent.parent
-    / "custom_components"
-    / "orion_sleep"
-    / "live_state.py"
-)
+MODULE_PATH = Path(__file__).parent.parent / "custom_components" / "orion_sleep" / "live_state.py"
 SPEC = importlib.util.spec_from_file_location("orion_live_state", MODULE_PATH)
 assert SPEC and SPEC.loader
 live_state = importlib.util.module_from_spec(SPEC)
@@ -56,11 +51,16 @@ def test_diagnostic_helpers():
     assert live_state.network_info(SAMPLE)["name"] == "WiFi"
     assert live_state.wifi_rssi(SAMPLE) == -55
     assert live_state.safety_error(SAMPLE) is False
+    assert live_state.safety_info(SAMPLE) == {
+        "error": False,
+        "error_codes": [],
+    }
     assert live_state.led_brightness(SAMPLE) == 60
 
 
 def test_safety_error_detects_flag_or_codes():
     assert live_state.safety_error({"status": {"safety": {"error": True}}}) is True
-    assert live_state.safety_error(
-        {"status": {"safety": {"error": False, "error_codes": ["E1"]}}}
-    ) is True
+    assert (
+        live_state.safety_error({"status": {"safety": {"error": False, "error_codes": ["E1"]}}})
+        is True
+    )
