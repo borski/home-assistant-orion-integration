@@ -497,3 +497,38 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
                     z.get("id") for z in device.get("zones", []) or [] if z.get("id")
                 ]
         return []
+
+    # ── Device-level actions (POST /v1/devices/{deviceId}/action) ─────
+    #
+    # NOTE the identifier flip: the action endpoint takes the device's
+    # UUID `id`, while the live endpoints take `serial_number`. Getting
+    # this backwards is a 403 on one and a 404 on the other.
+
+    def device_allowed_actions(self, device_id: str) -> set[str]:
+        """Actions the *server* says this account may perform.
+
+        Sourced from `permissions.allowed_actions` on `GET /v1/devices`.
+        Entities gate their own existence on this, so an action the
+        account cannot perform never appears as a control at all rather
+        than appearing and failing with a 400 when pressed.
+        """
+        for device in self.devices:
+            if device.get("id") == device_id:
+                perms = device.get("permissions") or {}
+                return set(perms.get("allowed_actions") or [])
+        return set()
+
+    def device_quiet_mode(self, device_id: str) -> bool | None:
+        """Quiet-mode state from the live snapshot."""
+        live = self.live_devices.get(device_id)
+        if not live or "quiet_mode" not in live:
+            return None
+        return bool(live.get("quiet_mode"))
+
+    def device_led_brightness(self, device_id: str) -> int | None:
+        """LED brightness (0-100) from the live snapshot."""
+        live = self.live_devices.get(device_id)
+        if not live:
+            return None
+        val = live.get("led_brightness")
+        return int(val) if val is not None else None

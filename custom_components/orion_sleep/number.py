@@ -46,7 +46,7 @@ async def async_setup_entry(
 ) -> None:
     """Set up Orion Sleep number entities."""
     coordinator: OrionDataUpdateCoordinator = entry.runtime_data
-    entities: list[OrionTempOffsetNumber] = []
+    entities: list[NumberEntity] = []
 
     for device in coordinator.devices:
         device_id = device.get("id")
@@ -58,6 +58,10 @@ async def async_setup_entry(
                     coordinator, device_id, key, trans_key, icon, field
                 )
             )
+        # Gated on the server's own permissions, so an action this account
+        # cannot perform never appears as a control at all.
+        if "device_led_brightness" in coordinator.device_allowed_actions(device_id):
+            entities.append(OrionLedBrightnessNumber(coordinator, device_id))
 
     async_add_entities(entities)
 
@@ -121,5 +125,60 @@ class OrionTempOffsetNumber(OrionBaseEntity, NumberEntity):
             day=day,
             field=self._schedule_field,
             celsius=celsius,
+        )
+        await self.coordinator.async_request_refresh()
+
+
+class OrionLedBrightnessNumber(OrionBaseEntity, NumberEntity):
+    """Control Tower LED brightness (0-100).
+
+    Written via ``POST /v1/devices/{deviceId}/action`` with action
+    ``device_led_brightness``; read back from the live snapshot's
+    top-level ``led_brightness``.
+
+    ⚠️ Device **UUID**, not serial — the action endpoint differs from the
+    live power/temp endpoints in exactly this way.
+
+    ⚠️ The integer ``value`` payload and the 0-100 range are inferred from
+    the observed live value (100) and the field name, not from observed
+    write traffic. A wrong shape 400s and changes nothing.
+
+    The device also reports ``led_color`` {r,g,b}, but ``DeviceAllowedAction``
+    has no colour member, so colour is read-only as far as we can tell and
+    is deliberately not modelled as a light entity.
+    """
+
+    _attr_name = "LED Brightness"
+    _attr_icon = "mdi:brightness-6"
+    _attr_native_min_value = 0
+    _attr_native_max_value = 100
+    _attr_native_step = 1
+    _attr_mode = NumberMode.SLIDER
+
+    def __init__(
+        self,
+        coordinator: OrionDataUpdateCoordinator,
+        device_id: str,
+    ) -> None:
+        super().__init__(coordinator, device_id)
+        self._attr_unique_id = f"{device_id}_led_brightness"
+
+    @property
+    def available(self) -> bool:
+        return (
+            super().available
+            and self.coordinator.device_led_brightness(self._device_id) is not None
+        )
+
+    @property
+    def native_value(self) -> float | None:
+        val = self.coordinator.device_led_brightness(self._device_id)
+        return float(val) if val is not None else None
+
+    async def async_set_native_value(self, value: float) -> None:
+        await self.coordinator.api_client.device_action(
+            device_id=self._device_id,
+            action="device_led_brightness",
+            value=int(value),
         )
         await self.coordinator.async_request_refresh()
