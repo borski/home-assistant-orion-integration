@@ -405,34 +405,6 @@ class OrionApiClient:
             "POST", f"/v1/devices/{device_serial}/action", json_data=body
         )
 
-    async def split_user_zones(self, device_id: str) -> dict:
-        """POST /v1/sleep-configurations/user-split-user-zones.
-
-        Splits the device into independent per-side temperature zones.
-        This is NOT reachable through `/action` — see the note on
-        `device_action` about `allowed_actions` being a UI capability
-        list rather than that endpoint's contract.
-        """
-        await self.ensure_valid_token()
-        return await self._request(
-            "POST",
-            "/v1/sleep-configurations/user-split-user-zones",
-            json_data={"deviceId": device_id},
-        )
-
-    async def swap_user_sides(self, device_id: str) -> dict:
-        """POST /v1/sleep-configurations/user-swap-user-sides.
-
-        Swaps which user is assigned to which side. Also not reachable
-        through `/action`.
-        """
-        await self.ensure_valid_token()
-        return await self._request(
-            "POST",
-            "/v1/sleep-configurations/user-swap-user-sides",
-            json_data={"deviceId": device_id},
-        )
-
     async def activate_device(self, device_id: str, model: str) -> dict:
         """POST /v1/devices/{deviceId}/activate — pair/register a device."""
         await self.ensure_valid_token()

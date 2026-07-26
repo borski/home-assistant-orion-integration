@@ -9,6 +9,18 @@ conflating them is what broke the first cut of this platform:
   `POST /v1/devices/{id}/action` accepts only `reboot` / `forget_wifi`
   (measured 2026-07-26); everything else has a dedicated endpoint.
 
+⚠️ `split` and `swap` are NOT exposed despite appearing in
+`allowed_actions`. `openapi.yaml` documents them as
+`POST /v1/sleep-configurations/user-{split-user-zones,swap-user-sides}`,
+but both return a **bare `404 Not Found`** with no JSON body — the route
+does not exist on the server, exactly like `/v1/sleep-configurations/
+devices` already does. Measured 2026-07-26. Note the distinction: an
+app-level miss returns `404 {"success":false,"error":"Device not found"}`,
+a missing *route* returns bare text. Where the app really performs these
+is unknown; `PUT /v1/sleep-configurations/user-update`
+({deviceId, userId, side}) is the plausible candidate for swap, but it is
+untested and sits in the same unverified block of the spec.
+
 ⚠️ `device_forget_wifi` and `device_deactivate` are permitted by the
 account and deliberately NOT exposed. Forgetting WiFi strands the bed —
 the network is the only path to it, there is no BLE surface and every TCP
@@ -63,20 +75,6 @@ BUTTONS: tuple[OrionButtonDef, ...] = (
         call=lambda client, device_id, serial: client.device_action(
             device_serial=serial, action="reboot"
         ),
-    ),
-    OrionButtonDef(
-        key="split_zones",
-        name="Split Zones",
-        icon="mdi:call-split",
-        gate="split",
-        call=lambda client, device_id, serial: client.split_user_zones(device_id),
-    ),
-    OrionButtonDef(
-        key="swap_sides",
-        name="Swap Sides",
-        icon="mdi:swap-horizontal",
-        gate="swap",
-        call=lambda client, device_id, serial: client.swap_user_sides(device_id),
     ),
 )
 
