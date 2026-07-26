@@ -52,9 +52,45 @@
         "title": "Orion Sleep Options",
         "data": {
           "scan_interval": "Polling interval (seconds)",
-          "insights_days": "Days of sleep insights to fetch"
+          "insights_days": "Days of sleep insights to fetch",
+          "partner_action": "Partner account"
+        }
+      },
+      "partner_method": {
+        "title": "Link Partner Account",
+        "description": "Choose how your partner signs in to Orion Sleep.",
+        "data": {
+          "auth_method": "Login method"
+        }
+      },
+      "partner_email": {
+        "title": "Link Partner Account",
+        "description": "Enter your partner's Orion Sleep email. Orion will send a verification code.",
+        "data": {
+          "email": "Email address"
+        }
+      },
+      "partner_phone": {
+        "title": "Link Partner Account",
+        "description": "Enter your partner's 11 digit Orion Sleep phone number, including the leading 1.",
+        "data": {
+          "phone": "Phone number"
+        }
+      },
+      "partner_verify": {
+        "title": "Verify Partner Account",
+        "description": "Enter the verification code Orion sent to your partner.",
+        "data": {
+          "code": "Verification code"
         }
       }
+    },
+    "error": {
+      "cannot_connect": "Failed to connect to Orion Sleep API",
+      "invalid_code": "Invalid verification code",
+      "invalid_phone": "Phone number must include the leading 1 country code and be 11 digits total.",
+      "partner_device_ambiguous": "Partner linking requires both accounts to contain exactly one matching Orion bed.",
+      "unknown": "An unexpected error occurred"
     }
   },
   "entity": {

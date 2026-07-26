@@ -4,10 +4,7 @@ import importlib.util
 from pathlib import Path
 
 MODULE_PATH = (
-    Path(__file__).parent.parent
-    / "custom_components"
-    / "orion_sleep"
-    / "util.py"
+    Path(__file__).parent.parent / "custom_components" / "orion_sleep" / "util.py"
 )
 SPEC = importlib.util.spec_from_file_location("orion_util", MODULE_PATH)
 assert SPEC and SPEC.loader
@@ -43,9 +40,7 @@ INSIGHTS = {
             {"session_id": "s2", "zone_id": "zone_b"},
         ]
     },
-    "2026-05-29": {
-        "sessions": [{"session_id": "s3", "zone_id": "zone_a"}]
-    },
+    "2026-05-29": {"sessions": [{"session_id": "s3", "zone_id": "zone_a"}]},
 }
 
 
@@ -58,3 +53,22 @@ def test_latest_session_for_zone_uses_newest_match():
 def test_latest_session_for_zone_handles_malformed_values():
     assert util.latest_session_for_zone(None, "zone_a") is None
     assert util.latest_session_for_zone({"date": {"sessions": "bad"}}, "zone_a") is None
+
+
+def test_latest_session_uses_newest_valid_session():
+    assert util.latest_session(INSIGHTS)["session_id"] == "s3"
+    assert util.latest_session(None) is None
+    assert util.latest_session({"date": {"sessions": [None, "bad"]}}) is None
+
+
+def test_shared_device_serials_uses_physical_identity():
+    primary = [
+        {"id": "primary-a", "serial_number": "SERIAL-A"},
+        {"id": "primary-b", "serial_number": "SERIAL-B"},
+    ]
+    partner = [
+        {"id": "different-uuid", "serial_number": "SERIAL-A"},
+        {"id": "partner-c", "serial_number": "SERIAL-C"},
+    ]
+    assert util.shared_device_serials(primary, partner) == {"SERIAL-A"}
+    assert util.shared_device_serials(None, partner) == set()

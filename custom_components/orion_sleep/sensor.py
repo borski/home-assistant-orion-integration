@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass
-import logging
 from typing import Any
 
 from homeassistant.components.sensor import (
@@ -21,12 +21,25 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from .coordinator import OrionDataUpdateCoordinator
 from .entity import OrionBaseEntity
 
-
 # Topper sensors exposed on every WS payload. Mapping to zone_a/zone_b
 # isn't verified yet, so entities are named per sensor.
 _TOPPER_SENSORS: tuple[str, ...] = ("sensor1", "sensor2")
 
 _LOGGER = logging.getLogger(__name__)
+
+_INSIGHT_DISPLAY_NAMES = {
+    "sleep_score": "Sleep Score",
+    "total_sleep_time": "Total Sleep Time",
+    "deep_sleep_time": "Deep Sleep",
+    "rem_sleep_time": "REM Sleep",
+    "light_sleep_time": "Light Sleep",
+    "awake_time": "Awake Time",
+    "heart_rate_avg": "Heart Rate",
+    "breath_rate": "Breath Rate",
+    "hrv": "HRV",
+    "body_movement_rate": "Body Movement Rate",
+    "restless_time": "Restless Time",
+}
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────
@@ -119,6 +132,11 @@ def _get_score(coordinator_data: dict) -> float | None:
         if score is not None:
             return score
     return None
+
+
+def _get_partner_score(coordinator_data: dict) -> float | None:
+    """Get the most recent score returned by the partner account."""
+    return _get_score({"insights": coordinator_data.get("partner_insights", {})})
 
 
 # ── Sensor descriptions ───────────────────────────────────────────────────
@@ -368,6 +386,11 @@ async def async_setup_entry(
                 OrionSensorStatusTextSensor(coordinator, device_id, sensor_name)
             )
         entities.append(OrionLedBrightnessSensor(coordinator, device_id))
+        if coordinator.has_partner_for_device(device_id):
+            for description in INSIGHT_SENSOR_DESCRIPTIONS:
+                entities.append(
+                    OrionPartnerInsightSensor(coordinator, device_id, description)
+                )
 
     async_add_entities(entities)
 
@@ -390,6 +413,12 @@ class OrionSensorEntity(OrionBaseEntity, SensorEntity):
         self.entity_description = description
         self._attr_unique_id = f"{device_id}_{description.key}"
 
+    def _session(self) -> dict | None:
+        return self.coordinator.get_latest_session()
+
+    def _score(self) -> float | None:
+        return _get_score(self.coordinator.data or {})
+
     @property
     def native_value(self) -> Any:
         """Return the sensor value."""
@@ -398,10 +427,9 @@ class OrionSensorEntity(OrionBaseEntity, SensorEntity):
 
         # Sleep score is special — comes from overview, not session
         if self.entity_description.key == "sleep_score":
-            return _get_score(self.coordinator.data)
+            return self._score()
 
-        session = self.coordinator.get_latest_session()
-        return self.entity_description.value_fn(session)
+        return self.entity_description.value_fn(self._session())
 
     @property
     def extra_state_attributes(self) -> dict[str, Any] | None:
@@ -411,18 +439,50 @@ class OrionSensorEntity(OrionBaseEntity, SensorEntity):
 
         # Sleep score gets the quality rating
         if self.entity_description.key == "sleep_score":
-            score = _get_score(self.coordinator.data)
-            quality = _score_quality(score)
+            quality = _score_quality(self._score())
             if quality:
                 return {"quality_rating": quality}
             return None
 
         if self.entity_description.extra_attrs_fn is None:
             return None
-        session = self.coordinator.get_latest_session()
-        attrs = self.entity_description.extra_attrs_fn(session)
+        attrs = self.entity_description.extra_attrs_fn(self._session())
         # Filter out None values
         return {k: v for k, v in attrs.items() if v is not None} or None
+
+
+class OrionPartnerInsightSensor(OrionSensorEntity):
+    """Sleep insight from the independently authenticated partner account."""
+
+    entity_description: OrionSensorEntityDescription
+
+    def __init__(
+        self,
+        coordinator: OrionDataUpdateCoordinator,
+        device_id: str,
+        description: OrionSensorEntityDescription,
+    ) -> None:
+        super().__init__(coordinator, device_id, description)
+        self._attr_unique_id = f"{device_id}_partner_{description.key}"
+        display_name = _INSIGHT_DISPLAY_NAMES.get(
+            description.key, description.key.replace("_", " ").title()
+        )
+        self._attr_name = f"{coordinator.partner_name()} {display_name}"
+
+    def _session(self) -> dict | None:
+        return self.coordinator.get_latest_partner_session(self._device_id)
+
+    def _score(self) -> float | None:
+        return _get_partner_score(self.coordinator.data or {})
+
+    @property
+    def available(self) -> bool:
+        return (
+            super().available
+            and self.coordinator.has_partner_for_device(self._device_id)
+            and self.coordinator.partner_mapping_valid
+            and self.coordinator.partner_update_ok
+        )
 
 
 class OrionScheduleSensorEntity(OrionBaseEntity, SensorEntity):

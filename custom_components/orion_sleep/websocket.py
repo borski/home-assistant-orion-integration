@@ -290,7 +290,7 @@ class OrionWebSocketClient:
                     self._serial,
                 )
                 try:
-                    await self._api_client._refresh_tokens()  # noqa: SLF001
+                    await self._api_client.async_refresh_token(token)
                 except OrionAuthError:
                     self._set_state(OrionWsState.AUTH_FAILED)
                     return

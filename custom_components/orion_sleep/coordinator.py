@@ -16,11 +16,12 @@ from . import live_state, util
 from .api import OrionApiClient, OrionApiError, OrionAuthError, OrionConnectionError
 from .const import (
     CONF_INSIGHTS_DAYS,
+    CONF_PARTNER_DEVICE_SERIAL,
     CONF_SCAN_INTERVAL,
     DEFAULT_INSIGHTS_DAYS,
     DEFAULT_SCAN_INTERVAL,
 )
-from .websocket import OrionWebSocketManager, OrionWsState
+from .websocket import OrionWebSocketManager
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -37,6 +38,7 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
         hass: HomeAssistant,
         config_entry: OrionConfigEntry,
         api_client: OrionApiClient,
+        partner_api_client: OrionApiClient | None = None,
     ) -> None:
         interval = config_entry.options.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL)
         super().__init__(
@@ -47,8 +49,11 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
             update_interval=timedelta(seconds=interval),
         )
         self.api_client = api_client
+        self.partner_api_client = partner_api_client
         self.options = dict(config_entry.options)
+        self.reload_started = False
         self.devices: list[dict] = []
+        self.partner_devices: list[dict] = []
         # Live snapshots keyed by device id (UUID). Populated from
         # GET /v1/devices/{serial}/live on each poll AND from
         # live_device.{snapshot,update} frames on the per-device WebSocket.
@@ -61,6 +66,12 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
         self.live_devices: dict[str, dict] = {}
         self.user: dict = {}
         self.user_id: str = ""
+        self.partner_user: dict = {}
+        self.partner_update_ok = False
+        self.partner_device_serial = str(
+            config_entry.data.get(CONF_PARTNER_DEVICE_SERIAL, "")
+        )
+        self.partner_mapping_valid = bool(self.partner_device_serial)
 
         # Maps device serial_number -> UUID so the WS message handler
         # (which only knows the serial) can key into live_devices.
@@ -88,6 +99,41 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
         except (OrionApiError, OrionConnectionError) as err:
             raise UpdateFailed(f"Error fetching initial data: {err}") from err
 
+        await self._async_refresh_partner_identity()
+
+    async def _async_refresh_partner_identity(self) -> None:
+        """Refresh partner profile and device visibility when configured."""
+        if self.partner_api_client is None:
+            return
+        try:
+            self.partner_user = await self.partner_api_client.get_current_user()
+            self.partner_devices = util.dedupe_devices_by_id(
+                await self.partner_api_client.list_devices()
+            )
+            self.partner_mapping_valid = (
+                len(self.devices) == 1
+                and len(self.partner_devices) == 1
+                and self.devices[0].get("serial_number") == self.partner_device_serial
+                and self.partner_devices[0].get("serial_number")
+                == self.partner_device_serial
+            )
+            if not self.partner_mapping_valid:
+                _LOGGER.warning(
+                    "Partner device topology changed. Partner insights are disabled "
+                    "until the account is relinked"
+                )
+        except OrionAuthError as err:
+            self.partner_update_ok = False
+            self.partner_mapping_valid = False
+            _LOGGER.warning(
+                "Partner authentication failed. Replace it in Orion options: %s",
+                err,
+            )
+        except (OrionApiError, OrionConnectionError) as err:
+            self.partner_update_ok = False
+            self.partner_mapping_valid = False
+            _LOGGER.warning("Failed to initialize partner account: %s", err)
+
     async def _async_update_data(self) -> dict:
         """Poll mutable state."""
         try:
@@ -100,6 +146,7 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
         data: dict = {
             "schedules": {},
             "insights": {},
+            "partner_insights": (self.data or {}).get("partner_insights", {}),
         }
 
         # Re-fetch devices each poll so zone/user changes surface.
@@ -172,27 +219,61 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
         except (OrionApiError, OrionConnectionError) as err:
             _LOGGER.warning("Failed to fetch insights: %s", err)
 
+        if self.partner_api_client is not None:
+            await self._async_refresh_partner_identity()
+            try:
+                data["partner_insights"] = await self.partner_api_client.get_insights(
+                    days=insights_days
+                )
+                self.partner_update_ok = True
+            except OrionAuthError as err:
+                self.partner_update_ok = False
+                _LOGGER.warning(
+                    "Partner authentication failed. Replace it in Orion options: %s",
+                    err,
+                )
+            except (OrionApiError, OrionConnectionError) as err:
+                self.partner_update_ok = False
+                _LOGGER.warning("Failed to fetch partner insights: %s", err)
+
         return data
 
     def get_latest_session(self) -> dict | None:
         """Get the most recent sleep session from insights data."""
         insights = (self.data or {}).get("insights", {})
-        insights_data = insights.get("data", {})
-        if not insights_data:
-            return None
-
-        # Iterate dates in reverse chronological order
-        for date_key in sorted(insights_data.keys(), reverse=True):
-            day_data = insights_data[date_key]
-            sessions = day_data.get("sessions", [])
-            if sessions:
-                return sessions[-1]
-        return None
+        return util.latest_session(insights.get("data"))
 
     def get_latest_session_for_zone(self, zone_id: str) -> dict | None:
         """Get the most recent sleep session for one device zone."""
         insights = (self.data or {}).get("insights", {})
         return util.latest_session_for_zone(insights.get("data"), zone_id)
+
+    def get_latest_partner_session(self, device_id: str) -> dict | None:
+        """Get the newest partner session for an unambiguous shared bed."""
+        if not self.has_partner_for_device(device_id):
+            return None
+        insights = (self.data or {}).get("partner_insights", {})
+        return util.latest_session(insights.get("data"))
+
+    def partner_name(self) -> str:
+        """Return a stable display name for the linked partner account."""
+        for key in ("first_name", "name", "email", "phone"):
+            value = self.partner_user.get(key)
+            if value:
+                return str(value)
+        return "Partner"
+
+    def has_partner_for_device(self, device_id: str) -> bool:
+        """Return whether the partner account was verified for this bed."""
+        if self.partner_api_client is None or not self.partner_device_serial:
+            return False
+        primary = next((d for d in self.devices if d.get("id") == device_id), None)
+        if not primary:
+            return False
+        serial = primary.get("serial_number")
+        if not serial:
+            return False
+        return len(self.devices) == 1 and serial == self.partner_device_serial
 
     def get_today_schedule(self) -> dict | None:
         """Get today's sleep schedule for the current user."""
@@ -448,9 +529,7 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
 
     def zone_measured_temp(self, device_id: str, zone_id: str) -> float | None:
         """Measured temperature (°C), from `live.status.zones[].temp`."""
-        return live_state.zone_measured_temp(
-            self.live_devices.get(device_id), zone_id
-        )
+        return live_state.zone_measured_temp(self.live_devices.get(device_id), zone_id)
 
     def zone_is_on(self, device_id: str, zone_id: str) -> bool | None:
         """Power state for one zone, from `live.zones[].on`."""
@@ -464,9 +543,7 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
         been captured. Callers must treat any unrecognised value as unknown
         rather than guessing a direction.
         """
-        return live_state.zone_thermal_state(
-            self.live_devices.get(device_id), zone_id
-        )
+        return live_state.zone_thermal_state(self.live_devices.get(device_id), zone_id)
 
     def device_zone_ids(self, device_id: str) -> list[str]:
         """Zone ids for a device, preferring the live snapshot.

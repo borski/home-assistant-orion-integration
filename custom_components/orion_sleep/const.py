@@ -22,6 +22,17 @@ CONF_ACCESS_TOKEN = "access_token"
 CONF_REFRESH_TOKEN = "refresh_token"
 CONF_EXPIRES_AT = "expires_at"  # Unix timestamp
 
+# Optional partner account. Tokens live in config entry data. The configured
+# flag lives in options so adding or removing a partner triggers one reload.
+CONF_PARTNER_AUTH_METHOD = "partner_auth_method"
+CONF_PARTNER_AUTH_VALUE = "partner_auth_value"
+CONF_PARTNER_ACCESS_TOKEN = "partner_access_token"
+CONF_PARTNER_REFRESH_TOKEN = "partner_refresh_token"
+CONF_PARTNER_EXPIRES_AT = "partner_expires_at"
+CONF_PARTNER_CONFIGURED = "partner_configured"
+CONF_PARTNER_REVISION = "partner_revision"
+CONF_PARTNER_DEVICE_SERIAL = "partner_device_serial"
+
 # Options flow keys
 CONF_SCAN_INTERVAL = "scan_interval"  # polling interval in seconds
 DEFAULT_SCAN_INTERVAL = 600  # 10 minutes

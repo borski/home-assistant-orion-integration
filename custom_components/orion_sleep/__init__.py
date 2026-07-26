@@ -13,6 +13,9 @@ from .api import OrionApiClient
 from .const import (
     CONF_ACCESS_TOKEN,
     CONF_EXPIRES_AT,
+    CONF_PARTNER_ACCESS_TOKEN,
+    CONF_PARTNER_EXPIRES_AT,
+    CONF_PARTNER_REFRESH_TOKEN,
     CONF_REFRESH_TOKEN,
 )
 from .coordinator import OrionDataUpdateCoordinator
@@ -40,9 +43,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     )
 
     # Register token refresh callback to persist new tokens
+    expected_primary_refresh_token = entry.data[CONF_REFRESH_TOKEN]
+
     def on_token_refresh(
         access_token: str, refresh_token: str, expires_at: float
     ) -> None:
+        nonlocal expected_primary_refresh_token
+        if entry.data.get(CONF_REFRESH_TOKEN) != expected_primary_refresh_token:
+            return
+        expected_primary_refresh_token = refresh_token
         hass.config_entries.async_update_entry(
             entry,
             data={
@@ -55,7 +64,44 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     api_client.set_token_refresh_callback(on_token_refresh)
 
-    coordinator = OrionDataUpdateCoordinator(hass, entry, api_client)
+    partner_api_client: OrionApiClient | None = None
+    if entry.data.get(CONF_PARTNER_ACCESS_TOKEN):
+        expected_partner_refresh_token = entry.data.get(CONF_PARTNER_REFRESH_TOKEN, "")
+        partner_api_client = OrionApiClient(
+            session=session,
+            access_token=entry.data[CONF_PARTNER_ACCESS_TOKEN],
+            refresh_token=entry.data.get(CONF_PARTNER_REFRESH_TOKEN, ""),
+            expires_at=entry.data.get(CONF_PARTNER_EXPIRES_AT, 0),
+        )
+
+        def on_partner_token_refresh(
+            access_token: str, refresh_token: str, expires_at: float
+        ) -> None:
+            nonlocal expected_partner_refresh_token
+            if (
+                entry.data.get(CONF_PARTNER_REFRESH_TOKEN)
+                != expected_partner_refresh_token
+            ):
+                return
+            expected_partner_refresh_token = refresh_token
+            hass.config_entries.async_update_entry(
+                entry,
+                data={
+                    **entry.data,
+                    CONF_PARTNER_ACCESS_TOKEN: access_token,
+                    CONF_PARTNER_REFRESH_TOKEN: refresh_token,
+                    CONF_PARTNER_EXPIRES_AT: expires_at,
+                },
+            )
+
+        partner_api_client.set_token_refresh_callback(on_partner_token_refresh)
+
+    coordinator = OrionDataUpdateCoordinator(
+        hass,
+        entry,
+        api_client,
+        partner_api_client=partner_api_client,
+    )
     await coordinator.async_config_entry_first_refresh()
 
     entry.runtime_data = coordinator
@@ -75,7 +121,18 @@ async def _async_options_updated(hass: HomeAssistant, entry: ConfigEntry) -> Non
     )
     if coordinator is not None and entry.options == coordinator.options:
         return
-    await hass.config_entries.async_reload(entry.entry_id)
+    if coordinator is not None and coordinator.reload_started:
+        return
+    if coordinator is not None:
+        coordinator.reload_started = True
+    try:
+        reloaded = await hass.config_entries.async_reload(entry.entry_id)
+        if not reloaded and coordinator is not None:
+            coordinator.reload_started = False
+    except Exception:
+        if coordinator is not None:
+            coordinator.reload_started = False
+        raise
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:

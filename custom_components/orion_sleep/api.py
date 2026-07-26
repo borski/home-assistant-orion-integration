@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from datetime import date, timedelta
@@ -41,6 +42,7 @@ class OrionApiClient:
         self._refresh_token = refresh_token
         self._expires_at = expires_at
         self._token_refresh_callback: Callable[[str, str, float], None] | None = None
+        self._refresh_lock = asyncio.Lock()
 
     def set_token_refresh_callback(
         self, callback: Callable[[str, str, float], None]
@@ -150,7 +152,22 @@ class OrionApiClient:
         """Refresh the access token if it is expired or about to expire."""
         if not self._token_expired():
             return
-        await self._refresh_tokens()
+        async with self._refresh_lock:
+            if not self._token_expired():
+                return
+            await self._refresh_tokens()
+
+    async def async_refresh_token(
+        self, rejected_access_token: str | None = None
+    ) -> None:
+        """Refresh once unless another task already replaced a rejected token."""
+        async with self._refresh_lock:
+            if (
+                rejected_access_token is not None
+                and self._access_token != rejected_access_token
+            ):
+                return
+            await self._refresh_tokens()
 
     async def _refresh_tokens(self) -> None:
         """POST /v1/auth/refresh — refresh the access token."""

@@ -5,9 +5,9 @@ from __future__ import annotations
 import logging
 import re
 from typing import Any
+from uuid import uuid4
 
 import voluptuous as vol
-
 from homeassistant.config_entries import (
     ConfigEntry,
     ConfigFlow,
@@ -17,6 +17,7 @@ from homeassistant.config_entries import (
 from homeassistant.core import callback
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
+from . import util
 from .api import OrionApiClient, OrionApiError, OrionAuthError, OrionConnectionError
 from .const import (
     CONF_ACCESS_TOKEN,
@@ -24,6 +25,14 @@ from .const import (
     CONF_AUTH_VALUE,
     CONF_EXPIRES_AT,
     CONF_INSIGHTS_DAYS,
+    CONF_PARTNER_ACCESS_TOKEN,
+    CONF_PARTNER_AUTH_METHOD,
+    CONF_PARTNER_AUTH_VALUE,
+    CONF_PARTNER_CONFIGURED,
+    CONF_PARTNER_DEVICE_SERIAL,
+    CONF_PARTNER_EXPIRES_AT,
+    CONF_PARTNER_REFRESH_TOKEN,
+    CONF_PARTNER_REVISION,
     CONF_REFRESH_TOKEN,
     CONF_SCAN_INTERVAL,
     DEFAULT_INSIGHTS_DAYS,
@@ -208,7 +217,8 @@ class OrionSleepConfigFlow(ConfigFlow, domain=DOMAIN):
 
                 if self._reauth_entry:
                     self.hass.config_entries.async_update_entry(
-                        self._reauth_entry, data=data
+                        self._reauth_entry,
+                        data={**self._reauth_entry.data, **data},
                     )
                     await self.hass.config_entries.async_reload(
                         self._reauth_entry.entry_id
@@ -278,13 +288,47 @@ class OrionSleepOptionsFlow(OptionsFlow):
     def __init__(self, config_entry: ConfigEntry) -> None:
         """Initialize options flow."""
         self._config_entry = config_entry
+        self._partner_auth_method: str | None = None
+        self._partner_auth_value: str | None = None
+        self._pending_options: dict[str, Any] = {}
 
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Manage the options."""
+        """Manage polling and an optional partner account."""
+        has_partner = bool(self._config_entry.data.get(CONF_PARTNER_ACCESS_TOKEN))
         if user_input is not None:
-            return self.async_create_entry(title="", data=user_input)
+            options = dict(user_input)
+            partner_action = options.pop("partner_action", "keep")
+
+            if partner_action == "remove" and has_partner:
+                partner_keys = {
+                    CONF_PARTNER_AUTH_METHOD,
+                    CONF_PARTNER_AUTH_VALUE,
+                    CONF_PARTNER_ACCESS_TOKEN,
+                    CONF_PARTNER_REFRESH_TOKEN,
+                    CONF_PARTNER_EXPIRES_AT,
+                    CONF_PARTNER_DEVICE_SERIAL,
+                }
+                self.hass.config_entries.async_update_entry(
+                    self._config_entry,
+                    data={
+                        key: value
+                        for key, value in self._config_entry.data.items()
+                        if key not in partner_keys
+                    },
+                )
+                options[CONF_PARTNER_CONFIGURED] = False
+                return self.async_create_entry(title="", data=options)
+
+            if partner_action == "add":
+                options[CONF_PARTNER_CONFIGURED] = True
+                options[CONF_PARTNER_REVISION] = uuid4().hex
+                self._pending_options = options
+                return await self.async_step_partner_method()
+
+            options[CONF_PARTNER_CONFIGURED] = has_partner
+            return self.async_create_entry(title="", data=options)
 
         current_interval = self._config_entry.options.get(
             CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL
@@ -292,6 +336,12 @@ class OrionSleepOptionsFlow(OptionsFlow):
         current_insights_days = self._config_entry.options.get(
             CONF_INSIGHTS_DAYS, DEFAULT_INSIGHTS_DAYS
         )
+        partner_actions = {
+            "keep": "Keep linked partner" if has_partner else "No partner account",
+            "add": "Replace partner account" if has_partner else "Add partner account",
+        }
+        if has_partner:
+            partner_actions["remove"] = "Remove partner account"
 
         return self.async_show_form(
             step_id="init",
@@ -303,6 +353,165 @@ class OrionSleepOptionsFlow(OptionsFlow):
                     vol.Required(
                         CONF_INSIGHTS_DAYS, default=current_insights_days
                     ): vol.All(vol.Coerce(int), vol.Range(min=1, max=30)),
+                    vol.Required("partner_action", default="keep"): vol.In(
+                        partner_actions
+                    ),
                 }
             ),
+        )
+
+    async def async_step_partner_method(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Choose the partner login method."""
+        if user_input is not None:
+            self._partner_auth_method = user_input[CONF_AUTH_METHOD]
+            if self._partner_auth_method == AUTH_METHOD_EMAIL:
+                return await self.async_step_partner_email()
+            return await self.async_step_partner_phone()
+
+        return self.async_show_form(
+            step_id="partner_method",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(CONF_AUTH_METHOD, default=AUTH_METHOD_EMAIL): vol.In(
+                        {
+                            AUTH_METHOD_EMAIL: "Email",
+                            AUTH_METHOD_PHONE: "Phone",
+                        }
+                    )
+                }
+            ),
+        )
+
+    async def async_step_partner_email(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Send a verification code to the partner email."""
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            self._partner_auth_value = user_input["email"].strip()
+            try:
+                client = OrionApiClient(session=async_get_clientsession(self.hass))
+                if not await client.request_auth_code(email=self._partner_auth_value):
+                    raise OrionConnectionError("API returned success=false")
+                return await self.async_step_partner_verify()
+            except OrionConnectionError:
+                errors["base"] = "cannot_connect"
+            except OrionApiError:
+                errors["base"] = "unknown"
+
+        return self.async_show_form(
+            step_id="partner_email",
+            data_schema=vol.Schema({vol.Required("email"): str}),
+            errors=errors,
+        )
+
+    async def async_step_partner_phone(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Send a verification code to the partner phone."""
+        errors: dict[str, str] = {}
+        phone_default = ""
+        if user_input is not None:
+            phone_default = user_input.get("phone", "")
+            phone = _normalize_phone(phone_default)
+            if not _PHONE_RE.match(phone):
+                errors["base"] = "invalid_phone"
+            else:
+                self._partner_auth_value = phone
+                try:
+                    client = OrionApiClient(session=async_get_clientsession(self.hass))
+                    if not await client.request_auth_code(phone=phone):
+                        raise OrionConnectionError("API returned success=false")
+                    return await self.async_step_partner_verify()
+                except OrionConnectionError:
+                    errors["base"] = "cannot_connect"
+                except OrionApiError:
+                    errors["base"] = "unknown"
+
+        return self.async_show_form(
+            step_id="partner_phone",
+            data_schema=vol.Schema({vol.Required("phone", default=phone_default): str}),
+            errors=errors,
+        )
+
+    async def async_step_partner_verify(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Verify the partner code and persist its tokens."""
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            client = OrionApiClient(session=async_get_clientsession(self.hass))
+            email = (
+                self._partner_auth_value
+                if self._partner_auth_method == AUTH_METHOD_EMAIL
+                else None
+            )
+            phone = (
+                self._partner_auth_value
+                if self._partner_auth_method == AUTH_METHOD_PHONE
+                else None
+            )
+            try:
+                tokens = await client.verify_auth_code(
+                    code=user_input["code"].strip(),
+                    email=email,
+                    phone=phone,
+                )
+            except OrionAuthError:
+                errors["base"] = "invalid_code"
+            except OrionConnectionError:
+                errors["base"] = "cannot_connect"
+            except OrionApiError:
+                errors["base"] = "unknown"
+            else:
+                authenticated_client = OrionApiClient(
+                    session=async_get_clientsession(self.hass),
+                    access_token=tokens["access_token"],
+                    refresh_token=tokens["refresh_token"],
+                    expires_at=tokens["expires_at"],
+                )
+                try:
+                    partner_devices = util.dedupe_devices_by_id(
+                        await authenticated_client.list_devices()
+                    )
+                except OrionAuthError:
+                    errors["base"] = "invalid_code"
+                except (OrionApiError, OrionConnectionError):
+                    errors["base"] = "cannot_connect"
+                else:
+                    coordinator = getattr(self._config_entry, "runtime_data", None)
+                    primary_devices = getattr(coordinator, "devices", [])
+                    shared_serials = util.shared_device_serials(
+                        primary_devices, partner_devices
+                    )
+                    if (
+                        len(primary_devices) != 1
+                        or len(partner_devices) != 1
+                        or len(shared_serials) != 1
+                    ):
+                        errors["base"] = "partner_device_ambiguous"
+                    else:
+                        partner_serial = next(iter(shared_serials))
+                        self.hass.config_entries.async_update_entry(
+                            self._config_entry,
+                            data={
+                                **self._config_entry.data,
+                                CONF_PARTNER_AUTH_METHOD: self._partner_auth_method,
+                                CONF_PARTNER_AUTH_VALUE: self._partner_auth_value,
+                                CONF_PARTNER_ACCESS_TOKEN: tokens["access_token"],
+                                CONF_PARTNER_REFRESH_TOKEN: tokens["refresh_token"],
+                                CONF_PARTNER_EXPIRES_AT: tokens["expires_at"],
+                                CONF_PARTNER_DEVICE_SERIAL: partner_serial,
+                            },
+                        )
+                        return self.async_create_entry(
+                            title="", data=self._pending_options
+                        )
+
+        return self.async_show_form(
+            step_id="partner_verify",
+            data_schema=vol.Schema({vol.Required("code"): str}),
+            errors=errors,
         )
