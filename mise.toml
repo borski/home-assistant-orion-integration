@@ -1,0 +1,4 @@
+[tools]
+python = "3.13"
+"pipx:pytest" = "9.0.2"
+"pipx:ruff" = "0.16.0"

@@ -26,9 +26,9 @@ Custom [Home Assistant](https://www.home-assistant.io/) integration for the **Or
 
 2. Click the button below to add this repository:
 
-   [![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=tdickman&repository=home-assistant-orion-integration&category=integration)
+   [![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=borski&repository=home-assistant-orion-integration&category=integration)
 
-   Or manually add the custom repository: go to **HACS > Integrations > three-dot menu > Custom repositories**, paste `https://github.com/tdickman/home-assistant-orion-integration` and select **Integration** as the category.
+   Or manually add the custom repository: go to **HACS > Integrations > three-dot menu > Custom repositories**, paste `https://github.com/borski/home-assistant-orion-integration` and select **Integration** as the category.
 
 3. Search for "Orion Sleep" in HACS and download it.
 
