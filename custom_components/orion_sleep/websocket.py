@@ -52,6 +52,10 @@ MessageHandler = Callable[[str, str, dict[str, Any]], None]
 # one of the :class:`OrionWsState` class-level constants.
 StateHandler = Callable[[str, str], None]
 
+# Bound shutdown work so a stuck TLS handshake or receive loop cannot block
+# config entry unload indefinitely.
+WS_STOP_TIMEOUT = 5.0
+
 
 class OrionWsState:
     """Connection state values surfaced to the coordinator.
@@ -171,18 +175,25 @@ class OrionWebSocketClient:
         self._task = asyncio.create_task(self._run(), name=f"orion_ws[{self._serial}]")
 
     async def async_stop(self) -> None:
-        """Stop the background loop and close the socket cleanly."""
+        """Stop the background loop without hanging config entry unload."""
         self._stop_event.set()
         ws = self._ws
         if ws is not None and not ws.closed:
             try:
-                await ws.close(code=1001, message=b"client shutdown")
-            except Exception:  # noqa: BLE001 - best effort
+                await asyncio.wait_for(
+                    ws.close(code=1001, message=b"client shutdown"),
+                    timeout=WS_STOP_TIMEOUT,
+                )
+            except Exception:  # noqa: BLE001 - best effort, including timeout
                 pass
-        if self._task is not None:
+        task = self._task
+        if task is not None:
+            task.cancel()
             try:
-                await self._task
-            except asyncio.CancelledError:
+                await asyncio.wait_for(task, timeout=WS_STOP_TIMEOUT)
+            except (asyncio.CancelledError, asyncio.TimeoutError):
+                pass
+            except Exception:  # noqa: BLE001 - best effort during unload
                 pass
             self._task = None
         self._set_state(OrionWsState.STOPPED)

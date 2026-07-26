@@ -69,7 +69,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 
 async def _async_options_updated(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    """Handle options update — reload the integration."""
+    """Reload only when options changed, not when tokens were persisted."""
+    coordinator: OrionDataUpdateCoordinator | None = getattr(
+        entry, "runtime_data", None
+    )
+    if coordinator is not None and entry.options == coordinator.options:
+        return
     await hass.config_entries.async_reload(entry.entry_id)
 
 

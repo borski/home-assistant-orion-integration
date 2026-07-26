@@ -12,6 +12,7 @@ from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
+from . import live_state, util
 from .api import OrionApiClient, OrionApiError, OrionAuthError, OrionConnectionError
 from .const import (
     CONF_INSIGHTS_DAYS,
@@ -46,6 +47,7 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
             update_interval=timedelta(seconds=interval),
         )
         self.api_client = api_client
+        self.options = dict(config_entry.options)
         self.devices: list[dict] = []
         # Live snapshots keyed by device id (UUID). Populated from
         # GET /v1/devices/{serial}/live on each poll AND from
@@ -78,7 +80,9 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
         try:
             self.user = await self.api_client.get_current_user()
             self.user_id = self.user.get("id", "")
-            self.devices = await self.api_client.list_devices()
+            self.devices = util.dedupe_devices_by_id(
+                await self.api_client.list_devices()
+            )
         except OrionAuthError as err:
             raise ConfigEntryAuthFailed(str(err)) from err
         except (OrionApiError, OrionConnectionError) as err:
@@ -100,7 +104,9 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
 
         # Re-fetch devices each poll so zone/user changes surface.
         try:
-            self.devices = await self.api_client.list_devices()
+            self.devices = util.dedupe_devices_by_id(
+                await self.api_client.list_devices()
+            )
         except OrionAuthError as err:
             raise ConfigEntryAuthFailed(str(err)) from err
         except (OrionApiError, OrionConnectionError) as err:
@@ -182,6 +188,11 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
             if sessions:
                 return sessions[-1]
         return None
+
+    def get_latest_session_for_zone(self, zone_id: str) -> dict | None:
+        """Get the most recent sleep session for one device zone."""
+        insights = (self.data or {}).get("insights", {})
+        return util.latest_session_for_zone(insights.get("data"), zone_id)
 
     def get_today_schedule(self) -> dict | None:
         """Get today's sleep schedule for the current user."""
@@ -431,41 +442,19 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
     # Mixing them up silently reports the target as the actual, which
     # looks plausible on a dashboard and is wrong. Keep them separate.
 
-    def _zone_entry(
-        self, device_id: str, zone_id: str, *, measured: bool
-    ) -> dict[str, Any] | None:
-        """Find one zone's dict in either the setpoint or measured list."""
-        live = self.live_devices.get(device_id)
-        if not live:
-            return None
-        zones = (live.get("status", {}) if measured else live).get("zones", [])
-        for zone in zones or []:
-            if zone.get("id") == zone_id:
-                return zone
-        return None
-
     def zone_setpoint(self, device_id: str, zone_id: str) -> float | None:
         """Target temperature (°C) for one zone, from `live.zones[].temp`."""
-        zone = self._zone_entry(device_id, zone_id, measured=False)
-        if not zone:
-            return None
-        temp = zone.get("temp")
-        return float(temp) if temp is not None else None
+        return live_state.zone_setpoint(self.live_devices.get(device_id), zone_id)
 
     def zone_measured_temp(self, device_id: str, zone_id: str) -> float | None:
         """Measured temperature (°C), from `live.status.zones[].temp`."""
-        zone = self._zone_entry(device_id, zone_id, measured=True)
-        if not zone:
-            return None
-        temp = zone.get("temp")
-        return float(temp) if temp is not None else None
+        return live_state.zone_measured_temp(
+            self.live_devices.get(device_id), zone_id
+        )
 
     def zone_is_on(self, device_id: str, zone_id: str) -> bool | None:
         """Power state for one zone, from `live.zones[].on`."""
-        zone = self._zone_entry(device_id, zone_id, measured=False)
-        if not zone or "on" not in zone:
-            return None
-        return bool(zone.get("on"))
+        return live_state.zone_is_on(self.live_devices.get(device_id), zone_id)
 
     def zone_thermal_state(self, device_id: str, zone_id: str) -> str | None:
         """Raw `thermal_state` for one zone.
@@ -475,11 +464,9 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
         been captured. Callers must treat any unrecognised value as unknown
         rather than guessing a direction.
         """
-        zone = self._zone_entry(device_id, zone_id, measured=True)
-        if not zone:
-            return None
-        state = zone.get("thermal_state")
-        return str(state) if state is not None else None
+        return live_state.zone_thermal_state(
+            self.live_devices.get(device_id), zone_id
+        )
 
     def device_zone_ids(self, device_id: str) -> list[str]:
         """Zone ids for a device, preferring the live snapshot.
@@ -528,8 +515,16 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
 
     def device_led_brightness(self, device_id: str) -> int | None:
         """LED brightness (0-100) from the live snapshot."""
-        live = self.live_devices.get(device_id)
-        if not live:
-            return None
-        val = live.get("led_brightness")
-        return int(val) if val is not None else None
+        return live_state.led_brightness(self.live_devices.get(device_id))
+
+    def firmware(self, device_id: str) -> dict | None:
+        """Return device firmware details from the live snapshot."""
+        return live_state.firmware(self.live_devices.get(device_id))
+
+    def network_info(self, device_id: str) -> dict | None:
+        """Return device network details from the live snapshot."""
+        return live_state.network_info(self.live_devices.get(device_id))
+
+    def wifi_rssi(self, device_id: str) -> int | None:
+        """Return device Wi-Fi RSSI from the live snapshot."""
+        return live_state.wifi_rssi(self.live_devices.get(device_id))
