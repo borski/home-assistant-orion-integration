@@ -2,7 +2,11 @@
 
 ## Project Overview
 
-HACS-compatible Home Assistant custom integration for the **Orion Sleep** smart mattress topper. Cloud-connected bed temperature control with per-zone support, sleep tracking (heart rate, breath rate, HRV, sleep stages), and sleep scheduling.
+HACS-compatible Home Assistant custom integration for the **Orion Sleep** smart mattress topper. Per-person temperature control and scheduling, live vitals, sleep tracking (heart rate, breath rate, HRV, sleep stages), and rapid cooling.
+
+**This repository is the canonical implementation.** It started as a fork and has since diverged past the point where upstream is a useful reference. The API contract was rebuilt from measured traffic rather than inherited: of the original 38 documented operations, 9 were fabrications traceable to feature flags, cache keys, and SDK method names, 4 more carried the wrong method or path, and 3 device routes pointed at the wrong identifier. The most-exercised endpoint in the integration was missing entirely.
+
+Do not treat any upstream or sibling fork as authoritative on API behaviour. Treat the verification log at the bottom of this file as authoritative, and nothing else.
 
 ## Repository Structure
 
@@ -37,6 +41,12 @@ home-assistant-orion-integration/
 ## Source-of-Truth Policy
 
 Both `openapi.yaml` and `orion_info.py` are kept in sync as new endpoints or behaviors are discovered. Live requests and captured mobile app traffic are authoritative. Android bytecode and UI capability lists are discovery aids only. `openapi.yaml` uses `x-verification-status` on important operations to distinguish measured behavior from app-derived behavior. When the files disagree, re-verify against the live server.
+
+**A claim only becomes "measured" by appearing in the Verification Log at the bottom of this file.** A confident docstring is not evidence. A decompiled line number is not evidence. A request that was actually sent, and its result recorded, is evidence.
+
+**Never ship a user-facing control against an unverified route.** A control that silently fails is worse than no control, and the codebase has removed several for exactly that reason. If a write cannot be demonstrated against a live bed, expose the read side only and say why in the docstring.
+
+Writes that change the bed are tested with a backup, one single-field change, verification, and an unconditional restore. Where the field is schedule-shaped, probe a weekday that is **not today**, so nothing about that night can change.
 
 Known gaps and unverified endpoints are called out in the tables below. When adding or changing behavior:
 
@@ -272,9 +282,9 @@ on demand:
 
 This is the only write in the integration with no save-and-restore path,
 and the only one that cannot be provoked for testing, because
-`is_available` has been false continuously. Alex accepted that
-trade-off on 2026-07-27: the first real update is the test, and warranty
-covers the downside.
+`is_available` has been false continuously. That trade-off was accepted
+on 2026-07-27: the first real update is the test, and warranty covers
+the downside.
 - 3 buttons: reboot, swap bed sides, and split zones. The last two are real routes from the app; reboot and split ship disabled by default. Forget Wi-Fi is intentionally not exposed.
 
 A linked partner adds 11 insight sensors plus a second full schedule family of 16: 5 sensors, 4 offset numbers, 2 time entities, 4 switches, and the override indicator.
@@ -554,7 +564,7 @@ Live-request confirmations, newest first. A claim only earns "measured" by appea
 
 ### 2026-07-27 — Thermal relief (rapid cooling) works
 
-Alex toggled `switch.sleepy_*_rapid_cool` on and back off from the dashboard.
+`switch.sleepy_*_rapid_cool` was toggled on and back off from the dashboard.
 The bed cooled, the switch reported on, and turning it off restored the previous
 setpoint without any manual correction.
 
@@ -585,8 +595,8 @@ So the field is present, the server sends it on every update, and it is empty.
 
 Note on the clock, because the first read of this was wrong. **Home Assistant
 container logs are UTC.** A capture that looked like an idle mid-morning window
-was actually the middle of the night, two hours after bedtime fired at 23:00 and
-about five and a half hours before wake-up at 07:00. That makes the empty array
+was actually the middle of the night, roughly two hours after the configured
+bedtime had fired and several hours before wake-up. That makes the empty array
 harder to explain away, not easier: the bed was inside its own schedule, with a
 known upcoming action, and still queued nothing.
 
@@ -606,21 +616,23 @@ So the occupancy logic in this integration, `status_text != "left_bed"`,
 was invented upstream. Orion's own client never treats that field as a
 presence signal, and there is no vendor behaviour to copy.
 
-That matters because the sensor is provably wrong. On 2026-07-26 between
-a fifty minute window, with a single occupant and nothing else in the room, **both
-pads reported occupancy** and both reported plausible heart rates. One
-side was empty. A "nobody in bed" automation would never have fired.
+That matters because the sensor is provably wrong. Observed over a
+fifty minute window with a single occupant in the bed and nothing else
+in the room, **both pads reported occupancy** and both reported plausible
+heart rates. One side was empty. A "nobody in bed" automation would never
+have fired.
 
 Two observations narrow the replacement:
 
-- The occupied pad showed a coherent settling curve, an elevated rate easing to
-  a resting rate, with breath rate holding a narrow band. The empty pad sat flat
-  and its breath rate swung by ten within seconds.
+- The occupied pad showed a coherent settling curve: an elevated rate
+  easing steadily down to a resting one, with breath rate holding within
+  a two-per-minute band throughout. The empty pad sat in a flat rate band
+  that never settled, and its breath rate swung by ten within seconds.
 - After a later restart **both pads reported identical values to the
-  digit** when an hour earlier they had differed by more than forty
-  beats per minute. Two bodies do not produce identical readings. That suggests the
-  topper duplicates a derived figure onto a side it cannot actually read,
-  which is far easier to detect than a signal-quality judgment.
+  digit** when an hour earlier they had differed by more than forty beats
+  per minute. Two bodies do not produce identical readings. That suggests
+  the topper duplicates a derived figure onto a side it cannot actually
+  read, which is far easier to detect than a signal-quality judgment.
 
 A plausible-heart-rate gate alone would NOT have caught this, since the
 empty pad reported believable numbers. Instrumentation was added (see the
@@ -689,7 +701,7 @@ since the target row was not today.
 | `wakeup_is_active` | `True` -> `False` | HONOURED |
 | `auto_turn_off` | `True` -> `False` | HONOURED |
 | `is_smart_temperature_active` | `True` -> `False` | HONOURED |
-| `bedtime` | `23:00` -> `22:45` | HONOURED |
+| `bedtime` | shifted back fifteen minutes | HONOURED |
 
 Combined with the four temperatures and `wakeup` measured earlier the same
 day, **all ten fields in `SCHEDULE_WRITABLE_FIELDS` are now measured.**
@@ -708,20 +720,20 @@ Prefer it for anything schedule-shaped. `schedule_flag_test.py`.
 ### 2026-07-26 — Schedule writes: two routes, two different operations
 
 Tested `wakeup` on both schedule routes, backed up and restored each time.
-`bedtime` was deliberately not used as the probe: the test ran at 22:38 and
-the configured bedtime was close, so writing it risked firing or skipping the
-schedule action.
+`bedtime` was deliberately not used as the probe: the test ran close enough
+to the configured bedtime that writing it risked firing or skipping the
+schedule action outright.
 
 **`PUT /v1/sleep-schedules` (no query param) — MEASURED.**
-Body `{"schedules": [{"day": 0, "wakeup": "07:20"}], "user_id": "<uuid>"}`
+Body `{"schedules": [{"day": 0, "wakeup": "<HH:MM>"}], "user_id": "<uuid>"}`
 returned 200 and the value changed. Confirms this route writes far more than
 the four temperature fields the integration currently sends. It left
 `is_override_applied` and `override_date` untouched, and its response body
 carried the NEW value, so a caller can trust what comes back.
 
 **`PUT /v1/sleep-schedules?action=override` — MEASURED, but it is not an edit.**
-Body `{"user_id": "<uuid>", "day": 0, "wakeup": "07:15"}` returned 200, the
-value changed, and Alex confirmed 07:15 in the vendor app. A deep compare
+Body `{"user_id": "<uuid>", "day": 0, "wakeup": "<HH:MM>"}` returned 200, the
+value changed, and the new value was confirmed in the vendor app. A deep compare
 against the pre-test backup then showed the real cost:
 
 ```
@@ -734,8 +746,8 @@ This route applies a **single-day override**, not a schedule change. The
 `schedules` array (the seven weekday rows) was byte-identical before and
 after, so nothing permanent moved.
 
-Its response body is also **stale**. The PUT echoed the pre-change `07:00`
-while an immediate follow-up GET reported `07:15`. Unlike
+Its response body is also **stale**. The PUT echoed the pre-change value
+while an immediate follow-up GET reported the new one. Unlike
 `PUT /v1/devices/{serial}/live`, a caller cannot use this response to update
 local state and must re-read.
 

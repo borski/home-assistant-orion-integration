@@ -53,8 +53,9 @@ DEFAULT_COOLING_MINUTES = 30
 MIN_COOLING_MINUTES = 1
 MAX_COOLING_MINUTES = 240
 
-# Display aliases. Maps an immutable Orion user id to the name Alex wants
-# shown ("Ada" -> "Alex"). Affects friendly names ONLY. Unique ids and
+# Display aliases. Maps an immutable Orion user id to the name the household
+# actually uses, since Orion stores whatever was on the account at signup.
+# Affects friendly names ONLY. Unique ids and
 # entity ids are built from device and zone ids, never from a person's name,
 # so renaming never orphans history, dashboards, or voice assistant mappings.
 CONF_DISPLAY_ALIASES = "display_aliases"

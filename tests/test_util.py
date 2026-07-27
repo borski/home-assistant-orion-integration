@@ -299,15 +299,15 @@ def test_unique_alias_labels_falls_back_and_skips_unusable_records():
 def test_clean_alias_map_drops_blank_values_so_clearing_removes_the_override():
     for blank in ("", "   ", "\t\n"):
         assert util.clean_alias_map({PARTNER_USER: blank}) == {}
-    assert util.clean_alias_map({PARTNER_USER: "  Sam  "}) == {PARTNER_USER: "Sam"}
+    assert util.clean_alias_map({PARTNER_USER: "  Grace  "}) == {PARTNER_USER: "Grace"}
 
 
 def test_clean_alias_map_discards_unknown_ids_and_non_string_values():
     known = {PRIMARY_USER, PARTNER_USER}
     stale = "99999999-9999-4999-8999-999999999999"
     assert util.clean_alias_map({stale: "Ghost"}, known) == {}
-    assert util.clean_alias_map({PRIMARY_USER: "Alex", stale: "Ghost"}, known) == {
-        PRIMARY_USER: "Alex"
+    assert util.clean_alias_map({PRIMARY_USER: "Ada", stale: "Ghost"}, known) == {
+        PRIMARY_USER: "Ada"
     }
     for bad in (None, 0, 1, [], {}, True, 3.5):
         assert util.clean_alias_map({PARTNER_USER: bad}, known) == {}
