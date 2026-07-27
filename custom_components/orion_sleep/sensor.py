@@ -1769,6 +1769,76 @@ class OrionAccessSensor(OrionBaseEntity, SensorEntity):
         await self.coordinator.async_request_refresh()
 
 
+    async def async_assign_zones(self, user_id: str, zone_ids: list[str]) -> None:
+        """Put somebody on one or more zones of this bed.
+
+        The app calls this "Replace {name}". It is how a spare-room bed
+        gets handed to whoever is staying without anyone opening the
+        phone app.
+
+        Moving somebody onto an occupied zone displaces whoever was
+        there. That is deliberate on Orion's side and is what the
+        `push_away_behavior` the app always sends governs.
+        """
+        known = {p["user_id"] for p in self._people()}
+        primary = self.coordinator.user_id
+        if primary:
+            known.add(primary)
+        if user_id not in known:
+            raise HomeAssistantError(
+                f"{user_id} is not on this bed. Invite them first, or check "
+                "the people attribute on this sensor."
+            )
+        try:
+            await self.coordinator.api_client.assign_zones(
+                user_id, self._device_id, zone_ids
+            )
+        except ValueError as err:
+            raise HomeAssistantError(str(err)) from err
+        except OrionApiError as err:
+            raise HomeAssistantError(f"Orion could not assign that zone: {err}") from err
+        _LOGGER.info("Assigned Orion zones %s to user %s", zone_ids, user_id)
+        await self.coordinator.async_request_refresh()
+
+    async def async_set_device_name(self, name: str) -> None:
+        """Rename the bed.
+
+        Cosmetic on Orion's side. Home Assistant keeps its own device
+        name, so this changes what the phone app shows and nothing here.
+        """
+        try:
+            await self.coordinator.api_client.set_device_name(self._device_id, name)
+        except ValueError as err:
+            raise HomeAssistantError(str(err)) from err
+        except OrionApiError as err:
+            raise HomeAssistantError(f"Orion could not rename the bed: {err}") from err
+        await self.coordinator.async_request_refresh()
+
+    async def async_set_device_timezone(self, timezone: str) -> None:
+        """Set the bed's timezone.
+
+        Not cosmetic. Schedules are stored per weekday and the bed works
+        out which day it is from this, so a wrong value moves bedtime
+        rather than just relabelling it.
+        """
+        try:
+            await self.coordinator.api_client.set_device_timezone(
+                self._device_id, timezone
+            )
+        except ValueError as err:
+            raise HomeAssistantError(str(err)) from err
+        except OrionApiError as err:
+            raise HomeAssistantError(
+                f"Orion could not set the timezone: {err}"
+            ) from err
+        _LOGGER.warning(
+            "Changed the Orion bed timezone to %s. Schedules are stored per "
+            "weekday, so check tonight's bedtime is still what you expect.",
+            timezone,
+        )
+        await self.coordinator.async_request_refresh()
+
+
 class OrionSchedulePhaseSensor(OrionBaseEntity, SensorEntity):
     """Which part of tonight's schedule the bed is currently in.
 
@@ -1851,72 +1921,3 @@ class OrionZoneSplitModeSensor(OrionBaseEntity, SensorEntity):
     def native_value(self) -> str | None:
         mode = self.coordinator.zone_split_mode()
         return mode.title() if isinstance(mode, str) else None
-
-    async def async_assign_zones(self, user_id: str, zone_ids: list[str]) -> None:
-        """Put somebody on one or more zones of this bed.
-
-        The app calls this "Replace {name}". It is how a spare-room bed
-        gets handed to whoever is staying without anyone opening the
-        phone app.
-
-        Moving somebody onto an occupied zone displaces whoever was
-        there. That is deliberate on Orion's side and is what the
-        `push_away_behavior` the app always sends governs.
-        """
-        known = {p["user_id"] for p in self._people()}
-        primary = self.coordinator.user_id
-        if primary:
-            known.add(primary)
-        if user_id not in known:
-            raise HomeAssistantError(
-                f"{user_id} is not on this bed. Invite them first, or check "
-                "the people attribute on this sensor."
-            )
-        try:
-            await self.coordinator.api_client.assign_zones(
-                user_id, self._device_id, zone_ids
-            )
-        except ValueError as err:
-            raise HomeAssistantError(str(err)) from err
-        except OrionApiError as err:
-            raise HomeAssistantError(f"Orion could not assign that zone: {err}") from err
-        _LOGGER.info("Assigned Orion zones %s to user %s", zone_ids, user_id)
-        await self.coordinator.async_request_refresh()
-
-    async def async_set_device_name(self, name: str) -> None:
-        """Rename the bed.
-
-        Cosmetic on Orion's side. Home Assistant keeps its own device
-        name, so this changes what the phone app shows and nothing here.
-        """
-        try:
-            await self.coordinator.api_client.set_device_name(self._device_id, name)
-        except ValueError as err:
-            raise HomeAssistantError(str(err)) from err
-        except OrionApiError as err:
-            raise HomeAssistantError(f"Orion could not rename the bed: {err}") from err
-        await self.coordinator.async_request_refresh()
-
-    async def async_set_device_timezone(self, timezone: str) -> None:
-        """Set the bed's timezone.
-
-        Not cosmetic. Schedules are stored per weekday and the bed works
-        out which day it is from this, so a wrong value moves bedtime
-        rather than just relabelling it.
-        """
-        try:
-            await self.coordinator.api_client.set_device_timezone(
-                self._device_id, timezone
-            )
-        except ValueError as err:
-            raise HomeAssistantError(str(err)) from err
-        except OrionApiError as err:
-            raise HomeAssistantError(
-                f"Orion could not set the timezone: {err}"
-            ) from err
-        _LOGGER.warning(
-            "Changed the Orion bed timezone to %s. Schedules are stored per "
-            "weekday, so check tonight's bedtime is still what you expect.",
-            timezone,
-        )
-        await self.coordinator.async_request_refresh()

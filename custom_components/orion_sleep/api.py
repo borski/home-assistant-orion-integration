@@ -896,7 +896,7 @@ class OrionApiClient:
         """
         if not isinstance(name, str) or not name.strip():
             raise ValueError("set_device_name requires a name")
-        return await self.update_device(device_id, {"name": name.strip()})
+        return await self.update_device(device_id, name=name.strip())
 
     async def set_device_timezone(self, device_id: str, timezone: str) -> dict:
         """PUT /v1/devices/{deviceId} — set the bed's timezone.
@@ -912,7 +912,7 @@ class OrionApiClient:
             raise ValueError(
                 "set_device_timezone expects an IANA name such as America/Denver"
             )
-        return await self.update_device(device_id, {"timezone": timezone})
+        return await self.update_device(device_id, timezone=timezone)
 
     async def assign_zones(
         self,

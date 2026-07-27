@@ -1,0 +1,151 @@
+"""Every registered service must name a method that actually exists.
+
+This file exists because of a real failure. Three access-management
+handlers were appended to the end of sensor.py at a point when two other
+classes had already been appended after their intended home, so they
+landed on `OrionZoneSplitModeSensor` instead of `OrionAccessSensor`.
+
+Everything passed. Lint passed, the module compiled, all 155 unit tests
+passed, Home Assistant started clean, and the service showed up in the
+service list with the right schema. It failed only when somebody called
+it, with `AttributeError: object has no attribute
+'async_set_device_name'` and a 500 back to the caller.
+
+`sensor.py` imports Home Assistant, so it cannot be imported here. These
+checks parse it with `ast` instead, the same technique the API and
+coordinator guards use.
+"""
+
+import ast
+
+import _orion
+
+SENSOR_TREE = _orion.tree("sensor")
+
+# Handlers that must live on the device-level access sensor. These are
+# the ones that were misplaced, plus their siblings, because a service
+# targeting the wrong class is invisible until it is called.
+ACCESS_HANDLERS = {
+    "async_list_invites",
+    "async_invite_user",
+    "async_cancel_invite",
+    "async_accept_invite",
+    "async_remove_user_access",
+    "async_create_guest",
+    "async_update_user_phone",
+    "async_assign_zones",
+    "async_set_device_name",
+    "async_set_device_timezone",
+}
+
+
+def _registered_handlers(tree):
+    """Handler names passed to async_register_entity_service, in order."""
+    handlers = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if getattr(func, "attr", None) != "async_register_entity_service":
+            continue
+        # (service_name, schema, handler_name, ...)
+        for arg in node.args:
+            if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                if arg.value.startswith("async_"):
+                    handlers.append(arg.value)
+    return handlers
+
+
+def _methods_by_class(tree):
+    """Map class name to the set of method names it defines."""
+    out = {}
+    for node in tree.body:
+        if isinstance(node, ast.ClassDef):
+            out[node.name] = {
+                child.name
+                for child in node.body
+                if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))
+            }
+    return out
+
+
+def test_every_registered_service_handler_exists_somewhere():
+    methods = _methods_by_class(SENSOR_TREE)
+    defined = set().union(*methods.values()) if methods else set()
+    missing = [h for h in _registered_handlers(SENSOR_TREE) if h not in defined]
+    assert missing == [], (
+        "these services are registered but no class defines them, so calling "
+        f"one raises AttributeError at runtime: {missing}"
+    )
+
+
+def test_access_handlers_live_on_the_access_sensor():
+    methods = _methods_by_class(SENSOR_TREE)
+    assert "OrionAccessSensor" in methods
+    on_access = methods["OrionAccessSensor"]
+    misplaced = sorted(ACCESS_HANDLERS - on_access)
+    assert misplaced == [], (
+        "these handlers belong on OrionAccessSensor and are not there. "
+        "Appending to the end of the file puts them on whichever class "
+        f"happens to be last: {misplaced}"
+    )
+
+
+def test_no_handler_is_defined_on_more_than_one_class():
+    """Two copies means one of them is dead and nobody would notice."""
+    methods = _methods_by_class(SENSOR_TREE)
+    for handler in _registered_handlers(SENSOR_TREE):
+        owners = sorted(cls for cls, names in methods.items() if handler in names)
+        # Subclassing is legitimate: the partner sensor overrides some of
+        # the session handlers. Flag only genuinely unrelated duplicates.
+        assert len(owners) <= 2, f"{handler} is defined on {owners}"
+
+
+def test_the_registration_list_has_not_silently_shrunk():
+    """A dropped registration is as invisible as a misplaced handler."""
+    handlers = _registered_handlers(SENSOR_TREE)
+    assert len(handlers) >= 15, handlers
+    assert len(set(handlers)) == len(handlers), "a service is registered twice"
+
+
+# ── Call-shape guard ──────────────────────────────────────────────────
+#
+# The misplaced-handler bug had a twin. `update_device` takes keyword
+# fields (`**fields`), and two new callers passed a dict positionally.
+# Same failure profile: lint clean, tests green, HA starts fine, and it
+# only breaks when somebody calls the service.
+
+API_TREE = _orion.tree("api")
+
+
+def _update_device_calls(tree):
+    """Every `self.update_device(...)` call site with its arg counts."""
+    calls = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        if getattr(node.func, "attr", None) != "update_device":
+            continue
+        calls.append((node.lineno, len(node.args), len(node.keywords)))
+    return calls
+
+
+def test_update_device_is_always_called_with_keyword_fields():
+    offenders = [
+        (lineno, positional)
+        for lineno, positional, _ in _update_device_calls(API_TREE)
+        if positional != 1
+    ]
+    assert offenders == [], (
+        "update_device takes (device_id, **fields). Passing a dict "
+        f"positionally raises TypeError at call time: lines {offenders}"
+    )
+
+
+def test_update_device_callers_actually_pass_a_field():
+    barren = [
+        lineno
+        for lineno, _, keywords in _update_device_calls(API_TREE)
+        if keywords == 0
+    ]
+    assert barren == [], f"update_device called with nothing to set: {barren}"

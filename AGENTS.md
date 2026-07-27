@@ -595,6 +595,48 @@ cannot be taken back.
 
 ## Verification Log
 
+### 2026-07-27 — Two writes promoted, and two bugs that hid from every check
+
+**`PUT /v1/sleep-configurations/temperature` is MEASURED.** Set
+`display_unit` to `fahrenheit` through the new select, confirmed on the
+server, restored to `relative`. Account level, affects what the phone app
+shows rather than anything the bed does.
+
+**`PUT /v1/devices/{deviceId}` with `name` is MEASURED.** Renamed the bed
+to a test string, confirmed on the server, restored. Same route as
+orientation, which stays app-derived because sending it has still never
+been observed.
+
+**Two bugs shipped, both invisible to every automated check.**
+
+First: three service handlers were appended to the end of `sensor.py` at
+a point when two more classes had already been appended after their
+intended home, so they attached to `OrionZoneSplitModeSensor` instead of
+`OrionAccessSensor`. Second: two new callers passed a dict positionally
+to `update_device`, which takes `**fields`.
+
+Both had the same profile. Ruff clean. `compileall` clean. All 155 unit
+tests green. Home Assistant started with no errors. The service appeared
+in the service list with the correct schema. Each failed only when
+called, one with `AttributeError`, one with `TypeError`, both surfacing
+to the caller as an opaque HTTP 500.
+
+`tests/test_service_wiring.py` now guards both by parsing `sensor.py`
+and `api.py` with `ast`: every registered handler must be defined on
+some class, the access handlers must be on `OrionAccessSensor`
+specifically, no handler may be defined on more than two classes, the
+registration list may not silently shrink, and every `update_device`
+call site must pass exactly one positional argument and at least one
+keyword. Both guards were mutation tested by reintroducing the original
+bugs and confirming the right tests fail.
+
+The general lesson, which has now cost two rounds: appending to the end
+of a file assumes the target class is last, and that assumption stops
+being true the moment anything else is appended. Insert before the next
+`class`, do not append.
+
+
+
 ### 2026-07-27 — `/v1/sleep-session` and `/v1/sleep-configurations`
 
 Two GETs that had never been called, both MEASURED, and between them
