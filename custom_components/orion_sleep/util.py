@@ -717,3 +717,16 @@ def summarize_sessions(insights_data: object, limit: int = 30) -> list[dict]:
             if len(rows) >= limit:
                 return rows
     return rows
+
+
+def apnea_number(value: object) -> float | None:
+    """Coerce one apnea figure to a float, or None if unusable.
+
+    Zero is a real and common answer: a night with no obstructive
+    events reports 0, not a missing field. So this cannot use the
+    usual falsy check, and bool has to be rejected explicitly or
+    ``False`` would sail through as a legitimate zero.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value)

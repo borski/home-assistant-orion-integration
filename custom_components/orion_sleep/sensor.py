@@ -59,6 +59,10 @@ _INSIGHT_DISPLAY_NAMES = {
     "light_sleep_minutes": "Light Sleep Minutes",
     "awake_minutes": "Awake Minutes",
     "last_session_end": "Last Session End",
+    "apnea_ahi": "Apnea Index",
+    "apnea_obstructive_time": "Obstructive Apnea Time",
+    "apnea_central_time": "Central Apnea Time",
+    "apnea_longest_event": "Longest Apnea Event",
 }
 
 
@@ -109,6 +113,15 @@ def _minutes_to_hm(minutes: float | int | None) -> str | None:
     if h > 0:
         return f"{h}h {m}m"
     return f"{m}m"
+
+
+def _get_apnea(session: dict | None) -> dict:
+    """Breathing-interruption block from a completed session.
+
+    Only populated once a night finishes. Mid-session this is null, so
+    every apnea sensor reads unknown while someone is still asleep.
+    """
+    return util.session_subsection(session, "apnea")
 
 
 def _minutes_value(minutes: Any) -> float | None:
@@ -358,6 +371,49 @@ INSIGHT_SENSOR_DESCRIPTIONS: tuple[OrionSensorEntityDescription, ...] = (
     ),
     # When the last finished night actually ended. state_class is left
     # unset because HA rejects one on a non-numeric sensor.
+    # ── Breathing ─────────────────────────────────────────────────
+    #
+    # Reported per completed session and previously discarded entirely.
+    # AHI is events per hour of sleep and is the figure sleep clinics
+    # actually use, which makes it the most consequential number the bed
+    # produces. It is also an estimate from a mattress topper, so the
+    # sensors carry the vendor's numbers and nothing else. No severity
+    # banding, no interpretation: see the README.
+    OrionSensorEntityDescription(
+        key="apnea_ahi",
+        native_unit_of_measurement="events/h",
+        state_class=SensorStateClass.MEASUREMENT,
+        suggested_display_precision=1,
+        icon="mdi:lungs",
+        value_fn=lambda session: util.apnea_number(_get_apnea(session).get("ahi")),
+    ),
+    OrionSensorEntityDescription(
+        key="apnea_obstructive_time",
+        native_unit_of_measurement=UnitOfTime.SECONDS,
+        state_class=SensorStateClass.MEASUREMENT,
+        icon="mdi:lungs",
+        value_fn=lambda session: util.apnea_number(
+            _get_apnea(session).get("obstructive_total_seconds")
+        ),
+    ),
+    OrionSensorEntityDescription(
+        key="apnea_central_time",
+        native_unit_of_measurement=UnitOfTime.SECONDS,
+        state_class=SensorStateClass.MEASUREMENT,
+        icon="mdi:lungs",
+        value_fn=lambda session: util.apnea_number(
+            _get_apnea(session).get("central_total_seconds")
+        ),
+    ),
+    OrionSensorEntityDescription(
+        key="apnea_longest_event",
+        native_unit_of_measurement=UnitOfTime.SECONDS,
+        state_class=SensorStateClass.MEASUREMENT,
+        icon="mdi:timer-alert-outline",
+        value_fn=lambda session: util.apnea_number(
+            _get_apnea(session).get("longest_event_seconds")
+        ),
+    ),
     OrionSensorEntityDescription(
         key="last_session_end",
         device_class=SensorDeviceClass.TIMESTAMP,

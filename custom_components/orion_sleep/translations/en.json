@@ -211,6 +211,18 @@
       },
       "wifi_signal": {
         "name": "Wi-Fi Signal"
+      },
+      "apnea_ahi": {
+        "name": "Apnea Index"
+      },
+      "apnea_obstructive_time": {
+        "name": "Obstructive Apnea Time"
+      },
+      "apnea_central_time": {
+        "name": "Central Apnea Time"
+      },
+      "apnea_longest_event": {
+        "name": "Longest Apnea Event"
       }
     }
   },

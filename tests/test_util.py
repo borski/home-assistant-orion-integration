@@ -894,3 +894,35 @@ def test_summarize_sessions_honours_the_limit():
 def test_summarize_sessions_never_raises_on_hostile_input():
     for bad in (None, [], "x", 0, True, {"d": None}, {"d": {"sessions": "no"}}, {}):
         assert util.summarize_sessions(bad) == []
+
+
+# ── Apnea figures ─────────────────────────────────────────────────────
+#
+# Zero is the answer most nights. A coercion that treats it as missing
+# would make a healthy night indistinguishable from a broken sensor.
+
+
+def test_apnea_number_keeps_zero():
+    assert util.apnea_number(0) == 0.0
+    assert util.apnea_number(0.0) == 0.0
+
+
+def test_apnea_number_accepts_real_readings():
+    assert util.apnea_number(0.3) == 0.3
+    assert util.apnea_number(60) == 60.0
+    assert util.apnea_number(31) == 31.0
+
+
+def test_apnea_number_rejects_bool_so_false_is_not_a_zero_reading():
+    assert util.apnea_number(False) is None
+    assert util.apnea_number(True) is None
+
+
+def test_apnea_number_rejects_everything_unusable():
+    for bad in (None, "", "0", "0.3", [], {}, (), object(), b"0"):
+        assert util.apnea_number(bad) is None
+
+
+def test_apnea_number_always_returns_float_or_none():
+    for value in (0, 1, 0.3, 60):
+        assert isinstance(util.apnea_number(value), float)

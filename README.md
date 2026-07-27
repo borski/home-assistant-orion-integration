@@ -159,7 +159,7 @@ There is no option to disable it.
 
 ## Entities
 
-One Home Assistant device per paired topper. A two-zone bed with no partner linked exposes **71 entities**. Linking a partner adds 35 more.
+One Home Assistant device per paired topper. A two-zone bed with no partner linked exposes **75 entities**. Linking a partner adds 35 more.
 
 Names below use `<person>` where the display alias is substituted, and `<zone>` for a bed side.
 
@@ -187,6 +187,17 @@ Schedule writes carry an explicit user ID, so one account edits both people's sc
 ### Sleep insights, per person
 
 Sleep Score, HRV, Heart Rate, Breath Rate, Body Movement Rate, Restless Time, Total Sleep Time, Deep / REM / Light Sleep, Awake Time, plus numeric minute equivalents for each stage so they graph, and Last Session End as a real timestamp.
+
+**Breathing.** Apnea Index (AHI, events per hour of sleep), Obstructive Apnea
+Time, Central Apnea Time, and Longest Apnea Event. Reported per completed
+session, so they read unknown while someone is still asleep.
+
+These carry the vendor's numbers and nothing else. No severity banding, no
+interpretation. For context, published clinical thresholds put an AHI under 5
+in the normal range, 5 to 15 mild, 15 to 30 moderate, and above 30 severe, but
+**this is a mattress topper, not a diagnostic device.** Treat a number you do
+not like as a reason to talk to a doctor and get a real study, not as a
+result.
 
 The minute sensors use `measurement`, deliberately. A cumulative state class would treat every shorter night as a meter reset and permanently corrupt the stored sum.
 

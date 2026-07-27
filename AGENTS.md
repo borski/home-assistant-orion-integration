@@ -204,6 +204,7 @@ Entities read from coordinator:
 | Sensor | REM Sleep Minutes | `_rem_sleep_minutes` | `session.sleep_summary.rem_sleep`, numeric |
 | Sensor | Light Sleep Minutes | `_light_sleep_minutes` | `session.sleep_summary.light_sleep`, numeric |
 | Sensor | Awake Minutes | `_awake_minutes` | `session.sleep_summary.awake_time`, numeric |
+| Sensor | \<person\> Apnea Index / Obstructive Time / Central Time / Longest Event | `_apnea_ahi`, `_apnea_obstructive_time`, `_apnea_central_time`, `_apnea_longest_event` | From `session.apnea`, null until a night finishes. AHI is events per hour of sleep. Zero is a real answer most nights, so the coercion rejects bool rather than falsy values: `False` must not read as a clean night. Deliberately no severity banding on the entity, because a consumer topper's estimate should not wear clinical labels. |
 | Sensor | Last Session End | `_last_session_end` | `session.end_time` of the newest FINISHED session. Timestamp. Selected via `is_in_progress`, never via a missing `end_time`. |
 | Binary Sensor | Sleep Session (partner) | `_partner_session_active` | Partner `session.is_in_progress`. Only created when a partner is linked. |
 | Sensor | Bedtime | `_bedtime` | `today_sleep_schedule.bedtime` (HH:mm) |
@@ -246,10 +247,10 @@ Entities read from coordinator:
 | Button | Swap Bed Sides | `_action_swap_sides` | `POST /v1/sleep-configurations/user-swap`. Enabled by default: pressing it again reverses it, so a misfire is cheap. |
 | Button (disabled) | Split Zones | `_action_split_zones` | `POST /v1/sleep-configurations/user-split`. Disabled by default because **nothing in the live payload reports split state**, so a press has no observable result and no way to confirm what it did. |
 
-**A two-zone device with no partner linked exposes 71 base entities. A linked partner adds 35 more, for 106.**
+**A two-zone device with no partner linked exposes 75 base entities. A linked partner adds 39 more, for 114.**
 
 - 2 climate entities, one per zone.
-- 33 sensors: 11 insights, 5 schedule temperatures and duration, current offset, live connection, 6 topper sensor readings, 2 measured and 2 target zone temperatures, 2 cooling countdowns, LED brightness, firmware, and Wi-Fi signal.
+- 37 sensors: 11 insights, 4 apnea, 5 schedule temperatures and duration, current offset, live connection, 6 topper sensor readings, 2 measured and 2 target zone temperatures, 2 cooling countdowns, LED brightness, firmware, and Wi-Fi signal.
 - 7 numbers: 4 schedule-phase temperature offsets, LED brightness, and 2 rapid-cool durations.
 - 2 time entities: bedtime and wake up time.
 - 9 switches: runtime power, Away Mode, quiet mode, 2 rapid cool, and 4 schedule flags. Away Mode is omitted for accounts with multiple devices because the API action is account-global.
