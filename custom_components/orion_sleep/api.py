@@ -12,15 +12,13 @@ import aiohttp
 
 from .const import API_BASE_URL
 from .util import (
+    SCHEDULE_TEMPERATURE_FIELDS,
     auth_session_from_response,
     auth_tokens_from_session,
     describe_api_error,
     safe_api_error_code,
     should_refresh_token,
-)
-
-_SCHEDULE_TEMPERATURE_FIELDS = frozenset(
-    {"bedtime_temp", "phase_1_temp", "phase_2_temp", "wakeup_temp"}
+    validate_schedule_write,
 )
 
 # Body keys accepted by PUT /v1/devices/{serial}/live besides `zones`.
@@ -532,12 +530,50 @@ class OrionApiClient:
             celsius: Absolute Celsius value.
             user_id: Orion user id to target. None means the token owner.
         """
-        if field not in _SCHEDULE_TEMPERATURE_FIELDS:
+        if field not in SCHEDULE_TEMPERATURE_FIELDS:
             raise ValueError(f"Unsupported Orion schedule temperature field: {field}")
-        if day not in range(7):
-            raise ValueError(f"Orion schedule day must be 0 through 6, got {day}")
+        return await self.update_schedule_field(day, field, celsius, user_id=user_id)
+
+    async def update_schedule_field(
+        self,
+        day: int,
+        field: str,
+        value: Any,
+        user_id: str | None = None,
+    ) -> dict:
+        """Permanently change one field on one schedule day.
+
+        PUT /v1/sleep-schedules with body
+        {"schedules": [{"day": N, field: value}], "user_id": "..."}.
+
+        Confidence: MEASURED for the four temperature fields and for
+        `wakeup`. APP-DERIVED for `bedtime` and the four boolean flags,
+        which the vendor app sends through this same request builder but
+        which have not been individually executed.
+
+        This is the PERMANENT edit path. It changes the stored weekday row
+        and leaves `is_override_applied` and `override_date` alone. Its
+        response body carries the new value, so a caller may trust it.
+
+        Do NOT confuse this with `PUT /v1/sleep-schedules?action=override`,
+        which applies a single-day override, stamps `override_date`, and
+        returns a STALE response body. That route is a different operation
+        and is deliberately not implemented here. See the Verification Log
+        in AGENTS.md, 2026-07-26.
+
+        Args:
+            day: Day of week (0=Monday ... 6=Sunday).
+            field: A member of _SCHEDULE_WRITABLE_FIELDS.
+            value: Celsius float, "HH:mm" string, or bool, per the field.
+            user_id: Orion user id to target. None means the token owner.
+
+        Raises:
+            ValueError: on an unknown field, an out-of-range day, or a value
+                whose type does not match the field group.
+        """
+        validate_schedule_write(day, field, value)
         await self.ensure_valid_token()
-        payload: dict[str, Any] = {"schedules": [{"day": day, field: celsius}]}
+        payload: dict[str, Any] = {"schedules": [{"day": day, field: value}]}
         if user_id:
             payload["user_id"] = user_id
         return await self._request("PUT", "/v1/sleep-schedules", json_data=payload)

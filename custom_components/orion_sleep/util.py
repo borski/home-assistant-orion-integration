@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from datetime import time as _dt_time
 
 _UUID_RE = re.compile(
     r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
@@ -20,6 +21,114 @@ _SENSITIVE_DIAGNOSTIC_BRANCHES = frozenset(
         "today_sleep_schedule",
     }
 )
+
+# Fields writable through PUT /v1/sleep-schedules, grouped by value type
+# because each group validates differently.
+#
+# Temperatures are MEASURED. Of the rest, only `wakeup` has been executed
+# against the live server (2026-07-26). The others are APP-DERIVED: the
+# vendor app sends them through the identical request builder, but they
+# have not been individually confirmed. See the Verification Log in
+# AGENTS.md.
+SCHEDULE_TEMPERATURE_FIELDS = frozenset(
+    {"bedtime_temp", "phase_1_temp", "phase_2_temp", "wakeup_temp"}
+)
+SCHEDULE_TIME_FIELDS = frozenset({"bedtime", "wakeup"})
+SCHEDULE_FLAG_FIELDS = frozenset(
+    {
+        "bedtime_is_active",
+        "wakeup_is_active",
+        "auto_turn_off",
+        "is_smart_temperature_active",
+    }
+)
+SCHEDULE_WRITABLE_FIELDS = (
+    SCHEDULE_TEMPERATURE_FIELDS | SCHEDULE_TIME_FIELDS | SCHEDULE_FLAG_FIELDS
+)
+
+# 24-hour wall clock. Schedule times carry no date and no timezone; the
+# device reports its own `timezone` separately.
+_SCHEDULE_TIME_RE = re.compile(r"^(?:[01][0-9]|2[0-3]):[0-5][0-9]$")
+
+
+def validate_schedule_write(day: object, field: object, value: object) -> None:
+    """Raise ValueError unless this is a well-formed schedule write.
+
+    Lives here rather than in api.py so it is reachable without aiohttp,
+    which is the whole reason this module exists. A bad schedule write is
+    worth catching before it reaches the wire: the API returns 200 for
+    shapes it then silently ignores, so a type error would look like a
+    successful no-op rather than a failure.
+    """
+    if field not in SCHEDULE_WRITABLE_FIELDS:
+        raise ValueError(f"Unsupported Orion schedule field: {field!r}")
+    if not isinstance(day, int) or isinstance(day, bool) or day not in range(7):
+        raise ValueError(f"Orion schedule day must be 0 through 6, got {day!r}")
+
+    if field in SCHEDULE_FLAG_FIELDS:
+        if not isinstance(value, bool):
+            raise ValueError(f"Orion schedule field {field} requires a bool, got {value!r}")
+    elif field in SCHEDULE_TIME_FIELDS:
+        if not isinstance(value, str) or not _SCHEDULE_TIME_RE.match(value):
+            raise ValueError(
+                f"Orion schedule field {field} requires an HH:mm string, got {value!r}"
+            )
+    # bool is a subclass of int, so reject it before the numeric check.
+    elif isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"Orion schedule field {field} requires a number, got {value!r}")
+
+
+def schedule_unique_id(device_id: str, key: str, user_id: str) -> str:
+    """Stable unique_id for one person's schedule entity.
+
+    Keyed on the immutable Orion user id. Never on a role like "partner",
+    which would silently swap owners if the integration were ever
+    re-authenticated as the other account, grafting one person's history
+    onto the other. Never on a display name, which is user-editable.
+
+    Deliberately uniform. An earlier draft kept nine un-namespaced ids for
+    the authenticated user so pre-existing history would survive, but
+    nothing had been built on those entities yet, so the only thing that
+    exception bought was a permanent special case in the code and an
+    asymmetry between the two people on the bed.
+    """
+    return f"{device_id}_user_{user_id}_{key}"
+
+
+def parse_schedule_time(value: object) -> _dt_time | None:
+    """Parse the API's ``HH:mm`` wall clock into a ``datetime.time``.
+
+    Returns None rather than raising on anything malformed, so a vendor
+    response that drifts leaves an entity unavailable instead of taking
+    down a platform setup.
+    """
+    if not isinstance(value, str) or not _SCHEDULE_TIME_RE.match(value):
+        return None
+    hour, minute = (int(part) for part in value.split(":"))
+    return _dt_time(hour=hour, minute=minute)
+
+
+def schedule_duration_text(schedule: object) -> str | None:
+    """Human "Xh Ym" between a schedule's bedtime and wakeup.
+
+    Handles the overnight rollover. Returns None unless both times are
+    present and well formed.
+    """
+    if not isinstance(schedule, dict):
+        return None
+    bedtime = schedule.get("bedtime")
+    wakeup = schedule.get("wakeup")
+    if not isinstance(bedtime, str) or not isinstance(wakeup, str):
+        return None
+    if not _SCHEDULE_TIME_RE.match(bedtime) or not _SCHEDULE_TIME_RE.match(wakeup):
+        return None
+
+    start_h, start_m = (int(part) for part in bedtime.split(":"))
+    end_h, end_m = (int(part) for part in wakeup.split(":"))
+    minutes = (end_h * 60 + end_m) - (start_h * 60 + start_m)
+    if minutes <= 0:
+        minutes += 24 * 60
+    return f"{minutes // 60}h {minutes % 60}m"
 
 
 def dedupe_devices_by_id(devices: object) -> list[dict]:

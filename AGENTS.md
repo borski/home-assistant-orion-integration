@@ -203,10 +203,17 @@ Entities read from coordinator:
 | Binary Sensor | Sensor 1/2 On Bed | `_sensorN_on_bed` | Occupancy device class. `status_text != "left_bed"`. The WS push itself is realtime, but the topper takes ~30s–1min to decide someone has sat down or left, so `status_text` transitions lag the real event. |
 | Switch | Power | `_power` | On = all zones on, Off = all zones off. Uses `PUT /v1/devices/{serial_number}/live`. State is read from each zone's `on`/`is_on` field. |
 | Switch | Away Mode | `_away_mode` | On = authenticated user marked away, Off = present. State checks that user's ID across `zones[*].user`. `POST /v1/sleep-configurations/user-away`. The known redundant-toggle 400 is swallowed. |
-| Number | Bedtime Temperature Offset | `_bedtime_temp_offset` | App-style -10..+10 slider. Reads `today_sleep_schedule.bedtime_temp`, converts to offset via per-device relative table; writes back via `PUT /v1/sleep-schedules` on today's day-of-week. |
+| Number | Bedtime Temperature Offset | `_bedtime_temp_offset` | App-style -10..+10 slider. Reads `today_sleep_schedule.bedtime_temp`, converts to offset via per-device relative table; writes back via `PUT /v1/sleep-schedules` on today's day-of-week, carrying an explicit `user_id`. |
 | Number | Asleep Phase 1 Offset | `_phase_1_temp_offset` | As above, `phase_1_temp` field. |
 | Number | Asleep Phase 2 Offset | `_phase_2_temp_offset` | As above, `phase_2_temp` field. |
 | Number | Wake Up Temperature Offset | `_wakeup_temp_offset` | As above, `wakeup_temp` field. |
+| Sensor | \<person\> Asleep Phase 1 Temperature | `_user_{userId}_phase_1_temp` | Promoted from an extra attribute so it graphs and generates statistics. New for both people. |
+| Sensor | \<person\> Asleep Phase 2 Temperature | `_user_{userId}_phase_2_temp` | As above, `phase_2_temp`. |
+| Binary Sensor | \<person\> Bedtime Enabled | `_user_{userId}_bedtime_is_active` | Read-only. The field name is accepted by the measured write route, but no individual flag has been executed, so the write stays app-derived. |
+| Binary Sensor | \<person\> Wake Up Enabled | `_user_{userId}_wakeup_is_active` | As above. |
+| Binary Sensor | \<person\> Automatic Turn Off | `_user_{userId}_auto_turn_off` | As above. |
+| Binary Sensor | \<person\> Smart Temperature | `_user_{userId}_is_smart_temperature_active` | As above. |
+| Binary Sensor (diag) | \<person\> Schedule Override | `_user_{userId}_is_override_applied` | Whether a single-day override is in force. `override_date` and `override_available` as attrs. Explains a surprising bedtime rather than being something to act on. |
 
 | Sensor | \<zone\> Measured Temperature | `_{zoneId}_measured_temp` | `status.zones[].temp`. Duplicates the climate entity's `current_temperature` on purpose: climate attributes are not retained as long-term statistics, a `sensor` with a `state_class` is. |
 | Sensor | \<zone\> Target Temperature | `_{zoneId}_target_temp` | `zones[].temp`, the LIVE setpoint. Distinct from `today_sleep_schedule.*_temp`, which is schedule intent and diverges the moment a zone is nudged by hand. |
@@ -214,14 +221,47 @@ Entities read from coordinator:
 | Number | LED Brightness | `_led_brightness` | 0-100 write via `PUT /v1/devices/{serial_number}/live`. Debounced with an optimistic local write and a post-write lock, mirroring the vendor app. |
 | Switch | Quiet Mode | `_quiet_mode` | Write via the same live route. Replaced the old read-only binary sensor once the write was measured. |
 
-**A two-zone device exposes 47 base entities. A linked partner adds 11 partner insight sensors.**
+**A two-zone device with no partner linked exposes 54 base entities. A linked partner adds 27 more, for 81.**
 
 - 2 climate entities, one per zone.
-- 31 sensors: 11 insights, 5 schedule, current offset, live connection, 6 topper sensor readings, 2 measured and 2 target zone temperatures, LED brightness, firmware, and Wi-Fi signal.
+- 31 sensors: 11 insights, 5 schedule temperatures and duration, current offset, live connection, 6 topper sensor readings, 2 measured and 2 target zone temperatures, LED brightness, firmware, and Wi-Fi signal.
 - 5 numbers: 4 schedule-phase temperature offsets plus LED brightness.
-- 5 binary sensors: sleep session, 2 occupancy sensors, firmware update available, and safety problem.
-- 3 switches: runtime power, Away Mode, and quiet mode. Away Mode is omitted for accounts with multiple devices because the API action is account-global.
+- 2 time entities: bedtime and wake up time.
+- 7 switches: runtime power, Away Mode, quiet mode, and 4 schedule flags. Away Mode is omitted for accounts with multiple devices because the API action is account-global.
+- 6 binary sensors: sleep session, 2 occupancy sensors, firmware update available, safety problem, and the schedule override indicator.
 - 1 button: reboot. Forget Wi-Fi is intentionally not exposed.
+
+A linked partner adds 11 insight sensors plus a second full schedule family of 16: 5 sensors, 4 offset numbers, 2 time entities, 4 switches, and the override indicator.
+
+### Schedule entities are per person
+
+`GET /v1/sleep-schedules` returns rows for everyone on the bed in a single
+fetch with the primary token, so a partner's schedule costs no extra
+request and stays readable even when their own token has expired. Writes
+carry an explicit `user_id`, which the API honours, so one account sets
+both people's temperatures. Neither half needs the partner's client.
+
+`unique_id` is `{deviceId}_user_{userId}_{key}` for everyone, keyed on the
+immutable Orion user id. Never on a role like "partner", which would
+silently swap owners if the integration were re-authenticated as the
+other account. Never on a display name, which is user-editable.
+
+Deliberately uniform, with no exception for the authenticated account. An
+earlier draft preserved nine un-namespaced ids so pre-existing history
+would survive, but nothing had been built on those entities, so the only
+thing that exception bought was a permanent special case in the code and
+an asymmetry between the two people on the bed.
+
+**Platform choice follows the write surface.** All ten writable fields
+were measured on 2026-07-26, so anything settable is a control:
+
+| Fields | Platform | Why |
+|---|---|---|
+| `bedtime`, `wakeup` | `time` | Wall clock with no date. NOT `SensorDeviceClass.TIMESTAMP`, which needs a tz-aware datetime, and the bed carries its own timezone. |
+| 4 schedule booleans | `switch` | Writable, so a binary sensor would understate them. |
+| 4 phase temperatures | `number` (offset) + `sensor` (absolute) | The number is the app-style -10..+10 control. The sensor carries absolute Celsius with a `state_class` so it generates long-term statistics, which a `number` does not. |
+| `schedule_duration` | `sensor` | Computed, not stored. |
+| `is_override_applied` | `binary_sensor` | Read-only. No route to CLEAR an override has been found. |
 
 Both zone temperature sensors and the LED brightness sensor carry
 `state_class=MEASUREMENT` so they generate long-term statistics. The
@@ -349,6 +389,81 @@ Notable:
 ## Verification Log
 
 Live-request confirmations, newest first. A claim only earns "measured" by appearing here.
+
+### 2026-07-26 — All ten writable schedule fields honoured
+
+`PUT /v1/sleep-schedules` was probed field by field with an explicit
+`user_id`. Every write targeted **day 3, which was not today (day 0)**, so
+nothing about that night's behaviour could change. Verification read the
+seven-day `schedules` array rather than the `today_sleep_schedule` view,
+since the target row was not today.
+
+| Field | Probe | Verdict |
+|---|---|---|
+| `bedtime_is_active` | `True` -> `False` | HONOURED |
+| `wakeup_is_active` | `True` -> `False` | HONOURED |
+| `auto_turn_off` | `True` -> `False` | HONOURED |
+| `is_smart_temperature_active` | `True` -> `False` | HONOURED |
+| `bedtime` | `23:00` -> `22:45` | HONOURED |
+
+Combined with the four temperatures and `wakeup` measured earlier the same
+day, **all ten fields in `SCHEDULE_WRITABLE_FIELDS` are now measured.**
+Nothing in that surface is app-derived.
+
+Each write was restored immediately and all seven weekday rows were
+deep-compared byte-identical against a pre-test backup. No write leaked
+into a day other than the one targeted, which was checked explicitly after
+every probe rather than assumed.
+
+Method note worth reusing: writing to a non-today weekday row removes the
+entire class of "this test changed how the bed behaves tonight" risk, at
+the cost of verifying through the weekly array instead of the today view.
+Prefer it for anything schedule-shaped. `schedule_flag_test.py`.
+
+### 2026-07-26 — Schedule writes: two routes, two different operations
+
+Tested `wakeup` on both schedule routes, backed up and restored each time.
+`bedtime` was deliberately not used as the probe: the test ran at 22:38 and
+the configured bedtime was close, so writing it risked firing or skipping the
+schedule action.
+
+**`PUT /v1/sleep-schedules` (no query param) — MEASURED.**
+Body `{"schedules": [{"day": 0, "wakeup": "07:20"}], "user_id": "<uuid>"}`
+returned 200 and the value changed. Confirms this route writes far more than
+the four temperature fields the integration currently sends. It left
+`is_override_applied` and `override_date` untouched, and its response body
+carried the NEW value, so a caller can trust what comes back.
+
+**`PUT /v1/sleep-schedules?action=override` — MEASURED, but it is not an edit.**
+Body `{"user_id": "<uuid>", "day": 0, "wakeup": "07:15"}` returned 200, the
+value changed, and Alex confirmed 07:15 in the vendor app. A deep compare
+against the pre-test backup then showed the real cost:
+
+```
+today_sleep_schedule:
+  is_override_applied:  false -> true
+  override_date:        null  -> "2026-07-26"
+```
+
+This route applies a **single-day override**, not a schedule change. The
+`schedules` array (the seven weekday rows) was byte-identical before and
+after, so nothing permanent moved.
+
+Its response body is also **stale**. The PUT echoed the pre-change `07:00`
+while an immediate follow-up GET reported `07:15`. Unlike
+`PUT /v1/devices/{serial}/live`, a caller cannot use this response to update
+local state and must re-read.
+
+**Design consequence.** These are not interchangeable. Permanent schedule
+editing belongs on the plain route. The override route is the right
+primitive for a "just for tonight" control and should be exposed separately
+and labelled as such, never as the backing write for a bedtime entity.
+
+**Residual state.** `is_override_applied` stayed true for 2026-07-26 after
+restore. The plain route does not clear it and no clearing route has been
+found. Harmless here because the overridden values were restored to their
+originals, so the schedule behaves identically. Expected to reset with the
+date.
 
 ### 2026-07-26 — Exhaustive APK route enumeration (app-derived, not measured)
 

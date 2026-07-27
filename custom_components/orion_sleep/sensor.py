@@ -263,33 +263,30 @@ INSIGHT_SENSOR_DESCRIPTIONS: tuple[OrionSensorEntityDescription, ...] = (
     ),
 )
 
-# Schedule sensors — derived from today_sleep_schedule, not sessions
+# Schedule sensors — derived from today_sleep_schedule, not sessions.
+#
+# These are per-person. Names are built imperatively from the display alias
+# rather than a translation_key, because the person's name has to lead and
+# translations cannot interpolate a runtime value.
+_SCHEDULE_LABELS: dict[str, str] = {
+    "schedule_duration": "Schedule Duration",
+    "bedtime_temp": "Bedtime Temperature",
+    "phase_1_temp": "Asleep Phase 1 Temperature",
+    "phase_2_temp": "Asleep Phase 2 Temperature",
+    "wakeup_temp": "Wake Up Temperature",
+}
 
 SCHEDULE_SENSOR_DESCRIPTIONS: tuple[OrionSensorEntityDescription, ...] = (
     OrionSensorEntityDescription(
-        key="bedtime",
-        translation_key="bedtime",
-        icon="mdi:bed-clock",
-        value_fn=lambda schedule: schedule.get("bedtime") if schedule else None,
-    ),
-    OrionSensorEntityDescription(
-        key="wakeup_time",
-        translation_key="wakeup_time",
-        icon="mdi:alarm",
-        value_fn=lambda schedule: schedule.get("wakeup") if schedule else None,
-    ),
-    OrionSensorEntityDescription(
         key="schedule_duration",
-        translation_key="schedule_duration",
         icon="mdi:timer-sand",
-        value_fn=lambda schedule: _calc_schedule_duration(schedule),
+        value_fn=lambda schedule: util.schedule_duration_text(schedule),
     ),
     # device_class=TEMPERATURE added 2026-07-26. Without it HA treats "°C"
     # as a custom unit and will NOT convert for a Fahrenheit household, so
     # these rendered as "23 °C" beside a climate card reading "78 °F".
     OrionSensorEntityDescription(
         key="bedtime_temp",
-        translation_key="bedtime_temp",
         device_class=SensorDeviceClass.TEMPERATURE,
         native_unit_of_measurement=UnitOfTemperature.CELSIUS,
         state_class=SensorStateClass.MEASUREMENT,
@@ -297,9 +294,28 @@ SCHEDULE_SENSOR_DESCRIPTIONS: tuple[OrionSensorEntityDescription, ...] = (
         value_fn=lambda schedule: schedule.get("bedtime_temp") if schedule else None,
         extra_attrs_fn=lambda schedule: _schedule_temp_attrs(schedule),
     ),
+    # phase_1_temp and phase_2_temp were previously only extra attributes on
+    # the bedtime temperature sensor. Promoted to first-class sensors so they
+    # graph and generate long-term statistics like the other two. New keys for
+    # both people, so there is no legacy id to preserve.
+    OrionSensorEntityDescription(
+        key="phase_1_temp",
+        device_class=SensorDeviceClass.TEMPERATURE,
+        native_unit_of_measurement=UnitOfTemperature.CELSIUS,
+        state_class=SensorStateClass.MEASUREMENT,
+        icon="mdi:thermometer-chevron-down",
+        value_fn=lambda schedule: schedule.get("phase_1_temp") if schedule else None,
+    ),
+    OrionSensorEntityDescription(
+        key="phase_2_temp",
+        device_class=SensorDeviceClass.TEMPERATURE,
+        native_unit_of_measurement=UnitOfTemperature.CELSIUS,
+        state_class=SensorStateClass.MEASUREMENT,
+        icon="mdi:thermometer-chevron-up",
+        value_fn=lambda schedule: schedule.get("phase_2_temp") if schedule else None,
+    ),
     OrionSensorEntityDescription(
         key="wakeup_temp",
-        translation_key="wakeup_temp",
         device_class=SensorDeviceClass.TEMPERATURE,
         native_unit_of_measurement=UnitOfTemperature.CELSIUS,
         state_class=SensorStateClass.MEASUREMENT,
@@ -307,29 +323,6 @@ SCHEDULE_SENSOR_DESCRIPTIONS: tuple[OrionSensorEntityDescription, ...] = (
         value_fn=lambda schedule: schedule.get("wakeup_temp") if schedule else None,
     ),
 )
-
-
-def _calc_schedule_duration(schedule: dict | None) -> str | None:
-    """Calculate the duration between bedtime and wakeup as 'Xh Ym'."""
-    if not schedule:
-        return None
-    bedtime = schedule.get("bedtime")
-    wakeup = schedule.get("wakeup")
-    if not bedtime or not wakeup:
-        return None
-    try:
-        bh, bm = map(int, bedtime.split(":"))
-        wh, wm = map(int, wakeup.split(":"))
-        bed_mins = bh * 60 + bm
-        wake_mins = wh * 60 + wm
-        if wake_mins <= bed_mins:
-            # Wakeup is next day
-            wake_mins += 24 * 60
-        total = wake_mins - bed_mins
-        h, m = divmod(total, 60)
-        return f"{h}h {m}m"
-    except (ValueError, AttributeError):
-        return None
 
 
 def _schedule_temp_attrs(schedule: dict | None) -> dict[str, Any]:
@@ -364,8 +357,11 @@ async def async_setup_entry(
             continue
         for description in INSIGHT_SENSOR_DESCRIPTIONS:
             entities.append(OrionSensorEntity(coordinator, device_id, description))
-        for description in SCHEDULE_SENSOR_DESCRIPTIONS:
-            entities.append(OrionScheduleSensorEntity(coordinator, device_id, description))
+        for user_id in coordinator.schedule_user_ids():
+            for description in SCHEDULE_SENSOR_DESCRIPTIONS:
+                entities.append(
+                    OrionScheduleSensorEntity(coordinator, device_id, description, user_id)
+                )
         entities.append(OrionCurrentTempOffsetSensor(coordinator, device_id))
         entities.append(OrionWebSocketStateSensor(coordinator, device_id))
         for zone_id in coordinator.device_zone_ids(device_id):
@@ -458,9 +454,7 @@ class OrionPartnerInsightSensor(OrionSensorEntity):
     ) -> None:
         super().__init__(coordinator, device_id, description)
         self._attr_unique_id = f"{device_id}_partner_{description.key}"
-        self._attr_name = (
-            f"{coordinator.partner_name()} {_insight_label(description.key)}"
-        )
+        self._attr_name = f"{coordinator.partner_name()} {_insight_label(description.key)}"
 
     def _session(self) -> dict | None:
         return self.coordinator.get_latest_partner_session(self._device_id)
@@ -479,7 +473,12 @@ class OrionPartnerInsightSensor(OrionSensorEntity):
 
 
 class OrionScheduleSensorEntity(OrionBaseEntity, SensorEntity):
-    """Sensor entity for Orion Sleep schedule data."""
+    """One person's schedule sensor.
+
+    The API returns rows for everyone on the bed in a single fetch with
+    the primary token, so a partner's row costs no extra request and
+    stays readable even if their own token has expired.
+    """
 
     entity_description: OrionSensorEntityDescription
 
@@ -488,15 +487,28 @@ class OrionScheduleSensorEntity(OrionBaseEntity, SensorEntity):
         coordinator: OrionDataUpdateCoordinator,
         device_id: str,
         description: OrionSensorEntityDescription,
+        user_id: str,
     ) -> None:
         super().__init__(coordinator, device_id)
         self.entity_description = description
-        self._attr_unique_id = f"{device_id}_{description.key}"
+        self._user_id = user_id
+        self._attr_unique_id = util.schedule_unique_id(
+            device_id, description.key, user_id
+        )
+        self._attr_translation_key = None
+        self._attr_name = (
+            f"{coordinator.display_name_for_user(user_id)} {_SCHEDULE_LABELS[description.key]}"
+        )
+
+    @property
+    def available(self) -> bool:
+        """Only available once this person's row is present."""
+        return super().available and self.coordinator.has_schedule_for_user(self._user_id)
 
     @property
     def native_value(self) -> Any:
         """Return the sensor value from today's schedule."""
-        schedule = self.coordinator.get_today_schedule()
+        schedule = self.coordinator.get_today_schedule(self._user_id)
         return self.entity_description.value_fn(schedule)
 
     @property
@@ -504,7 +516,7 @@ class OrionScheduleSensorEntity(OrionBaseEntity, SensorEntity):
         """Return extra state attributes."""
         if self.entity_description.extra_attrs_fn is None:
             return None
-        schedule = self.coordinator.get_today_schedule()
+        schedule = self.coordinator.get_today_schedule(self._user_id)
         attrs = self.entity_description.extra_attrs_fn(schedule)
         return {k: v for k, v in attrs.items() if v is not None} or None
 

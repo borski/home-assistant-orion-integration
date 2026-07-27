@@ -8,32 +8,38 @@ from homeassistant.components.number import NumberEntity, NumberMode
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import PERCENTAGE
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
+from . import util
 from .coordinator import OrionDataUpdateCoordinator
 from .entity import OrionBaseEntity, OrionLiveSettingMixin
 
 _LOGGER = logging.getLogger(__name__)
 
-# (key, translation_key, icon, schedule_field)
+# (key, label, icon, schedule_field)
+#
+# Labels are used imperatively rather than via translation_key, because the
+# person's display name has to lead and translations cannot interpolate a
+# runtime value.
 OFFSET_NUMBER_DEFS: tuple[tuple[str, str, str, str], ...] = (
-    ("bedtime_temp_offset", "bedtime_temp_offset", "mdi:thermometer", "bedtime_temp"),
+    ("bedtime_temp_offset", "Bedtime Offset", "mdi:thermometer", "bedtime_temp"),
     (
         "phase_1_temp_offset",
-        "phase_1_temp_offset",
+        "Asleep Phase 1 Offset",
         "mdi:thermometer-chevron-down",
         "phase_1_temp",
     ),
     (
         "phase_2_temp_offset",
-        "phase_2_temp_offset",
+        "Asleep Phase 2 Offset",
         "mdi:thermometer-chevron-up",
         "phase_2_temp",
     ),
     (
         "wakeup_temp_offset",
-        "wakeup_temp_offset",
+        "Wake Up Offset",
         "mdi:thermometer-alert",
         "wakeup_temp",
     ),
@@ -53,24 +59,32 @@ async def async_setup_entry(
         device_id = device.get("id")
         if not device_id:
             continue
-        for key, trans_key, icon, field in OFFSET_NUMBER_DEFS:
-            entities.append(
-                OrionTempOffsetNumber(
-                    coordinator, device_id, key, trans_key, icon, field
+        for user_id in coordinator.schedule_user_ids():
+            for key, label, icon, field in OFFSET_NUMBER_DEFS:
+                entities.append(
+                    OrionTempOffsetNumber(
+                        coordinator, device_id, key, label, icon, field, user_id
+                    )
                 )
-            )
         entities.append(OrionLedBrightnessNumber(coordinator, device_id))
 
     async_add_entities(entities)
 
 
 class OrionTempOffsetNumber(OrionBaseEntity, NumberEntity):
-    """Adjustable temperature offset for a schedule phase.
+    """One person's adjustable temperature offset for a schedule phase.
 
     Displays and accepts values in the app's offset scale (-10 to +10).
-    When the user sets a value, the offset is converted to absolute Celsius
-    via the device's non-linear lookup table and sent to the API as a
-    schedule update for today's day-of-week.
+    Setting a value converts the offset to absolute Celsius through the
+    device's non-linear lookup table and writes today's schedule row.
+
+    Reading NEVER writes. The lookup table snaps to the nearest rung, and
+    real schedules carry off-table values (an observed phase_1_temp was 16.7
+    against a ladder of 16 and 17.5). A read-then-write round trip would
+    silently rewrite those.
+
+    Writes carry an explicit ``user_id``, which the API honours, so one
+    account can set both people's temperatures. Verified 2026-07-26.
     """
 
     _attr_native_min_value = -10
@@ -83,46 +97,52 @@ class OrionTempOffsetNumber(OrionBaseEntity, NumberEntity):
         coordinator: OrionDataUpdateCoordinator,
         device_id: str,
         key: str,
-        translation_key: str,
+        label: str,
         icon: str,
         schedule_field: str,
+        user_id: str,
     ) -> None:
         super().__init__(coordinator, device_id)
-        self._attr_unique_id = f"{device_id}_{key}"
-        self._attr_translation_key = translation_key
-        self._attr_icon = icon
+        self._user_id = user_id
         self._schedule_field = schedule_field
+        self._attr_unique_id = util.schedule_unique_id(device_id, key, user_id)
+        self._attr_icon = icon
+        self._attr_name = f"{coordinator.display_name_for_user(user_id)} {label}"
+
+    @property
+    def available(self) -> bool:
+        """Only available once this person's schedule row is present."""
+        return super().available and self.coordinator.has_schedule_for_user(
+            self._user_id
+        )
 
     @property
     def native_value(self) -> float | None:
         """Return the current offset value from today's schedule."""
-        schedule = self.coordinator.get_today_schedule()
+        schedule = self.coordinator.get_today_schedule(self._user_id)
         if not schedule:
             return None
-        celsius = schedule.get(self._schedule_field)
-        return self._celsius_to_offset(celsius)
+        return self._celsius_to_offset(schedule.get(self._schedule_field))
 
     async def async_set_native_value(self, value: float) -> None:
-        """Set the temperature offset — converts to Celsius and updates schedule."""
+        """Convert the offset to Celsius and write this person's schedule."""
         celsius = self._offset_to_celsius(value)
         if celsius is None:
-            _LOGGER.error("Could not convert offset %s to Celsius", value)
-            return
+            raise HomeAssistantError(
+                f"Cannot map offset {value} to a temperature on this device"
+            )
 
-        schedule = self.coordinator.get_today_schedule()
-        if not schedule:
-            _LOGGER.error("No schedule available to update")
-            return
-
-        day = schedule.get("day")
+        day = self.coordinator.schedule_day_for_user(self._user_id)
         if day is None:
-            _LOGGER.error("No day field in today's schedule")
-            return
+            raise HomeAssistantError(
+                "Orion has not reported a usable schedule for this person yet"
+            )
 
-        await self.coordinator.api_client.update_schedule_temperature(
+        await self.coordinator.api_client.update_schedule_field(
             day=day,
             field=self._schedule_field,
-            celsius=celsius,
+            value=celsius,
+            user_id=self._user_id,
         )
         await self.coordinator.async_request_refresh()
 

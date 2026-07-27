@@ -5,3 +5,8 @@ __pycache__/
 
 # Local diagnostic output (schedule backups, captures). Contains personal data.
 working/
+
+# One-shot API verification scripts. Useful locally, not part of the integration.
+/schedule_user_id_test.py
+/schedule_flag_test.py
+/override_route_test.py

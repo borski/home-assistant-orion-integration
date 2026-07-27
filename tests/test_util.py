@@ -1,6 +1,7 @@
 """Tests for dependency-free utility helpers."""
 
 import importlib.util
+from datetime import time as _dt_time
 from pathlib import Path
 
 MODULE_PATH = Path(__file__).parent.parent / "custom_components" / "orion_sleep" / "util.py"
@@ -340,3 +341,217 @@ def test_should_refresh_token_treats_unknown_expiry_as_expired():
     for bad in (None, "", "soon", [], {}, (), b"0", True, False):
         assert util.should_refresh_token(bad, now) is True
     assert isinstance(util.should_refresh_token(now + 10, now), bool)
+
+
+def test_schedule_field_sets_are_disjoint_and_complete():
+    """The three groups must not overlap: each field has exactly one validator."""
+    temps = util.SCHEDULE_TEMPERATURE_FIELDS
+    times = util.SCHEDULE_TIME_FIELDS
+    flags = util.SCHEDULE_FLAG_FIELDS
+    assert temps.isdisjoint(times)
+    assert temps.isdisjoint(flags)
+    assert times.isdisjoint(flags)
+    assert util.SCHEDULE_WRITABLE_FIELDS == temps | times | flags
+    assert len(util.SCHEDULE_WRITABLE_FIELDS) == 10
+
+
+def test_validate_schedule_write_accepts_each_field_group():
+    util.validate_schedule_write(0, "bedtime_temp", 23.0)
+    util.validate_schedule_write(6, "phase_1_temp", 17)
+    util.validate_schedule_write(3, "wakeup", "07:00")
+    util.validate_schedule_write(3, "bedtime", "23:59")
+    util.validate_schedule_write(0, "bedtime", "00:00")
+    util.validate_schedule_write(1, "auto_turn_off", True)
+    util.validate_schedule_write(1, "is_smart_temperature_active", False)
+
+
+def test_validate_schedule_write_rejects_unknown_fields():
+    for field in ("override_date", "day", "is_override_applied", "", None, 5):
+        try:
+            util.validate_schedule_write(0, field, 1)
+        except ValueError:
+            continue
+        raise AssertionError(f"{field!r} should not be writable")
+
+
+def test_validate_schedule_write_rejects_bad_days():
+    for day in (-1, 7, 100, None, "0", 1.5, True, False):
+        try:
+            util.validate_schedule_write(day, "bedtime_temp", 23)
+        except ValueError:
+            continue
+        raise AssertionError(f"day={day!r} should be rejected")
+
+
+def test_validate_schedule_write_rejects_malformed_times():
+    # 24:00 and 07:60 are the off-by-one cases a naive regex lets through.
+    for value in ("24:00", "07:60", "7:00", "0700", "07:00:00", "", None, 700, True):
+        try:
+            util.validate_schedule_write(0, "wakeup", value)
+        except ValueError:
+            continue
+        raise AssertionError(f"wakeup={value!r} should be rejected")
+
+
+def test_validate_schedule_write_rejects_bool_for_numeric_fields():
+    """bool subclasses int, so True would silently become 1 degree Celsius."""
+    for value in (True, False):
+        try:
+            util.validate_schedule_write(0, "bedtime_temp", value)
+        except ValueError:
+            continue
+        raise AssertionError(f"bedtime_temp={value!r} should be rejected")
+
+
+def test_validate_schedule_write_rejects_non_bool_for_flag_fields():
+    for value in (1, 0, "true", None, [], 1.0):
+        try:
+            util.validate_schedule_write(0, "auto_turn_off", value)
+        except ValueError:
+            continue
+        raise AssertionError(f"auto_turn_off={value!r} should be rejected")
+
+
+# ── Schedule unique_id scheme ────────────────────────────────────────
+#
+# The failure this guards: two entities resolving to one unique_id, or an
+# id that moves when something cosmetic changes. Either registers a
+# duplicate in Home Assistant with `_2` appended, and both keep working.
+#
+# The scheme is deliberately uniform across everyone on the bed. There is
+# no special case for the authenticated account.
+
+_DEVICE = "dev-1"
+_PRIMARY = "11111111-1111-4111-8111-111111111111"
+_PARTNER = "22222222-2222-4222-8222-222222222222"
+
+# Every schedule entity key across all four platforms.
+_SCHEDULE_KEYS = (
+    # sensor
+    "schedule_duration",
+    "bedtime_temp",
+    "phase_1_temp",
+    "phase_2_temp",
+    "wakeup_temp",
+    # number
+    "bedtime_temp_offset",
+    "phase_1_temp_offset",
+    "phase_2_temp_offset",
+    "wakeup_temp_offset",
+    # time
+    "bedtime",
+    "wakeup_time",
+    # switch
+    "bedtime_is_active",
+    "wakeup_is_active",
+    "auto_turn_off",
+    "is_smart_temperature_active",
+    # binary_sensor
+    "is_override_applied",
+)
+
+
+def _all_ids(users=(_PRIMARY, _PARTNER)):
+    return [
+        util.schedule_unique_id(_DEVICE, key, user_id)
+        for user_id in users
+        for key in _SCHEDULE_KEYS
+    ]
+
+
+def test_every_schedule_id_is_namespaced_by_user():
+    """No special case for the authenticated account."""
+    for key in _SCHEDULE_KEYS:
+        assert (
+            util.schedule_unique_id(_DEVICE, key, _PRIMARY)
+            == f"{_DEVICE}_user_{_PRIMARY}_{key}"
+        )
+        assert (
+            util.schedule_unique_id(_DEVICE, key, _PARTNER)
+            == f"{_DEVICE}_user_{_PARTNER}_{key}"
+        )
+
+
+def test_no_duplicate_ids_across_two_or_three_people():
+    two = _all_ids()
+    assert len(two) == len(set(two)) == len(_SCHEDULE_KEYS) * 2
+    third = "33333333-3333-4333-8333-333333333333"
+    three = _all_ids((_PRIMARY, _PARTNER, third))
+    assert len(three) == len(set(three)) == len(_SCHEDULE_KEYS) * 3
+
+
+def test_the_two_people_never_share_an_id():
+    mine = {util.schedule_unique_id(_DEVICE, k, _PRIMARY) for k in _SCHEDULE_KEYS}
+    theirs = {util.schedule_unique_id(_DEVICE, k, _PARTNER) for k in _SCHEDULE_KEYS}
+    assert mine.isdisjoint(theirs)
+
+
+def test_two_devices_never_collide():
+    a = {util.schedule_unique_id("dev-a", k, _PRIMARY) for k in _SCHEDULE_KEYS}
+    b = {util.schedule_unique_id("dev-b", k, _PRIMARY) for k in _SCHEDULE_KEYS}
+    assert a.isdisjoint(b)
+
+
+def test_temperature_and_offset_keys_resolve_to_distinct_ids():
+    """`wakeup_temp` is a sensor, `wakeup_temp_offset` is a number.
+
+    Copying the wrong key into the wrong platform is the single most
+    likely way a duplicate ships.
+    """
+    for base in ("wakeup_temp", "bedtime_temp", "phase_1_temp", "phase_2_temp"):
+        plain = util.schedule_unique_id(_DEVICE, base, _PRIMARY)
+        offset = util.schedule_unique_id(_DEVICE, f"{base}_offset", _PRIMARY)
+        assert plain != offset
+        assert plain.endswith(f"_{base}")
+        assert offset.endswith(f"_{base}_offset")
+
+
+def test_unique_id_is_deterministic():
+    assert _all_ids() == _all_ids()
+
+
+# ── Schedule time parsing ────────────────────────────────────────────
+
+
+def test_parse_schedule_time_accepts_wall_clock():
+    assert util.parse_schedule_time("23:00") == _dt_time(23, 0)
+    assert util.parse_schedule_time("00:00") == _dt_time(0, 0)
+    assert util.parse_schedule_time("07:45") == _dt_time(7, 45)
+    assert util.parse_schedule_time("23:59") == _dt_time(23, 59)
+
+
+def test_parse_schedule_time_rejects_anything_malformed():
+    for bad in (
+        None, "", "nope", "24:00", "23:60", "7:00", "0700", "23:00:00",
+        2300, [], {}, True, "-1:00", "23:0",
+    ):
+        assert util.parse_schedule_time(bad) is None
+
+
+# ── Schedule duration ────────────────────────────────────────────────
+
+
+def test_schedule_duration_handles_the_overnight_rollover():
+    assert util.schedule_duration_text({"bedtime": "23:00", "wakeup": "07:00"}) == "8h 0m"
+    assert util.schedule_duration_text({"bedtime": "22:15", "wakeup": "06:45"}) == "8h 30m"
+    assert util.schedule_duration_text({"bedtime": "01:00", "wakeup": "09:20"}) == "8h 20m"
+
+
+def test_schedule_duration_treats_equal_times_as_a_full_day():
+    assert util.schedule_duration_text({"bedtime": "23:00", "wakeup": "23:00"}) == "24h 0m"
+
+
+def test_schedule_duration_rejects_malformed_input():
+    for bad in (
+        None,
+        {},
+        "nope",
+        {"bedtime": "23:00"},
+        {"wakeup": "07:00"},
+        {"bedtime": "24:00", "wakeup": "07:00"},
+        {"bedtime": "23:00", "wakeup": "07:60"},
+        {"bedtime": "2300", "wakeup": "07:00"},
+        {"bedtime": 2300, "wakeup": "07:00"},
+        {"bedtime": "23:00", "wakeup": None},
+    ):
+        assert util.schedule_duration_text(bad) is None

@@ -13,6 +13,7 @@ from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
+from . import util
 from .coordinator import OrionDataUpdateCoordinator
 from .entity import OrionBaseEntity
 
@@ -23,6 +24,7 @@ _LOGGER = logging.getLogger(__name__)
 # Mapping to zone_a/zone_b isn't verified yet; we expose the raw names
 # the server uses so the user can build their own side mapping.
 _TOPPER_SENSORS: tuple[str, ...] = ("sensor1", "sensor2")
+
 
 
 async def async_setup_entry(
@@ -43,6 +45,10 @@ async def async_setup_entry(
             entities.append(OrionSensorOnBedBinarySensor(coordinator, device_id, sensor_name))
         entities.append(OrionFirmwareUpdateBinarySensor(coordinator, device_id))
         entities.append(OrionSafetyProblemBinarySensor(coordinator, device_id))
+        for user_id in coordinator.schedule_user_ids():
+            entities.append(
+                OrionScheduleOverrideBinarySensor(coordinator, device_id, user_id)
+            )
 
     async_add_entities(entities)
 
@@ -164,6 +170,60 @@ class OrionFirmwareUpdateBinarySensor(OrionBaseEntity, BinarySensorEntity):
             for key, value in pending.items()
             if key != "is_available" and value is not None
         } or None
+
+
+class OrionScheduleOverrideBinarySensor(OrionBaseEntity, BinarySensorEntity):
+    """Whether a single-day override is currently applied for this person.
+
+    Distinct from the schedule itself. ``PUT /v1/sleep-schedules?action=override``
+    changes today's values without touching the seven weekday rows, and
+    stamps ``is_override_applied`` plus ``override_date``. Diagnostic
+    because it explains a surprising bedtime rather than being something
+    to act on.
+    """
+
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(
+        self,
+        coordinator: OrionDataUpdateCoordinator,
+        device_id: str,
+        user_id: str,
+    ) -> None:
+        super().__init__(coordinator, device_id)
+        self._user_id = user_id
+        self._attr_unique_id = util.schedule_unique_id(
+            device_id, "is_override_applied", user_id
+        )
+        self._attr_icon = "mdi:calendar-edit"
+        self._attr_name = (
+            f"{coordinator.display_name_for_user(user_id)} Schedule Override"
+        )
+
+    @property
+    def available(self) -> bool:
+        return super().available and self.coordinator.has_schedule_for_user(
+            self._user_id
+        )
+
+    @property
+    def is_on(self) -> bool | None:
+        schedule = self.coordinator.get_today_schedule(self._user_id)
+        if not schedule:
+            return None
+        value = schedule.get("is_override_applied")
+        return value if isinstance(value, bool) else None
+
+    @property
+    def extra_state_attributes(self) -> dict | None:
+        schedule = self.coordinator.get_today_schedule(self._user_id)
+        if not schedule:
+            return None
+        attrs = {
+            "override_date": schedule.get("override_date"),
+            "override_available": schedule.get("is_override_available"),
+        }
+        return {k: v for k, v in attrs.items() if v is not None} or None
 
 
 class OrionSafetyProblemBinarySensor(OrionBaseEntity, BinarySensorEntity):

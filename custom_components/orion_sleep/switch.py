@@ -12,8 +12,21 @@ from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
+from . import util
 from .coordinator import OrionDataUpdateCoordinator
 from .entity import OrionBaseEntity, OrionLiveSettingMixin
+
+# Per-person schedule booleans. (schedule field, label, icon)
+#
+# All four were measured against the live API on 2026-07-26 by writing to a
+# weekday row that was not that day, so nothing about that night could
+# change. See the Verification Log in AGENTS.md.
+_SCHEDULE_FLAGS: tuple[tuple[str, str, str], ...] = (
+    ("bedtime_is_active", "Bedtime Enabled", "mdi:bed-clock"),
+    ("wakeup_is_active", "Wake Up Enabled", "mdi:alarm"),
+    ("auto_turn_off", "Automatic Turn Off", "mdi:power-sleep"),
+    ("is_smart_temperature_active", "Smart Temperature", "mdi:auto-fix"),
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -33,6 +46,13 @@ async def async_setup_entry(
             continue
         entities.append(OrionPowerSwitch(coordinator, device_id))
         entities.append(OrionQuietModeSwitch(coordinator, device_id))
+        for user_id in coordinator.schedule_user_ids():
+            for field, label, icon in _SCHEDULE_FLAGS:
+                entities.append(
+                    OrionScheduleFlagSwitch(
+                        coordinator, device_id, user_id, field, label, icon
+                    )
+                )
         if len(coordinator.devices) == 1:
             entities.append(OrionAwayModeSwitch(coordinator, device_id))
 
@@ -228,3 +248,67 @@ class OrionQuietModeSwitch(OrionLiveSettingMixin, OrionBaseEntity, SwitchEntity)
     async def async_turn_off(self, **kwargs: Any) -> None:
         """Disable quiet mode."""
         await self._async_write_live_setting(False, self._reported_state())
+
+
+class OrionScheduleFlagSwitch(OrionBaseEntity, SwitchEntity):
+    """One person's schedule boolean, as a real control.
+
+    Writes go through the authenticated account carrying an explicit
+    ``user_id``, which the API honours, so one login sets both people's
+    schedules. All four fields were measured on 2026-07-26.
+
+    Always writes today's row, read from that person's own schedule rather
+    than computed locally. Devices carry their own timezone, so a local
+    weekday() would be wrong near midnight for anyone whose Home Assistant
+    timezone differs from the bed's.
+    """
+
+    def __init__(
+        self,
+        coordinator: OrionDataUpdateCoordinator,
+        device_id: str,
+        user_id: str,
+        field: str,
+        label: str,
+        icon: str,
+    ) -> None:
+        super().__init__(coordinator, device_id)
+        self._user_id = user_id
+        self._field = field
+        self._attr_unique_id = util.schedule_unique_id(device_id, field, user_id)
+        self._attr_icon = icon
+        self._attr_name = f"{coordinator.display_name_for_user(user_id)} {label}"
+
+    @property
+    def available(self) -> bool:
+        return super().available and self.coordinator.has_schedule_for_user(
+            self._user_id
+        )
+
+    @property
+    def is_on(self) -> bool | None:
+        schedule = self.coordinator.get_today_schedule(self._user_id)
+        if not schedule:
+            return None
+        value = schedule.get(self._field)
+        return value if isinstance(value, bool) else None
+
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        await self._write(True)
+
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        await self._write(False)
+
+    async def _write(self, value: bool) -> None:
+        day = self.coordinator.schedule_day_for_user(self._user_id)
+        if day is None:
+            raise HomeAssistantError(
+                "Orion has not reported a usable schedule for this person yet"
+            )
+        await self.coordinator.api_client.update_schedule_field(
+            day=day,
+            field=self._field,
+            value=value,
+            user_id=self._user_id,
+        )
+        await self.coordinator.async_request_refresh()

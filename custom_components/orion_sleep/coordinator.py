@@ -330,6 +330,56 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
         )
         return row if isinstance(row, dict) else None
 
+    def schedule_user_ids(self) -> list[str]:
+        """Orion user ids this integration owns a schedule for.
+
+        Derived from account identity, NOT from the schedule response.
+        A failed schedule fetch leaves that response empty, and building
+        the entity list from it would silently create zero entities after
+        one transient error, with no recovery until a reload.
+
+        Deliberately an allowlist. If the server ever returns a third id
+        (a guest, or a stale ex-partner) we do not spawn a full entity
+        family for someone we can neither name nor reliably write to.
+        """
+        ids: list[str] = []
+        if self.user_id:
+            ids.append(self.user_id)
+
+        partner_id = self.partner_user.get("id")
+        if (
+            isinstance(partner_id, str)
+            and partner_id
+            and partner_id != self.user_id
+            and self.partner_mapping_valid
+        ):
+            ids.append(partner_id)
+        return ids
+
+    def has_schedule_for_user(self, user_id: str) -> bool:
+        """Whether today's response carries a schedule row for this user.
+
+        Read availability only. Reads use the primary token for everyone,
+        so a partner whose own token has expired still has working
+        schedule entities. That asymmetry is deliberate.
+        """
+        return self.get_today_schedule(user_id) is not None
+
+    def schedule_day_for_user(self, user_id: str) -> int | None:
+        """Today's day-of-week index from that person's own schedule row.
+
+        Never computed locally. Devices carry their own ``timezone``, so a
+        local weekday() would be wrong near midnight for anyone whose
+        Home Assistant timezone differs from the bed's.
+        """
+        schedule = self.get_today_schedule(user_id)
+        if not schedule:
+            return None
+        day = schedule.get("day")
+        if isinstance(day, bool) or not isinstance(day, int):
+            return None
+        return day if day in range(7) else None
+
     # ── WebSocket integration ─────────────────────────────────────────
 
     @callback

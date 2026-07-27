@@ -139,20 +139,7 @@
         "name": "Away Mode"
       }
     },
-    "number": {
-      "bedtime_temp_offset": {
-        "name": "Bedtime Temperature Offset"
-      },
-      "phase_1_temp_offset": {
-        "name": "Asleep Phase 1 Offset"
-      },
-      "phase_2_temp_offset": {
-        "name": "Asleep Phase 2 Offset"
-      },
-      "wakeup_temp_offset": {
-        "name": "Wake Up Temperature Offset"
-      }
-    },
+    "number": {},
     "sensor": {
       "sleep_score": {
         "name": "Sleep Score"
@@ -186,21 +173,6 @@
       },
       "restless_time": {
         "name": "Restless Time"
-      },
-      "bedtime": {
-        "name": "Bedtime"
-      },
-      "wakeup_time": {
-        "name": "Wake Up Time"
-      },
-      "schedule_duration": {
-        "name": "Schedule Duration"
-      },
-      "bedtime_temp": {
-        "name": "Bedtime Temperature"
-      },
-      "wakeup_temp": {
-        "name": "Wake Up Temperature"
       },
       "current_temp_offset": {
         "name": "Current Temperature Offset"
