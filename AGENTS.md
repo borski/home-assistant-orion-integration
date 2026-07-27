@@ -249,7 +249,7 @@ Entities read from coordinator:
 | Button | Swap Bed Sides | `_action_swap_sides` | `POST /v1/sleep-configurations/user-swap`. Enabled by default: pressing it again reverses it, so a misfire is cheap. |
 | Button (disabled) | Split Zones | `_action_split_zones` | `POST /v1/sleep-configurations/user-split`. Disabled by default because **nothing in the live payload reports split state**, so a press has no observable result and no way to confirm what it did. |
 
-**A two-zone device with no partner linked exposes 72 base entities. A linked partner adds 55 more, for 127.** Counted from `core.entity_registry`, not derived: 17 device-level entities plus 55 per person.
+**A two-zone device with no partner linked exposes 76 base entities. A linked partner brings the total to 131.** Counted from `core.entity_registry`, not derived: 19 device-level entities, 57 for the authenticated account, 55 for the partner. The two sleepers are not symmetrical: `In Bed (Orion)` and `Schedule Phase` come from `/v1/sleep-session`, which reports for whoever holds the token, so they exist once rather than twice. By domain: 84 sensor, 13 switch, 11 binary_sensor, 11 number, 4 time, 3 button, 2 climate, 2 select, 1 update.
 
 - 2 climate entities, one per zone.
 - 36 sensors: 11 insights, 4 apnea, 5 schedule temperatures and duration, current offset, live connection, 6 topper sensor readings, 2 measured and 2 target zone temperatures, 2 cooling countdowns, LED brightness, firmware, and Wi-Fi signal.

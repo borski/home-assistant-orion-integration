@@ -4,7 +4,21 @@
 
 Custom [Home Assistant](https://www.home-assistant.io/) integration for the **Orion Sleep** smart mattress topper. Per-person temperature control, per-person schedules, live vitals, sleep tracking, and rapid cooling, all from your Home Assistant dashboard.
 
-**This repository is the actively maintained implementation.** It began as a fork and has since diverged substantially: the API contract was rebuilt from measured traffic, every write path was verified against a live device before shipping, and roughly two thirds of the original OpenAPI operations turned out to be fabrications and were deleted. Issues and pull requests belong here.
+## This is the maintained version
+
+This repository started as a fork and is now the successor. Development
+happens here, and issues and pull requests belong here.
+
+What changed since the fork:
+
+- The API contract was rebuilt from measured traffic and a decompile of the
+  Orion Android client. Two thirds of the original OpenAPI operations turned
+  out to be fabrications and were deleted.
+- Every write is tested against a live bed before it ships as a control.
+- Schedules, insights, vitals and controls are split per sleeper instead of
+  collapsed into one account view.
+- Three device routes were pointed at the wrong identifier and returned 403
+  or 404 on every call. They take the serial number, not the UUID.
 
 ## What "verified" means here
 
@@ -17,6 +31,42 @@ Every endpoint carries a confidence label, and the rule is enforced rather than 
 | **Speculative** | Guessed. Not implemented. |
 
 No control ships against a speculative route. Writes that change the bed are tested with a backup-and-restore probe, and where possible against a day of the week that is not today, so a test cannot change how the bed behaves that night.
+
+## Feature parity with the Orion app
+
+Everything the Orion app does to control the bed or read your sleep data is
+here, plus a few things the app doesn't show you at all.
+
+These are the deliberate exceptions:
+
+| Not implemented | Why |
+|---|---|
+| Sleep session rating | Feedback to Orion, changes nothing about the bed. |
+| Orion Intelligence | The app's recommendation feed. Advice, not control. |
+| SteadyTemp patch | Needs physical NFC taps against a phone. Not reachable from Home Assistant. |
+| Notification preferences | Push settings for the phone app. |
+| Profile editing | Name, email, date of birth, biological data. Account admin. |
+| Onboarding and the setup survey | One-time flows that only run before a bed is paired. |
+| Sleep advisor consultations | Booking a call with Orion. |
+| Apple Health sync | Home Assistant is the destination here, so the bridge is redundant. |
+| Subscription management | Billing. |
+| Water fill mode | The only live-device key never observed doing anything. Left out rather than shipped unverified. |
+| Hypnogram | 536 stage samples per night, with no sensible Home Assistant representation. The stage totals are exposed instead. |
+| Night mode | Purely client side in the app. There is nothing on the wire to build. |
+
+Two more work but have never run against a live bed, because no occasion has
+come up. Both are marked in their docstrings:
+
+- Firmware install. The plumbing is there and the entity is real, but Orion
+  has not offered an update since this was written, and it is the only write
+  with no undo.
+- Sending and accepting invitations. The request contract is measured, but
+  actually inviting somebody means texting a stranger to find out.
+
+Things the app doesn't give you and this does: sleep efficiency, sleep stage
+minutes you can graph, guest access expiry, apnea numbers as first class
+sensors, and Orion's own occupancy answer sitting next to the topper's so you
+can see them disagree.
 
 ## Features
 
@@ -111,6 +161,9 @@ This changes friendly names only. Entity IDs, unique IDs, history, statistics, a
 | `orion_sleep.remove_user_access` | the Bed Access sensor | Revoke access. Requires `confirm: true`. Not reversible without a fresh invite. |
 | `orion_sleep.create_guest` | the Bed Access sensor | Add an unattached guest slot, then give it a number with the next service. |
 | `orion_sleep.update_user_phone` | the Bed Access sensor | Attach or change a phone number for somebody on the bed. |
+| `orion_sleep.assign_zones` | the Bed Access sensor | Put somebody on a zone. The app calls this Replace. Displaces whoever was there. |
+| `orion_sleep.set_device_name` | the Bed Access sensor | Rename the bed in Orion. Home Assistant keeps its own name. |
+| `orion_sleep.set_device_timezone` | the Bed Access sensor | Set the bed's timezone. Schedules are stored per weekday, so this moves bedtime rather than relabelling it. |
 
 Point the override service at someone's Bedtime or Wake Up Time entity and it figures out whose schedule to write. You never handle a raw Orion user ID.
 
@@ -131,7 +184,7 @@ are not, move them instead:
 ```yaml
 action: orion_sleep.edit_sleep_session
 data:
-  entity_id: sensor.sleepy_borski_sleep_score
+  entity_id: sensor.sleepy_alex_sleep_score
   session_id: 0584dd36-e364-477b-a3f3-20964e26c700
   fell_asleep: "2026-07-27 03:30:00"
   woke_up: "2026-07-27 07:23:00"
@@ -230,7 +283,12 @@ that they have to accept.
 
 ## Entities
 
-One Home Assistant device per paired topper. A two-zone bed with no partner linked exposes **72 entities**. Linking a partner adds 55 more.
+One Home Assistant device per paired topper. A two-zone bed with no partner
+linked exposes **76 entities**. Linking a partner brings it to **131**.
+
+The two sides aren't quite symmetrical. `In Bed (Orion)` and `Schedule Phase`
+come from a route that reports for whoever holds the token, so they exist for
+the authenticated account only.
 
 Names below use `<person>` where the display alias is substituted, and `<zone>` for a bed side.
 
@@ -251,7 +309,6 @@ Names below use `<person>` where the display alias is substituted, and `<zone>` 
 | `<person>` Bedtime / Phase 1 / Phase 2 / Wake Up Offset | Number | App-style -10 to +10 slider, mapped non-linearly through the device's own lookup table. |
 | `<person>` Bedtime Enabled / Wake Up Enabled / Automatic Turn Off / Smart Temperature | Switch | The four schedule flags. |
 | `<person>` Schedule Override | Binary sensor | Whether a single-day override is in force, with the date as an attribute. Explains a surprising bedtime. |
-| `<person>` Next Scheduled Action | Sensor | Timestamp of the next change the bed will make on its own. See limitations. |
 
 Schedule writes carry an explicit user ID, so one account edits both people's schedules. A second login is only needed for the other person's sleep insights.
 
@@ -293,6 +350,8 @@ The minute sensors use `measurement`, deliberately. A cumulative state class wou
 | `<person>` Live Breath Rate | br/min, realtime. |
 | `<person>` On Bed | Occupancy. **See the occupancy caveat below.** |
 | `<person>` Bed Sensor Status | Raw classification, plus the undocumented raw fields as attributes. |
+| `<person>` In Bed (Orion) | Orion's own occupancy answer, from the route the app reads. Deliberately a second entity rather than a replacement, because where it disagrees with the pads is where the bug is. |
+| `<person>` Schedule Phase | Which part of tonight's schedule the bed thinks it is in. |
 
 `0` and `255` are server-side sentinels for empty bed and no reading yet. Both report as `unknown` on the primary entities, and both are preserved unmapped in the attributes.
 
@@ -304,53 +363,34 @@ The minute sensors use `measurement`, deliberately. A cumulative state class wou
 | Live Connection | Our socket to Orion. |
 | Device Online | The server's view of the topper. Genuinely different from Live Connection, and the two can disagree in both directions. |
 | Wi-Fi Signal, Firmware Version, Safety Problem | Standard diagnostics. Safety exposes error codes and descriptions as attributes. |
+| Bed Access | Who can use this bed and in what capacity, with access expiry. The target for every access service. |
+| Zone Mode | Whether the two halves are driven together or independently. |
+| Bed Orientation | Which side the bed faces. The app calls this "update your side to fix your insight". |
+| App Temperature Scale | Whether the Orion app shows the offset ladder or Fahrenheit. Account level. |
 | Reboot Control Tower | Disabled by default. |
 | Swap Bed Sides | Swaps which side each person is assigned. Pressing again reverses it. |
 | Split Zones | Disabled by default, because nothing in the payload reports split state, so a press has no observable result. |
 
 ## Dashboard example
 
-A two-column Lovelace view, one per sleeper, plus shared controls. Native cards only, no custom components required.
+A starting point: one column per sleeper, plus shared controls. Native cards
+only, no custom components.
 
-Replace `sleepy` with your device name, and `alex` / `sam` with your own display aliases. The quickest way to get the real IDs is **Developer Tools > States**, filtered on your device name.
+Replace `sleepy` with your device name and `alex` with your display alias.
+The fastest way to get real entity IDs is **Developer Tools > States**,
+filtered on your device name.
 
 ```yaml
 views:
   - title: Sleep
     path: sleep
-    icon: mdi:bed-king-outline
-    type: sections
-    max_columns: 3
-
-    badges:
-      - type: entity
-        entity: sensor.sleepy_live_connection
-        name: Live
-      - type: entity
-        entity: binary_sensor.sleepy_safety_problem
-        name: Safety
-        color: red
-        visibility:
-          - condition: state
-            entity: binary_sensor.sleepy_safety_problem
-            state: "on"
-
-    sections:
-      # ── One sleeper ────────────────────────────────────────────────
-      - type: grid
+    cards:
+      - type: vertical-stack
         cards:
-          - type: heading
-            heading: Alex
-            icon: mdi:bed
-
           - type: thermostat
             entity: climate.sleepy_alex_climate
-            features:
-              - type: climate-hvac-modes
-                hvac_modes: [heat_cool, "off"]
-
           - type: entities
-            title: Tonight
+            title: Alex
             state_color: true
             entities:
               - entity: time.sleepy_alex_bedtime
@@ -358,134 +398,68 @@ views:
               - entity: time.sleepy_alex_wake_up_time
                 name: Wake up
               - entity: sensor.sleepy_alex_schedule_duration
-                name: In bed for
+                name: Time in bed
+              - type: divider
+              - entity: number.sleepy_alex_bedtime_offset
+                name: Bedtime temp
+              - entity: number.sleepy_alex_wake_up_offset
+                name: Wake temp
               - type: divider
               - entity: switch.sleepy_alex_rapid_cool
-                name: Rapid Cool
-              - entity: number.sleepy_alex_rapid_cool_duration
-                name: Cool for
-              # Countdown only while cooling is actually running.
-              - type: conditional
-                conditions:
-                  - entity: switch.sleepy_alex_rapid_cool
-                    state: "on"
-                row:
-                  entity: sensor.sleepy_alex_cooling_ends
-                  name: Cooling ends
-
-          - type: entities
-            title: Temperature offsets
-            entities:
-              - entity: number.sleepy_alex_bedtime_offset
-                name: Bedtime
-              - entity: number.sleepy_alex_asleep_phase_1_offset
-                name: Asleep phase 1
-              - entity: number.sleepy_alex_asleep_phase_2_offset
-                name: Asleep phase 2
-              - entity: number.sleepy_alex_wake_up_offset
-                name: Wake up
-
-          # Nothing to show until a night has been processed.
-          - type: conditional
-            conditions:
-              - condition: state
-                entity: sensor.sleepy_alex_sleep_score
-                state_not: unknown
-              - condition: state
-                entity: sensor.sleepy_alex_sleep_score
-                state_not: unavailable
-            card:
-              type: gauge
-              entity: sensor.sleepy_alex_sleep_score
-              name: Last night
-              min: 0
-              max: 100
-              needle: true
-              severity: { red: 0, yellow: 60, green: 80 }
-
-      # ── The other sleeper: same block, different prefix ────────────
-      - type: grid
-        cards:
-          - type: heading
-            heading: Sam
-            icon: mdi:bed
-
-          - type: thermostat
-            entity: climate.sleepy_sam_climate
-            features:
-              - type: climate-hvac-modes
-                hvac_modes: [heat_cool, "off"]
-
-          - type: entities
-            title: Tonight
-            state_color: true
-            entities:
-              - entity: time.sleepy_sam_bedtime
-                name: Bedtime
-              - entity: time.sleepy_sam_wake_up_time
-                name: Wake up
-              - entity: sensor.sleepy_sam_schedule_duration
-                name: In bed for
+                name: Rapid cool
+              - entity: sensor.sleepy_alex_cooling_ends
+                name: Cooling ends
               - type: divider
-              - entity: switch.sleepy_sam_rapid_cool
-                name: Rapid Cool
-              - entity: number.sleepy_sam_rapid_cool_duration
-                name: Cool for
-              - type: conditional
-                conditions:
-                  - entity: switch.sleepy_sam_rapid_cool
-                    state: "on"
-                row:
-                  entity: sensor.sleepy_sam_cooling_ends
-                  name: Cooling ends
+              - entity: sensor.sleepy_alex_sleep_score
+                name: Last night
+              - entity: sensor.sleepy_alex_sleep_efficiency
+                name: Efficiency
+              - entity: sensor.sleepy_alex_apnea_index
+                name: Apnea index
+              - entity: binary_sensor.sleepy_alex_in_bed_orion
+                name: In bed
 
-      # ── Shared ─────────────────────────────────────────────────────
-      - type: grid
-        cards:
-          - type: heading
-            heading: Bed
-            icon: mdi:tune
-
-          - type: entities
-            title: Controls
-            state_color: true
-            entities:
-              - entity: switch.sleepy_power
-                name: Power
-              - entity: switch.sleepy_quiet_mode
-                name: Quiet mode
-              - entity: switch.sleepy_away_mode
-                name: Away mode
-              - entity: number.sleepy_led_brightness
-                name: LED brightness
-
-          - type: entities
-            title: Diagnostics
-            entities:
-              - entity: binary_sensor.sleepy_device_online
-                name: Server sees bed
-              - entity: sensor.sleepy_wi_fi_signal
-                name: Wi-Fi
-              - entity: update.sleepy_firmware
-                name: Firmware
+      - type: entities
+        title: Shared
+        state_color: true
+        entities:
+          - entity: switch.sleepy_power
+            name: Power
+          - entity: switch.sleepy_quiet_mode
+            name: Quiet mode
+          - entity: number.sleepy_led_brightness
+            name: LED brightness
+          - type: divider
+          - entity: sensor.sleepy_bed_access
+            name: Who has access
+          - entity: sensor.sleepy_zone_mode
+            name: Zone mode
+          - entity: binary_sensor.sleepy_device_online
+            name: Bed online
+          - entity: update.sleepy_firmware
+            name: Firmware
 ```
 
-### Handling entities with no data yet
+Duplicate the first column for the second sleeper, swapping `alex` for their
+alias.
 
-Sleep insights read `unknown` until Orion finishes processing a night, and `unavailable` when a partner is not linked. Home Assistant resolves a nonexistent entity to `unavailable`, so a single `visibility` block distinguishes all three states without any templating:
+### Entities with no data yet
+
+Sleep insights read `unknown` until a night finishes processing, which looks
+broken on a fresh install. Hide the card until there is something to show:
 
 ```yaml
-visibility:
-  # Hide until there is a real value. `unknown` means the entity exists
-  # and is healthy but has no data. `unavailable` means it was never
-  # created, which is what an unlinked partner looks like.
-  - condition: state
-    entity: sensor.sleepy_sam_sleep_score
-    state_not: unknown
-  - condition: state
-    entity: sensor.sleepy_sam_sleep_score
-    state_not: unavailable
+      - type: entities
+        title: Last night
+        entities:
+          - sensor.sleepy_alex_sleep_score
+          - sensor.sleepy_alex_total_sleep_time
+        visibility:
+          - condition: state
+            entity: sensor.sleepy_alex_sleep_score
+            state_not: unknown
 ```
+
 
 ## Troubleshooting
 
@@ -513,13 +487,13 @@ Grepping the vendor's own app shows it never reads `status_text` at all, so ther
 
 ### Everything else
 
-- Which physical side each topper pad corresponds to is unconfirmed. Pad-to-person naming is currently provisional.
-- `Next Scheduled Action` reads `unavailable` most of the time. The server sends an empty timeline array even mid-schedule. The sensor is correct, its source is empty.
-- Firmware install has never been executed, because no update has been offered since the integration was written. The route is app-derived and is the only write with no undo.
-- Cooling durations other than 30 minutes are unverified.
-- HRV is frequently `null` in real data and will report `unknown`.
-- Starting and stopping sleep sessions is not supported by the API.
-- Split Zones is shipped disabled because nothing reports split state.
+- Which physical topper pad corresponds to which side is unconfirmed. Pad to person naming is provisional and may be backwards.
+- The `phases` windows on the live session don't line up with the stored schedule, and nobody knows what anchors them. The sensor ships the numbers as given rather than claiming to interpret them.
+- Firmware install has never been executed, because no update has been offered since this was written. The route is app-derived and it is the only write with no undo.
+- Cooling above 120 minutes, and relief types other than cooling, are unverified.
+- HRV is frequently `null` in real data and reports `unknown`.
+- Split Zones ships disabled, because nothing in the payload reports split state and a press would have no observable result.
+- Sleep latency is deliberately absent. The fall-asleep timestamps only populate on sessions somebody hand-edited in the app, which makes them overrides rather than measurements.
 
 ## Contributing
 
