@@ -595,6 +595,43 @@ cannot be taken back.
 
 ## Verification Log
 
+### 2026-07-27 — `is_combined` and `combined_zone_ids`: not built, and why
+
+Both fields appear on every session in `/v2/insights`. **Neither appears
+anywhere in the Orion Android app.** Zero hits for `is_combined`,
+`isCombined`, `combined_zone_ids`, or `combinedZoneIds` across the full
+53MB decompile. The vendor's own client never reads them.
+
+That is the same situation as `status_text`, which the upstream
+occupancy logic was built on and which the app also never reads. That
+field is the source of the false positives this integration is still
+carrying. Building on a field the vendor ignores means there is no
+correct behaviour to copy and no way to tell right from wrong.
+
+What is real nearby: `combinedMode` is a genuine prop on the
+`DeviceAsset` bed-diagram tooltip, so the graphic renders differently in
+some state, and `Split Zones` is a real menu action gated on
+`DeviceAllowedAction.SPLIT` with a matching route. There is **no**
+"combine" or "merge" copy anywhere in the UI, so splitting is a user
+action and un-splitting is not, at least not by that name.
+
+Best reading, INFERENCE not measurement: a session is combined when one
+sleeper is detected across both zones instead of one, and
+`combined_zone_ids` lists the zones merged into that single night. Fits
+a bed where somebody sleeps alone in the middle. Unproven.
+
+Observed `false` / `null` on every session captured on a two-person bed
+where each sleeper owns a zone.
+
+Revisit only if a real `true` is ever seen in the wild. Do not build
+against the inference.
+
+Red herring for whoever looks next: `split_king` and `split_adjustable`
+are onboarding survey answers about the user's mattress and adjustable
+base. Nothing to do with zones.
+
+
+
 ### 2026-07-27 — User access: `access` is an object, and the invite contract
 
 **`shared_with[].access` is not a role string.** It is
