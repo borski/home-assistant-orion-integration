@@ -580,6 +580,46 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
         val = block.get("is_working")
         return bool(val) if val is not None else None
 
+    def sensor_diagnostics(
+        self, device_id: str, sensor_name: str
+    ) -> dict[str, Any] | None:
+        """Raw per-sensor fields the entities otherwise hide or drop.
+
+        Exists to diagnose a measured defect: the topper has been observed
+        reporting ``status_text == "normal"`` on a side that was provably
+        empty, so ``sensor_is_on_bed`` returns a false positive. The
+        vendor's own app never reads ``status_text`` at all (zero hits
+        across the decompiled bundle), so there is no upstream logic to
+        copy and the replacement has to be designed from observation.
+
+        ``heart_rate`` and ``breath_rate`` are returned RAW. The sensor
+        entities map the ``0`` and ``255`` sentinels to None, which is
+        right for automations but destroys the distinction between "empty
+        bed" and "no reading yet" — exactly the distinction needed here.
+
+        ``timestamp`` and ``uptime`` are deliberately excluded. They change
+        on every frame (~2s), and attributes are written to the recorder,
+        so including them would cost tens of thousands of rows a day to
+        answer a question ``is_working`` already answers.
+        """
+        block = self._sensor_block(device_id, sensor_name)
+        if not block:
+            return None
+
+        out: dict[str, Any] = {}
+        for key in (
+            "status",
+            "is_working",
+            "sign_of_asleep",
+            "sign_of_wake_up",
+        ):
+            if key in block:
+                out[key] = block[key]
+        for key in ("heart_rate", "breath_rate"):
+            if key in block:
+                out[f"raw_{key}"] = block[key]
+        return out or None
+
     def is_user_away(self, device_id: str) -> bool | None:
         """Check whether the authenticated user is away from this device.
 

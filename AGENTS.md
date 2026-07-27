@@ -229,16 +229,19 @@ Entities read from coordinator:
 | Binary Sensor (diag) | Firmware Update Available | `_firmware_update_available` | `status.pending_update.is_available`. Deliberately not an `update` entity: nothing in the payload carries the available version string. |
 | Number | LED Brightness | `_led_brightness` | 0-100 write via `PUT /v1/devices/{serial_number}/live`. Debounced with an optimistic local write and a post-write lock, mirroring the vendor app. |
 | Switch | Quiet Mode | `_quiet_mode` | Write via the same live route. Replaced the old read-only binary sensor once the write was measured. |
+| Binary Sensor | \<zone\> Cooling | `_{zoneId}_thermal_relief` | Hot flash relief running on that side. Reads `zones[].thermal_relief`, and counts as active only when `end_time` is finite AND in the future, which is the app's own test. Exposes `ends_at`, `previous_temp`, and `previous_on`, so the temperature the bed will restore is visible while cooling runs. |
+| Button | Swap Bed Sides | `_action_swap_sides` | `POST /v1/sleep-configurations/user-swap`. Enabled by default: pressing it again reverses it, so a misfire is cheap. |
+| Button (disabled) | Split Zones | `_action_split_zones` | `POST /v1/sleep-configurations/user-split`. Disabled by default because **nothing in the live payload reports split state**, so a press has no observable result and no way to confirm what it did. |
 
-**A two-zone device with no partner linked exposes 62 base entities. A linked partner adds 35 more, for 97.**
+**A two-zone device with no partner linked exposes 66 base entities. A linked partner adds 35 more, for 101.**
 
 - 2 climate entities, one per zone.
 - 31 sensors: 11 insights, 5 schedule temperatures and duration, current offset, live connection, 6 topper sensor readings, 2 measured and 2 target zone temperatures, LED brightness, firmware, and Wi-Fi signal.
 - 5 numbers: 4 schedule-phase temperature offsets plus LED brightness.
 - 2 time entities: bedtime and wake up time.
 - 7 switches: runtime power, Away Mode, quiet mode, and 4 schedule flags. Away Mode is omitted for accounts with multiple devices because the API action is account-global.
-- 6 binary sensors: sleep session, 2 occupancy sensors, firmware update available, safety problem, and the schedule override indicator.
-- 1 button: reboot. Forget Wi-Fi is intentionally not exposed.
+- 8 binary sensors: sleep session, 2 occupancy sensors, 2 cooling sensors, firmware update available, safety problem, and the schedule override indicator.
+- 3 buttons: reboot, swap bed sides, and split zones. The last two are real routes from the app; reboot and split ship disabled by default. Forget Wi-Fi is intentionally not exposed.
 
 A linked partner adds 11 insight sensors plus a second full schedule family of 16: 5 sensors, 4 offset numbers, 2 time entities, 4 switches, and the override indicator.
 
@@ -485,9 +488,80 @@ Two behaviours worth knowing:
 - **No route to clear an override has been found.** It appears to reset
   when the date rolls over.
 
+### `orion_sleep.start_cooling` and `orion_sleep.stop_cooling`
+
+Hot flash relief. Target a person's climate entity, which is how the
+caller picks a side without handling raw zone ids. `duration_minutes`
+defaults to 30.
+
+Genuinely per zone, so one person can cool their side while the other
+holds their schedule. The app's own copy describes it as pausing the
+schedule for temporary max cooling, and says an active session's
+countdown stays visible even when the feature is switched off, which is
+how we know the bed tracks the state server-side rather than the app
+running a local timer.
+
+The bed stashes `previous_temp` and `previous_on` when relief starts and
+restores them when it ends. Both are surfaced as attributes on the
+Cooling binary sensor.
+
+`PUT .../live/thermal-relief` is the **only** route in this client that
+legitimately sends multiple keys in one body. Every other live write is
+strictly one key per request.
+
+**Duration options are UNRESOLVED.** The app clamps its picker to a
+`HOT_FLASH_DURATION_OPTIONS` array that lives in a separate bytecode
+module and was not resolved to literals. 30 appears as the clamp seed.
+The service accepts 1 to 240 and lets the server reject what it dislikes.
+
 ## Verification Log
 
 Live-request confirmations, newest first. A claim only earns "measured" by appearing here.
+
+### 2026-07-27 — Occupancy is our invention, not the vendor's
+
+Grepped the entire decompiled app bundle for `left_bed`. **One hit, and it
+is `left_bed_seconds`, a movement statistic inside a completed session.**
+`status_text` appears **zero** times anywhere in the app.
+
+So the occupancy logic in this integration, `status_text != "left_bed"`,
+was invented upstream. Orion's own client never treats that field as a
+presence signal, and there is no vendor behaviour to copy.
+
+That matters because the sensor is provably wrong. On 2026-07-26 between
+a fifty minute window, with a single occupant and nothing else in the room, **both
+pads reported occupancy** and both reported plausible heart rates. One
+side was empty. A "nobody in bed" automation would never have fired.
+
+Two observations narrow the replacement:
+
+- The occupied pad showed a coherent settling curve, an elevated rate easing to
+  a resting rate, with breath rate holding a narrow band. The empty pad sat flat
+  and its breath rate swung by ten within seconds.
+- After a later restart **both pads reported identical values to the
+  digit** when an hour earlier they had differed by more than forty
+  beats per minute. Two bodies do not produce identical readings. That suggests the
+  topper duplicates a derived figure onto a side it cannot actually read,
+  which is far easier to detect than a signal-quality judgment.
+
+A plausible-heart-rate gate alone would NOT have caught this, since the
+empty pad reported believable numbers. Instrumentation was added (see the
+`status` integer, `is_working`, and raw unmapped rates on the pad status
+sensors) so the fix can be designed from recorded history instead of one
+night's impression. Deliberately not fixed yet.
+
+### 2026-07-27 — SteadyTemp patch endpoints: real, and not buildable here
+
+Five routes exist (`POST /v1/patches`, `GET /v1/patches`,
+`GET|PUT /v1/patches/{id}`, `POST /v1/patches/cancel`). App strings show
+what it is: an NFC wearable sleep test. Tap to activate, wear overnight,
+tap again in the morning, and Orion uses the uploaded `raw_data` to
+configure your temperature profile.
+
+**Not worth building.** Activation and completion both require physically
+tapping the patch to a phone. Home Assistant cannot do that, and the only
+HA-reachable state is whether a test is in progress, which the person
+wearing the patch already knows.
 
 ### 2026-07-26 — Insights session shape, read off a live in-progress session
 

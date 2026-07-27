@@ -819,6 +819,19 @@ class OrionSensorStatusTextSensor(_OrionLiveSensorBase):
     def native_value(self) -> str | None:
         return self.coordinator.sensor_status_text(self._device_id, self._sensor_name)
 
+    @property
+    def extra_state_attributes(self) -> dict[str, Any] | None:
+        """Raw sensor fields, kept for diagnosing the occupancy defect.
+
+        ``status_text`` has been seen reading ``normal`` on a provably
+        empty side, so the occupancy binary sensor built on it produces
+        false positives. These attributes carry the undocumented
+        ``status`` integer, the sleep/wake sign flags, and the unmapped
+        heart and breath rates so the real discriminator can be found in
+        recorded history rather than guessed at from one observation.
+        """
+        return self.coordinator.sensor_diagnostics(self._device_id, self._sensor_name)
+
 
 class _OrionZoneTempSensor(OrionBaseEntity, SensorEntity):
     """Shared plumbing for the per-zone temperature sensors.
