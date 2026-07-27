@@ -263,6 +263,20 @@
           "description": "Whether Orion adjusts temperatures automatically."
         }
       }
+    },
+    "start_cooling": {
+      "name": "Start cooling",
+      "description": "Start hot flash relief on one side of the bed. Overrides the schedule with maximum cooling, then restores what it was doing.",
+      "fields": {
+        "duration_minutes": {
+          "name": "Duration",
+          "description": "How long to keep cooling, in minutes."
+        }
+      }
+    },
+    "stop_cooling": {
+      "name": "Stop cooling",
+      "description": "End hot flash relief early on one side of the bed. The device restores the temperature and power state it saved when relief began."
     }
   }
 }

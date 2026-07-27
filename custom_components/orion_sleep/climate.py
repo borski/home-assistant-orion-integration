@@ -22,6 +22,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+import voluptuous as vol
 from homeassistant.components.climate import (
     ClimateEntity,
     ClimateEntityFeature,
@@ -31,12 +32,28 @@ from homeassistant.components.climate import (
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import ATTR_TEMPERATURE, UnitOfTemperature
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers import entity_platform
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .coordinator import OrionDataUpdateCoordinator
 from .entity import OrionBaseEntity
 
 _LOGGER = logging.getLogger(__name__)
+
+SERVICE_START_COOLING = "start_cooling"
+SERVICE_STOP_COOLING = "stop_cooling"
+
+# The app clamps its picker to a HOT_FLASH_DURATION_OPTIONS array that
+# lives in a separate bytecode module and was not resolved, so the exact
+# menu values are UNRESOLVED. 30 shows up as the clamp seed and the
+# default is that array's index 1. Whether the server enforces a range
+# at all is unknown, so this is a deliberately generous bound with a
+# default matching the one value we did see.
+DEFAULT_COOLING_MINUTES = 30
+MIN_COOLING_MINUTES = 1
+MAX_COOLING_MINUTES = 240
 
 # Only "standby" has ever been captured on the wire. The heating/cooling
 # spellings are guesses from the field name, so they are listed here but
@@ -83,6 +100,25 @@ async def async_setup_entry(
             entities.append(OrionZoneClimateEntity(coordinator, device_id, zone_id))
 
     async_add_entities(entities)
+
+    # Hot flash relief is per zone, and the climate entities are the only
+    # per-zone things in the integration. Registering here means the
+    # caller picks a side by naming a person's climate entity instead of
+    # handling raw zone ids.
+    platform = entity_platform.async_get_current_platform()
+    platform.async_register_entity_service(
+        SERVICE_START_COOLING,
+        {
+            vol.Optional("duration_minutes", default=DEFAULT_COOLING_MINUTES): vol.All(
+                cv.positive_int,
+                vol.Range(min=MIN_COOLING_MINUTES, max=MAX_COOLING_MINUTES),
+            )
+        },
+        "async_start_cooling",
+    )
+    platform.async_register_entity_service(
+        SERVICE_STOP_COOLING, {}, "async_stop_cooling"
+    )
 
 
 class OrionZoneClimateEntity(OrionBaseEntity, ClimateEntity):
@@ -231,3 +267,39 @@ class OrionZoneClimateEntity(OrionBaseEntity, ClimateEntity):
         made from one zone's card affects that user's whole schedule.
         """
         return
+
+    async def async_start_cooling(self, duration_minutes: int) -> None:
+        """Start hot flash relief on this zone only.
+
+        Overrides the schedule with maximum cooling for the requested
+        window, then the device restores what it was doing. The other
+        side of the bed is untouched.
+
+        APP-DERIVED until someone watches it run. It is the one route in
+        this integration that legitimately sends several keys in one
+        body, because that is what the vendor's own client does.
+        """
+        try:
+            await self.coordinator.api_client.start_thermal_relief(
+                self._serial(), [self._zone_id], duration_minutes
+            )
+        except ValueError as err:
+            raise HomeAssistantError(str(err)) from err
+
+        await self.coordinator.async_request_refresh()
+
+    async def async_stop_cooling(self) -> None:
+        """End hot flash relief early on this zone.
+
+        The device restores the `previous_temp` and `previous_on` it
+        stashed when relief started. Safe to call when nothing is
+        running: the server treats it as a no-op rather than an error.
+        """
+        try:
+            await self.coordinator.api_client.cancel_thermal_relief(
+                self._serial(), [self._zone_id]
+            )
+        except ValueError as err:
+            raise HomeAssistantError(str(err)) from err
+
+        await self.coordinator.async_request_refresh()

@@ -310,6 +310,48 @@ class OrionApiClient:
             json_data={"user_id": user_id, "is_away": is_away},
         )
 
+    async def swap_user_sides(self, user_id: str) -> dict:
+        """POST /v1/sleep-configurations/user-swap — swap the two bed sides.
+
+        Reassigns which zone each sleeper occupies. The app surfaces this
+        as "Swap Sides" under a user's Quick Actions, so it is scoped to a
+        user even though the effect is felt by both.
+
+        Confidence: APP-DERIVED. Route and body read from the Orion Android
+        v2.4.1 bundle (path at decompiled 675421, `user_id` body key at
+        675430). Never executed.
+
+        An earlier cut of this integration guessed that `swap` was an
+        `action_type` on POST /v1/devices/{serial}/action because it appears
+        in `permissions.allowed_actions`. That returned 404. `allowed_actions`
+        is a UI capability list, not a dispatch vocabulary. This is the real
+        route.
+        """
+        await self.ensure_valid_token()
+        return await self._request(
+            "POST",
+            "/v1/sleep-configurations/user-swap",
+            json_data={"user_id": user_id},
+        )
+
+    async def split_user_zones(self, user_id: str) -> dict:
+        """POST /v1/sleep-configurations/user-split — split the bed zones.
+
+        The app surfaces this as "Split Zones" beside "Swap Sides". Whether
+        it toggles or only ever splits is UNRESOLVED: the bundle shows a
+        single call site with no read-back of a combined/split flag, and no
+        field in the measured live payload obviously carries that state.
+
+        Confidence: APP-DERIVED. Path at decompiled 675512, `user_id` body
+        key at 675521. Never executed.
+        """
+        await self.ensure_valid_token()
+        return await self._request(
+            "POST",
+            "/v1/sleep-configurations/user-split",
+            json_data={"user_id": user_id},
+        )
+
     # ── Device live / metadata / action endpoints ─────────────────────
 
     async def get_live_device(self, device_serial: str) -> dict:
@@ -407,6 +449,97 @@ class OrionApiClient:
             "PUT",
             f"/v1/devices/{device_serial}/live",
             json_data={field: value},
+        )
+
+    async def start_thermal_relief(
+        self,
+        device_serial: str,
+        zone_ids: list[str],
+        duration_minutes: int,
+        relief_type: str = "cool",
+    ) -> dict:
+        """PUT /v1/devices/{serial_number}/live/thermal-relief — hot flash relief.
+
+        Temporarily overrides the schedule with maximum cooling on the
+        named zones, then restores the previous state when it expires.
+        The app calls this Hot Flash Relief and describes it as "pause
+        schedules for temporary max cooling relief".
+
+        **Confidence: APP-DERIVED.** Read from Orion Android v2.4.1
+        Hermes bytecode, never executed. `_startThermalRelief` builds
+        the path at decompiled line 938590 and dispatches a PUT at
+        938599. The caller assembles the body at 1281908 to 1281910:
+        `type`, `zones`, `duration_minutes`.
+
+        Unlike every other route in this client, this one **legitimately
+        takes multiple keys in one body.** It is the only multi-key
+        device-live payload the app sends.
+
+        `zone_ids` is a list because relief is per zone, which on a
+        shared bed means per person. Cooling one side leaves the other
+        untouched.
+
+        `duration_minutes` is an integer. The app clamps its own picker
+        to a `HOT_FLASH_DURATION_OPTIONS` set that lives in a separate
+        bytecode module and was not resolved, so the exact menu values
+        are UNRESOLVED. 30 appears as the clamp seed and the default is
+        that array's index 1. Whether the server enforces a range at all
+        is unknown, so this method does not impose one beyond requiring
+        a positive integer.
+
+        `relief_type` is `"cool"` at the only observed call site. No
+        heating variant was found.
+
+        The server tracks relief state, so it is readable afterwards at
+        `zones[].thermal_relief`. The app's own settings copy confirms
+        this: "an active session's countdown stays visible even when
+        this is off."
+
+        On failure the app raises "Failed to start thermal relief"
+        (decompiled 938602), so a non-2xx here is a real rejection
+        rather than a silent no-op.
+        """
+        if not zone_ids:
+            raise ValueError("start_thermal_relief requires at least one zone id")
+        if isinstance(duration_minutes, bool) or not isinstance(duration_minutes, int):
+            raise ValueError(
+                f"duration_minutes must be an int, got {type(duration_minutes).__name__}"
+            )
+        if duration_minutes <= 0:
+            raise ValueError(f"duration_minutes must be positive, got {duration_minutes}")
+
+        await self.ensure_valid_token()
+        return await self._request(
+            "PUT",
+            f"/v1/devices/{device_serial}/live/thermal-relief",
+            json_data={
+                "type": relief_type,
+                "zones": list(zone_ids),
+                "duration_minutes": duration_minutes,
+            },
+        )
+
+    async def cancel_thermal_relief(
+        self, device_serial: str, zone_ids: list[str]
+    ) -> dict:
+        """POST /v1/devices/{serial_number}/live/thermal-relief/cancel.
+
+        Ends relief early on the named zones. The device restores the
+        `previous_temp` and `previous_on` it stashed when relief began.
+
+        **Confidence: APP-DERIVED.** `_cancelThermalRelief` builds the
+        path at decompiled line 938680 and POSTs `{"zones": [...]}` at
+        938689 to 938692. The caller maps zone objects to bare ids
+        before passing them.
+        """
+        if not zone_ids:
+            raise ValueError("cancel_thermal_relief requires at least one zone id")
+
+        await self.ensure_valid_token()
+        return await self._request(
+            "POST",
+            f"/v1/devices/{device_serial}/live/thermal-relief/cancel",
+            json_data={"zones": list(zone_ids)},
         )
 
     async def update_live_device_zone(

@@ -649,6 +649,29 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
         """Power state for one zone, from `live.zones[].on`."""
         return live_state.zone_is_on(self.live_devices.get(device_id), zone_id)
 
+    def zone_thermal_relief(self, device_id: str, zone_id: str) -> dict | None:
+        """Raw thermal-relief block for one zone, or None."""
+        return live_state.zone_thermal_relief(self.live_devices.get(device_id), zone_id)
+
+    def thermal_relief_until(self, device_id: str, zone_id: str):
+        """When active hot flash relief on this zone ends, else None.
+
+        Returns an aware datetime. Mirrors the app's own test: relief
+        counts as running only when `end_time` is a finite number still
+        in the future, so a stale block the server never cleared does
+        not read as an active session.
+        """
+        relief = self.zone_thermal_relief(device_id, zone_id)
+        end_ms = live_state.thermal_relief_end_ms(relief)
+        if end_ms is None:
+            return None
+        ends = dt_util.utc_from_timestamp(end_ms / 1000)
+        return ends if ends > dt_util.utcnow() else None
+
+    def thermal_relief_active(self, device_id: str, zone_id: str) -> bool:
+        """Whether hot flash relief is currently running on this zone."""
+        return self.thermal_relief_until(device_id, zone_id) is not None
+
     def zone_thermal_state(self, device_id: str, zone_id: str) -> str | None:
         """Raw `thermal_state` for one zone.
 

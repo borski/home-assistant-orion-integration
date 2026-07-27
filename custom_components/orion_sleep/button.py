@@ -9,9 +9,11 @@ conflating them is what broke the first cut of this platform:
   `POST /v1/devices/{serial}/action` accepts only `reboot` and
   `forget_wifi` (measured 2026-07-26). Other write routes are unknown.
 
-`split` and `swap` are not exposed despite appearing in `allowed_actions`.
-The candidate routes returned a bare 404 and were removed from the measured
-OpenAPI contract. Their real write routes remain unknown.
+`split` and `swap` DO have real routes, found in the Orion Android v2.4.1
+bundle (2026-07-26). They live under `/v1/sleep-configurations/`, take a
+`user_id` body, and have nothing to do with the action endpoint. The earlier
+404s came from firing the capability name at `/action`, which was the exact
+mistake this module's opening paragraph warns about.
 
 ⚠️ `device_forget_wifi` and `device_deactivate` are permitted by the
 account and deliberately NOT exposed. Forgetting WiFi strands the bed —
@@ -49,8 +51,12 @@ class OrionButtonDef:
     icon: str
     # Capability name in permissions.allowed_actions — the DISPLAY gate.
     gate: str
-    # How to perform it. The measured action route takes the serial number.
-    call: Callable[[OrionApiClient, str], Awaitable[dict]]
+    # How to perform it. Buttons dispatch to three different routes with
+    # three different identifiers, so every call gets both the serial and
+    # the authenticated user id and takes whichever it needs.
+    call: Callable[[OrionApiClient, str, str], Awaitable[dict]]
+    # Disruptive or unproven actions stay out of the registry by default.
+    enabled_default: bool = False
 
 
 BUTTONS: tuple[OrionButtonDef, ...] = (
@@ -61,9 +67,29 @@ BUTTONS: tuple[OrionButtonDef, ...] = (
         gate="device_reboot",
         # Bare "reboot" (not "device_reboot"), keyed as action_type,
         # addressed by SERIAL. All three were wrong in the first cut.
-        call=lambda client, serial: client.device_action(
+        call=lambda client, serial, user_id: client.device_action(
             device_serial=serial, action="reboot"
         ),
+    ),
+    OrionButtonDef(
+        key="swap_sides",
+        name="Swap Bed Sides",
+        icon="mdi:swap-horizontal",
+        gate="swap",
+        # Its own sleep-configurations route, keyed by USER id, not serial.
+        call=lambda client, serial, user_id: client.swap_user_sides(user_id),
+        # Reversible: pressing again swaps back. Safe to have on hand.
+        enabled_default=True,
+    ),
+    OrionButtonDef(
+        key="split_zones",
+        name="Split Zones",
+        icon="mdi:arrow-split-vertical",
+        gate="split",
+        call=lambda client, serial, user_id: client.split_user_zones(user_id),
+        # Left disabled: whether this toggles or only ever splits is
+        # UNRESOLVED, and no field in the live payload reports the state,
+        # so there is no way to see what a press did.
     ),
 )
 
@@ -98,7 +124,6 @@ class OrionActionButton(OrionBaseEntity, ButtonEntity):
     """Fires one device action. No state — the API exposes none for these."""
 
     _attr_entity_category = EntityCategory.CONFIG
-    _attr_entity_registry_enabled_default = False
 
     def __init__(
         self,
@@ -111,6 +136,7 @@ class OrionActionButton(OrionBaseEntity, ButtonEntity):
         self._attr_name = definition.name
         self._attr_icon = definition.icon
         self._attr_unique_id = f"{device_id}_action_{definition.key}"
+        self._attr_entity_registry_enabled_default = definition.enabled_default
 
     async def async_press(self) -> None:
         """Invoke this button's own endpoint."""
@@ -122,5 +148,10 @@ class OrionActionButton(OrionBaseEntity, ButtonEntity):
             raise HomeAssistantError(
                 f"No serial_number for Orion device {self._device_id}"
             )
-        await self._def.call(self.coordinator.api_client, str(serial))
+        user_id = self.coordinator.user_id
+        if not user_id:
+            raise HomeAssistantError(
+                "Orion has not resolved the authenticated user yet"
+            )
+        await self._def.call(self.coordinator.api_client, str(serial), user_id)
         await self.coordinator.async_request_refresh()

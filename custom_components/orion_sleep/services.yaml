@@ -66,3 +66,27 @@ override_schedule:
       required: false
       selector:
         boolean:
+
+start_cooling:
+  target:
+    entity:
+      integration: orion_sleep
+      domain: climate
+  fields:
+    duration_minutes:
+      required: false
+      default: 30
+      example: 30
+      selector:
+        number:
+          min: 1
+          max: 240
+          step: 1
+          unit_of_measurement: min
+          mode: box
+
+stop_cooling:
+  target:
+    entity:
+      integration: orion_sleep
+      domain: climate

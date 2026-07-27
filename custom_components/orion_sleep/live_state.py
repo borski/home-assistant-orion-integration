@@ -48,6 +48,36 @@ def zone_measured_temp(live: dict | None, zone_id: str) -> float | None:
     return _numeric(zone.get("temp")) if zone else None
 
 
+def zone_thermal_relief(live: dict | None, zone_id: str) -> dict | None:
+    """Return a zone's active thermal-relief (hot flash) block, or None.
+
+    Measured shape, read from the app's own consumer at decompiled line
+    664358 onward: ``zones[].thermal_relief`` is absent or null when no
+    relief is running, and otherwise carries ``end_time`` (Unix ms),
+    ``previous_temp`` and ``previous_on`` (the state to restore when it
+    expires), and ``type``.
+
+    The app treats relief as active only when ``end_time`` is a finite
+    number in the future, so a stale block left behind by the server is
+    not mistaken for a running session. Callers should apply the same
+    test rather than trusting the block's mere presence.
+    """
+    if not isinstance(live, dict):
+        return None
+    zone = _find_zone(live.get("zones"), zone_id)
+    if not isinstance(zone, dict):
+        return None
+    relief = zone.get("thermal_relief")
+    return relief if isinstance(relief, dict) else None
+
+
+def thermal_relief_end_ms(relief: object) -> float | None:
+    """Return a thermal-relief end time as a Unix millisecond value."""
+    if not isinstance(relief, dict):
+        return None
+    return _numeric(relief.get("end_time"))
+
+
 def zone_thermal_state(live: dict | None, zone_id: str) -> str | None:
     """Return the raw thermal state for a zone."""
     if not isinstance(live, dict):

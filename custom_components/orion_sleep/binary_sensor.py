@@ -45,6 +45,10 @@ async def async_setup_entry(
             entities.append(OrionPartnerSessionActiveBinarySensor(coordinator, device_id))
         for sensor_name in _TOPPER_SENSORS:
             entities.append(OrionSensorOnBedBinarySensor(coordinator, device_id, sensor_name))
+        for zone_id in coordinator.device_zone_ids(device_id):
+            entities.append(
+                OrionThermalReliefBinarySensor(coordinator, device_id, zone_id)
+            )
         entities.append(OrionFirmwareUpdateBinarySensor(coordinator, device_id))
         entities.append(OrionDeviceOnlineBinarySensor(coordinator, device_id))
         entities.append(OrionSafetyProblemBinarySensor(coordinator, device_id))
@@ -160,6 +164,55 @@ class OrionSensorOnBedBinarySensor(OrionBaseEntity, BinarySensorEntity):
         # Report available whenever we have a live payload at all,
         # even if the individual sensor hasn't reported yet.
         return self.coordinator.sensor_status_text(self._device_id, self._sensor_name) is not None
+
+
+class OrionThermalReliefBinarySensor(OrionBaseEntity, BinarySensorEntity):
+    """Whether hot flash relief is currently cooling one side of the bed.
+
+    Relief is per zone, so on a shared bed this is per person. One side
+    can be cooling while the other holds its schedule.
+
+    No `device_class`. `RUNNING` renders "Running / Not running", and
+    `COLD` inverts the sense (it means "too cold"). A plain On / Off with
+    a clear name reads better than either.
+    """
+
+    def __init__(
+        self,
+        coordinator: OrionDataUpdateCoordinator,
+        device_id: str,
+        zone_id: str,
+    ) -> None:
+        super().__init__(coordinator, device_id)
+        self._zone_id = zone_id
+        self._attr_unique_id = f"{device_id}_{zone_id}_thermal_relief"
+        self._attr_icon = "mdi:snowflake-thermometer"
+        self._attr_name = f"{coordinator.zone_label(device_id, zone_id)} Cooling"
+
+    @property
+    def is_on(self) -> bool:
+        """True while relief is running and has not expired."""
+        return self.coordinator.thermal_relief_active(self._device_id, self._zone_id)
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        """Expose when relief ends and what the bed will restore.
+
+        `previous_temp` and `previous_on` are the schedule state the
+        device stashed when relief began, so they answer "what happens
+        when this finishes" without needing a second lookup.
+        """
+        ends = self.coordinator.thermal_relief_until(self._device_id, self._zone_id)
+        if ends is None:
+            return {}
+
+        attrs: dict = {"ends_at": ends.isoformat()}
+        relief = self.coordinator.zone_thermal_relief(self._device_id, self._zone_id)
+        if isinstance(relief, dict):
+            for key in ("type", "previous_temp", "previous_on"):
+                if key in relief:
+                    attrs[key] = relief[key]
+        return attrs
 
 
 class OrionFirmwareUpdateBinarySensor(OrionBaseEntity, BinarySensorEntity):
