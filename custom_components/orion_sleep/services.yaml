@@ -131,3 +131,23 @@ delete_sleep_session:
       default: false
       selector:
         boolean:
+
+confirm_sleep_session:
+  target:
+    entity:
+      integration: orion_sleep
+      domain: sensor
+  fields:
+    session_id:
+      required: true
+      selector:
+        text:
+    claim:
+      default: me
+      selector:
+        select:
+          options:
+            - value: me
+              label: This person
+            - value: both
+              label: Both sleepers

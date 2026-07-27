@@ -37,6 +37,7 @@ _LOGGER = logging.getLogger(__name__)
 
 SERVICE_LIST_SLEEP_SESSIONS = "list_sleep_sessions"
 SERVICE_DELETE_SLEEP_SESSION = "delete_sleep_session"
+SERVICE_CONFIRM_SLEEP_SESSION = "confirm_sleep_session"
 
 _INSIGHT_DISPLAY_NAMES = {
     "sleep_score": "Sleep Score",
@@ -59,6 +60,10 @@ _INSIGHT_DISPLAY_NAMES = {
     "light_sleep_minutes": "Light Sleep Minutes",
     "awake_minutes": "Awake Minutes",
     "last_session_end": "Last Session End",
+    "sleep_quality": "Sleep Quality",
+    "time_in_bed": "Time in Bed",
+    "sleep_efficiency": "Sleep Efficiency",
+    "session_confidence": "Session Confidence",
     "apnea_ahi": "Apnea Index",
     "apnea_obstructive_time": "Obstructive Apnea Time",
     "apnea_central_time": "Central Apnea Time",
@@ -157,41 +162,46 @@ def _seconds_to_ms(seconds: float | int | None) -> str | None:
     return f"{s}s"
 
 
-def _score_quality(score: float | int | None) -> str | None:
-    """Return a quality label for a sleep score, matching the app's rating."""
-    if score is None:
+def _time_in_bed(session: dict | None) -> float | None:
+    """Minutes between getting in and getting out.
+
+    Distinct from time asleep. On one measured night the stay ran 80
+    minutes past the end of the session itself.
+    """
+    if not isinstance(session, dict):
         return None
-    if score >= 90:
-        return "Excellent"
-    if score >= 80:
-        return "Good"
-    if score >= 60:
-        return "Fair"
-    return "Poor"
+    return util.duration_minutes(
+        session.get("in_bed_start_time"), session.get("in_bed_end_time")
+    )
 
 
-def _get_score(coordinator_data: dict) -> float | None:
-    """Get the most recent sleep score from insights overview."""
+def _get_day_field(coordinator_data: dict, field: str) -> Any:
+    """Newest non-null day-level value for one field.
+
+    `overview` and `data` both carry `score`, `quality`, and `color` per
+    day. Overview wins because it is the summary the app itself renders,
+    with `data` as a fallback for accounts where overview comes back
+    empty.
+    """
     insights = coordinator_data.get("insights", {})
-    overview = insights.get("overview", {})
-    if not overview:
-        # Fall back to data entries
-        data = insights.get("data", {})
-        for date_key in sorted(data.keys(), reverse=True):
-            score = data[date_key].get("score")
-            if score is not None:
-                return score
-        return None
-    for date_key in sorted(overview.keys(), reverse=True):
-        score = overview[date_key].get("score")
-        if score is not None:
-            return score
+    for source in (insights.get("overview", {}), insights.get("data", {})):
+        if not isinstance(source, dict):
+            continue
+        for date_key in sorted(source.keys(), reverse=True):
+            day = source[date_key]
+            if not isinstance(day, dict):
+                continue
+            value = day.get(field)
+            if value is not None:
+                return value
     return None
 
 
-def _get_partner_score(coordinator_data: dict) -> float | None:
-    """Get the most recent score returned by the partner account."""
-    return _get_score({"insights": coordinator_data.get("partner_insights", {})})
+def _get_partner_day_field(coordinator_data: dict, field: str) -> Any:
+    """Same lookup against the partner account's own insights."""
+    return _get_day_field(
+        {"insights": coordinator_data.get("partner_insights", {})}, field
+    )
 
 
 # ── Sensor descriptions ───────────────────────────────────────────────────
@@ -207,6 +217,9 @@ class OrionSensorEntityDescription(SensorEntityDescription):
     # Read from the newest FINISHED session rather than the newest one.
     # Only set this where an in-progress night would give a wrong answer.
     completed_only: bool = False
+    # Read this field off the day summary instead of a session. Day
+    # values (score, quality, colour) are not session-scoped.
+    day_field: str | None = None
 
 
 # Duration sensors: we intentionally do NOT set device_class=DURATION.
@@ -218,11 +231,11 @@ INSIGHT_SENSOR_DESCRIPTIONS: tuple[OrionSensorEntityDescription, ...] = (
     OrionSensorEntityDescription(
         key="sleep_score",
         translation_key="sleep_score",
+        day_field="score",
         native_unit_of_measurement="points",
         state_class=SensorStateClass.MEASUREMENT,
         icon="mdi:medal-outline",
-        value_fn=lambda session: None,  # handled specially in the entity
-        extra_attrs_fn=lambda session: {},  # handled specially in the entity
+        value_fn=lambda session: None,  # day-level, see day_field
     ),
     OrionSensorEntityDescription(
         key="total_sleep_time",
@@ -371,6 +384,60 @@ INSIGHT_SENSOR_DESCRIPTIONS: tuple[OrionSensorEntityDescription, ...] = (
     ),
     # When the last finished night actually ended. state_class is left
     # unset because HA rejects one on a non-numeric sensor.
+    OrionSensorEntityDescription(
+        key="sleep_quality",
+        day_field="quality",
+        icon="mdi:star-outline",
+        value_fn=lambda session: None,  # day-level, see day_field
+    ),
+    # ── Session shape ─────────────────────────────────────────────
+    #
+    # Time in bed is the whole stay, including the stretch spent awake
+    # before and after the session proper. Efficiency is the share of
+    # that actually slept, which is the standard way to read the pair.
+    #
+    # Sleep latency is deliberately absent. The obvious source fields,
+    # `user_fallasleep_timestamp` and `user_wakeup_timestamp`, come back
+    # null on completed sessions: they are user-supplied overrides from
+    # the app's edit screen, not measurements. Deriving latency from
+    # `in_bed_start_time` instead would inherit the occupancy false
+    # positive and report hours of lying awake that never happened.
+    OrionSensorEntityDescription(
+        key="time_in_bed",
+        native_unit_of_measurement=UnitOfTime.MINUTES,
+        state_class=SensorStateClass.MEASUREMENT,
+        suggested_display_precision=0,
+        icon="mdi:bed-clock",
+        completed_only=True,
+        value_fn=lambda session: _time_in_bed(session),
+        extra_attrs_fn=lambda session: {
+            "in_bed_start": (session or {}).get("in_bed_start_time"),
+            "in_bed_end": (session or {}).get("in_bed_end_time"),
+        },
+    ),
+    OrionSensorEntityDescription(
+        key="sleep_efficiency",
+        native_unit_of_measurement=PERCENTAGE,
+        state_class=SensorStateClass.MEASUREMENT,
+        suggested_display_precision=0,
+        icon="mdi:percent-outline",
+        completed_only=True,
+        value_fn=lambda session: util.sleep_efficiency(
+            util.session_subsection(session, "sleep_summary").get("time_asleep"),
+            _time_in_bed(session),
+        ),
+    ),
+    OrionSensorEntityDescription(
+        key="session_confidence",
+        native_unit_of_measurement=PERCENTAGE,
+        state_class=SensorStateClass.MEASUREMENT,
+        suggested_display_precision=0,
+        icon="mdi:check-decagram-outline",
+        completed_only=True,
+        value_fn=lambda session: util.confidence_percent(
+            (session or {}).get("confidence")
+        ),
+    ),
     # ── Breathing ─────────────────────────────────────────────────
     #
     # Reported per completed session and previously discarded entirely.
@@ -564,6 +631,14 @@ async def async_setup_entry(
         },
         "async_delete_sleep_session",
     )
+    platform.async_register_entity_service(
+        SERVICE_CONFIRM_SLEEP_SESSION,
+        {
+            vol.Required("session_id"): cv.string,
+            vol.Optional("claim", default="me"): vol.In(["me", "both"]),
+        },
+        "async_confirm_sleep_session",
+    )
 
 
 # ── Entities ──────────────────────────────────────────────────────────────
@@ -593,8 +668,8 @@ class OrionSensorEntity(OrionBaseEntity, SensorEntity):
             return self.coordinator.get_latest_completed_session()
         return self.coordinator.get_latest_session()
 
-    def _score(self) -> float | None:
-        return _get_score(self.coordinator.data or {})
+    def _day_value(self, field: str) -> Any:
+        return _get_day_field(self.coordinator.data or {}, field)
 
     # ── Session management ────────────────────────────────────────
     #
@@ -611,6 +686,9 @@ class OrionSensorEntity(OrionBaseEntity, SensorEntity):
     def _sessions_owner(self) -> str:
         return self.coordinator.primary_name()
 
+    def _sessions_user_id(self) -> str | None:
+        return self.coordinator.user_id
+
     async def async_list_sleep_sessions(self, limit: int = 30) -> dict:
         """Return this person's recent sessions, newest first.
 
@@ -624,6 +702,62 @@ class OrionSensorEntity(OrionBaseEntity, SensorEntity):
             "count": len(sessions),
             "sessions": sessions,
         }
+
+    async def async_confirm_sleep_session(
+        self, session_id: str, claim: str = "me"
+    ) -> None:
+        """Tell the bed who a session belongs to.
+
+        `claim="me"` attributes the night to this entity's person.
+        `claim="both"` attributes it to both sleepers, which is the
+        vendor app's "both of us" option and is what a shared night
+        genuinely looks like.
+
+        Same ownership check as delete: the id has to be one of this
+        person's own sessions. Unlike delete this is recoverable, so the
+        check is about catching a typo rather than preventing loss.
+        """
+        known = {
+            row["session_id"]
+            for row in util.summarize_sessions(self._sessions_insights(), 200)
+        }
+        if session_id not in known:
+            raise HomeAssistantError(
+                f"No session {session_id} belongs to {self._sessions_owner()}. "
+                "Run orion_sleep.list_sleep_sessions against this entity first."
+            )
+
+        own_id = self._sessions_user_id()
+        if not own_id:
+            raise HomeAssistantError(
+                f"No Orion user id resolved for {self._sessions_owner()}"
+            )
+
+        user_ids = [own_id]
+        if claim == "both":
+            other = self.coordinator.user_id
+            partner = (self.coordinator.partner_user or {}).get("id")
+            for candidate in (other, partner):
+                if isinstance(candidate, str) and candidate and candidate not in user_ids:
+                    user_ids.append(candidate)
+            if len(user_ids) < 2:
+                raise HomeAssistantError(
+                    "Cannot claim a session for both sleepers: only one "
+                    "account is linked."
+                )
+
+        client = self._sessions_client()
+        if client is None:
+            raise HomeAssistantError(
+                f"No API client available for {self._sessions_owner()}"
+            )
+
+        try:
+            await client.confirm_sleep_session(session_id, user_ids)
+        except ValueError as err:
+            raise HomeAssistantError(str(err)) from err
+
+        await self.coordinator.async_request_refresh()
 
     async def async_delete_sleep_session(
         self, session_id: str, reason: str, confirm: bool
@@ -671,16 +805,14 @@ class OrionSensorEntity(OrionBaseEntity, SensorEntity):
             raise HomeAssistantError(str(err)) from err
         await self.coordinator.async_request_refresh()
 
-
     @property
     def native_value(self) -> Any:
         """Return the sensor value."""
         if not self.coordinator.data:
             return None
 
-        # Sleep score is special — comes from overview, not session
-        if self.entity_description.key == "sleep_score":
-            return self._score()
+        if self.entity_description.day_field:
+            return self._day_value(self.entity_description.day_field)
 
         return self.entity_description.value_fn(self._session())
 
@@ -690,11 +822,7 @@ class OrionSensorEntity(OrionBaseEntity, SensorEntity):
         if not self.coordinator.data:
             return None
 
-        # Sleep score gets the quality rating
-        if self.entity_description.key == "sleep_score":
-            quality = _score_quality(self._score())
-            if quality:
-                return {"quality_rating": quality}
+        if self.entity_description.day_field:
             return None
 
         if self.entity_description.extra_attrs_fn is None:
@@ -724,8 +852,8 @@ class OrionPartnerInsightSensor(OrionSensorEntity):
             return self.coordinator.get_latest_completed_partner_session(self._device_id)
         return self.coordinator.get_latest_partner_session(self._device_id)
 
-    def _score(self) -> float | None:
-        return _get_partner_score(self.coordinator.data or {})
+    def _day_value(self, field: str) -> Any:
+        return _get_partner_day_field(self.coordinator.data or {}, field)
 
     def _sessions_insights(self) -> dict:
         return util.nested_mapping(self.coordinator.data, "partner_insights", "data")
@@ -735,6 +863,10 @@ class OrionPartnerInsightSensor(OrionSensorEntity):
 
     def _sessions_owner(self) -> str:
         return self.coordinator.partner_name()
+
+    def _sessions_user_id(self) -> str | None:
+        partner_id = (self.coordinator.partner_user or {}).get("id")
+        return partner_id if isinstance(partner_id, str) and partner_id else None
 
 
     @property

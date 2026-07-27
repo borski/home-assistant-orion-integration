@@ -223,6 +223,18 @@
       },
       "apnea_longest_event": {
         "name": "Longest Apnea Event"
+      },
+      "sleep_quality": {
+        "name": "Sleep Quality"
+      },
+      "time_in_bed": {
+        "name": "Time in Bed"
+      },
+      "sleep_efficiency": {
+        "name": "Sleep Efficiency"
+      },
+      "session_confidence": {
+        "name": "Session Confidence"
       }
     }
   },
@@ -312,6 +324,20 @@
         "confirm": {
           "name": "Confirm",
           "description": "Must be on. Deleting a session cannot be undone."
+        }
+      }
+    },
+    "confirm_sleep_session": {
+      "name": "Confirm sleep session",
+      "description": "Tell the bed who a session belongs to when it asks. Target one of a person's sleep sensors to say whose session you mean.",
+      "fields": {
+        "session_id": {
+          "name": "Session ID",
+          "description": "From orion_sleep.list_sleep_sessions. Look for needs_confirmation."
+        },
+        "claim": {
+          "name": "Claim for",
+          "description": "Whether the night belongs to this person alone or to both sleepers."
         }
       }
     }

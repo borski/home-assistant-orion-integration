@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+import time
+from typing import Any
 
 from homeassistant.components.binary_sensor import (
     BinarySensorDeviceClass,
@@ -10,10 +12,11 @@ from homeassistant.components.binary_sensor import (
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EntityCategory
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import util
+from .const import OCCUPANCY_HOLD_SECONDS
 from .coordinator import OrionDataUpdateCoordinator
 from .entity import OrionBaseEntity
 
@@ -138,6 +141,25 @@ class OrionSensorOnBedBinarySensor(OrionBaseEntity, BinarySensorEntity):
     measurement pads in the topper. Their mapping to ``zone_a`` /
     ``zone_b`` has not been verified against a split-occupancy capture,
     so entities are named per sensor rather than per side.
+
+    **The raw field flaps, so this holds a reading before believing it.**
+    The topper repeatedly reports someone arriving and leaving within a
+    minute or two on a bed nobody is near, and both pads tend to do it in
+    lockstep, which is the tell that it is the topper guessing rather
+    than two people moving. Over one measured night the pads produced 16
+    such episodes, every one shorter than four minutes, against a single
+    real episode of nearly nine hours. Nothing fell in between.
+
+    So a change has to persist for ``OCCUPANCY_HOLD_SECONDS`` before it
+    is published. That costs a few minutes of latency on a signal the
+    vendor already delays by 30 to 60 seconds, and buys an entity that
+    can actually be automated against. The undelayed value stays visible
+    as the ``raw`` attribute so the filter can be audited rather than
+    trusted.
+
+    This does not claim to fix every false positive. A long spurious
+    reading would survive the hold untouched. It removes the short ones,
+    which measurably are all of them so far.
     """
 
     _attr_device_class = BinarySensorDeviceClass.OCCUPANCY
@@ -153,10 +175,63 @@ class OrionSensorOnBedBinarySensor(OrionBaseEntity, BinarySensorEntity):
         self._sensor_name = sensor_name
         self._attr_translation_key = f"{sensor_name}_on_bed"
         self._attr_unique_id = f"{device_id}_{sensor_name}_on_bed"
+        self._settled: bool | None = None
+        self._candidate: bool | None = None
+        self._candidate_since: float | None = None
+
+    def _raw(self) -> bool | None:
+        return self.coordinator.sensor_is_on_bed(self._device_id, self._sensor_name)
+
+    @callback
+    def _handle_coordinator_update(self) -> None:
+        """Promote a raw reading once it has held long enough."""
+        raw = self._raw()
+        now = time.monotonic()
+
+        if raw is None:
+            self._candidate = None
+            self._candidate_since = None
+        elif self._settled is None:
+            # First reading after a restart. There is no history to
+            # filter against, and refusing to answer for five minutes
+            # would be worse than trusting the bed, so adopt it.
+            self._settled = raw
+            self._candidate = None
+            self._candidate_since = None
+        elif raw == self._settled:
+            # Flapped back before it was believed. Nothing to publish.
+            self._candidate = None
+            self._candidate_since = None
+        elif raw != self._candidate:
+            self._candidate = raw
+            self._candidate_since = now
+        elif (
+            self._candidate_since is not None
+            and now - self._candidate_since >= OCCUPANCY_HOLD_SECONDS
+        ):
+            self._settled = raw
+            self._candidate = None
+            self._candidate_since = None
+
+        super()._handle_coordinator_update()
 
     @property
     def is_on(self) -> bool | None:
-        return self.coordinator.sensor_is_on_bed(self._device_id, self._sensor_name)
+        return self._settled
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Expose the unfiltered reading so the hold can be audited."""
+        attrs: dict[str, Any] = {
+            "raw": self._raw(),
+            "hold_seconds": OCCUPANCY_HOLD_SECONDS,
+        }
+        if self._candidate is not None and self._candidate_since is not None:
+            attrs["pending"] = self._candidate
+            attrs["pending_for_seconds"] = int(
+                time.monotonic() - self._candidate_since
+            )
+        return attrs
 
     @property
     def available(self) -> bool:

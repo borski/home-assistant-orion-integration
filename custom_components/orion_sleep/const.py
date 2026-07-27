@@ -97,3 +97,12 @@ DEFAULT_RELATIVE_TEMP_TABLE: list[dict[str, float]] = [
     {"in": 9, "out": 43},
     {"in": 10, "out": 45},
 ]
+
+# How long an occupancy reading has to hold before it is believed.
+#
+# Measured over one night (2026-07-27, 20 hours of recorder history):
+# the two pads produced 16 spurious on-episodes between them, every one
+# under 3.7 minutes, alongside exactly one real episode of 527 minutes.
+# Nothing landed in between. Five minutes sits in that gap with a wide
+# margin on both sides.
+OCCUPANCY_HOLD_SECONDS = 300

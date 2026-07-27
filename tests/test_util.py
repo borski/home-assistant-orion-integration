@@ -926,3 +926,73 @@ def test_apnea_number_rejects_everything_unusable():
 def test_apnea_number_always_returns_float_or_none():
     for value in (0, 1, 0.3, 60):
         assert isinstance(util.apnea_number(value), float)
+
+
+# ── Time in bed, efficiency, confidence ───────────────────────────────
+
+
+def test_duration_minutes_basic():
+    assert util.duration_minutes(
+        "2026-07-27T06:00:00Z", "2026-07-27T07:30:00Z"
+    ) == 90.0
+
+
+def test_duration_minutes_handles_millis_and_offsets():
+    assert util.duration_minutes(
+        "2026-07-27T06:09:49.776Z", "2026-07-27T06:39:49.776Z"
+    ) == 30.0
+    assert util.duration_minutes(
+        "2026-07-27T00:00:00-07:00", "2026-07-27T01:00:00-07:00"
+    ) == 60.0
+
+
+def test_duration_minutes_rejects_reversed_pairs():
+    assert util.duration_minutes(
+        "2026-07-27T07:00:00Z", "2026-07-27T06:00:00Z"
+    ) is None
+
+
+def test_duration_minutes_rejects_unusable_input():
+    for bad in (None, "", "not a time", 0, [], {}, True):
+        assert util.duration_minutes(bad, "2026-07-27T07:00:00Z") is None
+        assert util.duration_minutes("2026-07-27T06:00:00Z", bad) is None
+
+
+def test_sleep_efficiency_basic():
+    assert util.sleep_efficiency(480, 600) == 80.0
+    assert util.sleep_efficiency(600, 600) == 100.0
+
+
+def test_sleep_efficiency_rejects_impossible_ratios():
+    # Asleep longer than in bed means one figure is wrong. Reading it as
+    # a tidy 100% would hide the fault.
+    assert util.sleep_efficiency(700, 600) is None
+
+
+def test_sleep_efficiency_rejects_zero_and_negative_time_in_bed():
+    assert util.sleep_efficiency(480, 0) is None
+    assert util.sleep_efficiency(480, -10) is None
+
+
+def test_sleep_efficiency_rejects_bool_and_junk():
+    for bad in (True, False, None, "480", [], {}):
+        assert util.sleep_efficiency(bad, 600) is None
+        assert util.sleep_efficiency(480, bad) is None
+
+
+def test_confidence_percent_scales_the_vendor_float():
+    assert util.confidence_percent(0.8) == 80.0
+    assert util.confidence_percent(0) == 0.0
+    assert util.confidence_percent(1) == 100.0
+
+
+def test_confidence_percent_refuses_out_of_contract_values():
+    # If the vendor ever switches to 0-100, rescaling would turn 80 into
+    # 8000%. Better to read unknown than to be confidently wrong.
+    for bad in (1.5, 80, -0.1, 100):
+        assert util.confidence_percent(bad) is None
+
+
+def test_confidence_percent_rejects_bool_and_junk():
+    for bad in (True, False, None, "0.8", [], {}):
+        assert util.confidence_percent(bad) is None

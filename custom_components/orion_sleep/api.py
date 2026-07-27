@@ -666,6 +666,40 @@ class OrionApiClient:
         await self.ensure_valid_token()
         return await self._request("POST", f"/v1/devices/{device_serial}/update")
 
+    async def confirm_sleep_session(
+        self, session_id: str, user_ids: list[str]
+    ) -> dict:
+        """PUT /v1/sleep-sessions/{id}/confirm — answer "was this you?".
+
+        The bed sometimes cannot tell who a session belongs to and sets
+        `manual_confirmation.needs_confirmation`. This is the answer.
+        Passing one id claims the night; passing both claims it for the
+        pair, which is what the app's own sheet offers as "you" versus
+        "both of us".
+
+        Confidence: APP-DERIVED, never executed. `_confirmSleepSession`
+        builds the path from '/v1/sleep-sessions/' and '/confirm' at
+        decompiled lines 1106486-1106488 and PUTs exactly `{"user_ids":
+        [...]}` at 1106494-1106496. The body shape is certain. What is
+        untested is the server's response, because
+        `needs_confirmation` has been false on every session captured so
+        far, so there has never been anything to confirm.
+
+        Unlike delete, a wrong call here is recoverable: it attributes a
+        session, it does not destroy one.
+        """
+        if not session_id:
+            raise ValueError("confirm_sleep_session: session_id is required")
+        if not user_ids or not all(isinstance(u, str) and u for u in user_ids):
+            raise ValueError(
+                "confirm_sleep_session: user_ids must be a non-empty list of ids"
+            )
+        return await self._request(
+            "PUT",
+            f"/v1/sleep-sessions/{session_id}/confirm",
+            json_data={"user_ids": list(user_ids)},
+        )
+
     async def delete_sleep_session(self, session_id: str, reason: str) -> dict:
         """DELETE /v1/sleep-sessions/{id} — permanently remove a session.
 

@@ -713,6 +713,16 @@ def summarize_sessions(insights_data: object, limit: int = 30) -> list[dict]:
             score = day.get("score")
             if isinstance(score, (int, float)) and not isinstance(score, bool):
                 row["day_score"] = score
+            # The bed's own "was this you?" prompt. Deliberately reduced
+            # to two flags: the raw block carries every sleeper's full
+            # name and profile URL, which has no business in a service
+            # response that gets pasted into logs and issue reports.
+            confirmation = session_subsection(session, "manual_confirmation")
+            if confirmation:
+                row["needs_confirmation"] = bool(confirmation.get("needs_confirmation"))
+                status = confirmation.get("status")
+                if isinstance(status, str) and status:
+                    row["confirmation_status"] = status
             rows.append(row)
             if len(rows) >= limit:
                 return rows
@@ -730,3 +740,51 @@ def apnea_number(value: object) -> float | None:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
     return float(value)
+
+
+def duration_minutes(start: object, end: object) -> float | None:
+    """Minutes between two ISO-8601 instants, or None if unusable.
+
+    Returns None rather than a negative number when the pair is out of
+    order, because a negative duration is a data fault and should read
+    as unknown instead of quietly plotting below zero.
+    """
+    first = parse_iso_datetime(start)
+    second = parse_iso_datetime(end)
+    if first is None or second is None:
+        return None
+    minutes = (second - first).total_seconds() / 60
+    return None if minutes < 0 else minutes
+
+
+def sleep_efficiency(asleep_minutes: object, in_bed_minutes: object) -> float | None:
+    """Percentage of time in bed actually spent asleep.
+
+    Guards three ways. Bool is rejected before the numeric check, a zero
+    or negative time in bed cannot divide, and a ratio above 100 is
+    treated as a data fault rather than clamped: sleeping longer than
+    you were in bed means one of the two figures is wrong, and clamping
+    would hide that behind a plausible-looking 100%.
+    """
+    if isinstance(asleep_minutes, bool) or not isinstance(asleep_minutes, (int, float)):
+        return None
+    if isinstance(in_bed_minutes, bool) or not isinstance(in_bed_minutes, (int, float)):
+        return None
+    if in_bed_minutes <= 0 or asleep_minutes < 0:
+        return None
+    percent = (asleep_minutes / in_bed_minutes) * 100
+    return None if percent > 100 else percent
+
+
+def confidence_percent(value: object) -> float | None:
+    """Session confidence as a percentage, or None if out of contract.
+
+    The vendor reports a 0-to-1 float. Anything outside that range means
+    the scale changed under us, and silently rescaling it would produce
+    a confident-looking number built on a broken assumption.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if value < 0 or value > 1:
+        return None
+    return value * 100
