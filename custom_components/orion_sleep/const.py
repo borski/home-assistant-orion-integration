@@ -53,6 +53,16 @@ DEFAULT_COOLING_MINUTES = 30
 MIN_COOLING_MINUTES = 1
 MAX_COOLING_MINUTES = 240
 
+# Bounds for the per-side Rapid Cool Duration slider. Deliberately narrower
+# than the service, which still accepts 1 to 240. The app's own picker reads
+# from a HOT_FLASH_DURATION_OPTIONS list that lives in a separate bytecode
+# module and was never resolved, so these are our choice, not the vendor's:
+# wide enough to be useful for hot flash relief, tight enough that a stray
+# drag cannot leave a side cold for four hours.
+RAPID_COOL_SLIDER_MIN = 5
+RAPID_COOL_SLIDER_MAX = 120
+RAPID_COOL_SLIDER_STEP = 5
+
 # Display aliases. Maps an immutable Orion user id to the name the household
 # actually uses, since Orion stores whatever was on the account at signup.
 # Affects friendly names ONLY. Unique ids and

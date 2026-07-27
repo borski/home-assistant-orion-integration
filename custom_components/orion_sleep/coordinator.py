@@ -20,8 +20,11 @@ from .const import (
     CONF_INSIGHTS_DAYS,
     CONF_PARTNER_DEVICE_SERIAL,
     CONF_SCAN_INTERVAL,
+    DEFAULT_COOLING_MINUTES,
     DEFAULT_INSIGHTS_DAYS,
     DEFAULT_SCAN_INTERVAL,
+    MAX_COOLING_MINUTES,
+    MIN_COOLING_MINUTES,
 )
 from .websocket import OrionWebSocketManager
 
@@ -66,6 +69,11 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
         # real event by ~30s–1min because the topper itself is slow to
         # decide; the WS frame arrival is not the bottleneck there.
         self.live_devices: dict[str, dict] = {}
+        # Per-zone rapid-cool window, in minutes. Chosen locally and held
+        # here so the switch and its duration slider agree without either
+        # importing the other. Not vendor state: the server is only ever
+        # told the number at the moment cooling starts.
+        self.rapid_cool_minutes: dict[str, int] = {}
         self.user: dict = {}
         self.user_id: str = ""
         self.partner_user: dict = {}
@@ -711,6 +719,28 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
     def thermal_relief_active(self, device_id: str, zone_id: str) -> bool:
         """Whether hot flash relief is currently running on this zone."""
         return self.thermal_relief_until(device_id, zone_id) is not None
+
+    def rapid_cool_duration(self, zone_id: str) -> int:
+        """Minutes of cooling to request for this zone.
+
+        Falls back to the default whenever nothing has been chosen yet,
+        which is the state on a fresh install and after a restart if the
+        slider has never been touched.
+        """
+        return util.clamp_cooling_minutes(
+            self.rapid_cool_minutes.get(zone_id),
+            DEFAULT_COOLING_MINUTES,
+            MIN_COOLING_MINUTES,
+            MAX_COOLING_MINUTES,
+        )
+
+    def set_rapid_cool_duration(self, zone_id: str, minutes: object) -> int:
+        """Record the chosen window for a zone and return what was stored."""
+        value = util.clamp_cooling_minutes(
+            minutes, DEFAULT_COOLING_MINUTES, MIN_COOLING_MINUTES, MAX_COOLING_MINUTES
+        )
+        self.rapid_cool_minutes[zone_id] = value
+        return value
 
     def zone_thermal_state(self, device_id: str, zone_id: str) -> str | None:
         """Raw `thermal_state` for one zone.

@@ -13,7 +13,6 @@ from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import util
-from .const import DEFAULT_COOLING_MINUTES
 from .coordinator import OrionDataUpdateCoordinator
 from .entity import OrionBaseEntity, OrionLiveSettingMixin
 
@@ -296,12 +295,19 @@ class OrionRapidCoolSwitch(OrionBaseEntity, SwitchEntity):
 
     @property
     def extra_state_attributes(self) -> dict | None:
-        """Expose when it ends and what it will restore."""
+        """Expose the window it will request, when it ends, what it restores.
+
+        `duration_minutes` is reported whether or not cooling is running,
+        because it is the answer to "what happens if I flip this", which
+        is worth knowing before flipping it rather than after.
+        """
+        attrs: dict[str, Any] = {
+            "duration_minutes": self.coordinator.rapid_cool_duration(self._zone_id)
+        }
         relief = self.coordinator.zone_thermal_relief(self._device_id, self._zone_id)
         if not relief:
-            return None
+            return attrs
 
-        attrs: dict[str, Any] = {}
         ends = self.coordinator.thermal_relief_until(self._device_id, self._zone_id)
         if ends is not None:
             attrs["ends_at"] = ends.isoformat()
@@ -309,13 +315,14 @@ class OrionRapidCoolSwitch(OrionBaseEntity, SwitchEntity):
             value = relief.get(key)
             if value is not None:
                 attrs[key] = value
-        return attrs or None
+        return attrs
 
     async def async_turn_on(self, **kwargs: Any) -> None:
-        """Start cooling this side for the default window."""
+        """Start cooling this side for the window chosen on its slider."""
+        minutes = self.coordinator.rapid_cool_duration(self._zone_id)
         try:
             await self.coordinator.api_client.start_thermal_relief(
-                self._serial(), [self._zone_id], DEFAULT_COOLING_MINUTES
+                self._serial(), [self._zone_id], minutes
             )
         except ValueError as err:
             raise HomeAssistantError(str(err)) from err

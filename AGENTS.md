@@ -240,16 +240,17 @@ Entities read from coordinator:
 | Number | LED Brightness | `_led_brightness` | 0-100 write via `PUT /v1/devices/{serial_number}/live`. Debounced with an optimistic local write and a post-write lock, mirroring the vendor app. |
 | Switch | Quiet Mode | `_quiet_mode` | Write via the same live route. Replaced the old read-only binary sensor once the write was measured. |
 | Binary Sensor | \<zone\> Cooling | `_{zoneId}_thermal_relief` | Hot flash relief running on that side. Reads `zones[].thermal_relief`, and counts as active only when `end_time` is finite AND in the future, which is the app's own test. Exposes `ends_at`, `previous_temp`, and `previous_on`, so the temperature the bed will restore is visible while cooling runs. |
-| Switch | \<person\> Rapid Cool | `_{zoneId}_rapid_cool` | Hot flash relief as a toggle. On starts a 30 minute window on that side, off cancels it and restores the previous setpoint. A switch rather than two buttons because the bed tracks the window server-side, so off is a genuine cancel. Carries the same attrs as the Cooling binary sensor. |
+| Switch | \<person\> Rapid Cool | `_{zoneId}_rapid_cool` | Hot flash relief as a toggle. On starts a window of whatever that side's Rapid Cool Duration slider says, off cancels it, off cancels it and restores the previous setpoint. A switch rather than two buttons because the bed tracks the window server-side, so off is a genuine cancel. Carries the same attrs as the Cooling binary sensor. |
+| Number (config) | \<person\> Rapid Cool Duration | `_{zoneId}_rapid_cool_duration` | How long that side's Rapid Cool switch runs for. A local preference, never sent to Orion except at the moment cooling starts, so it uses `RestoreNumber` rather than polling: the server only reports a window while one is running. Slider is 5 to 120 in steps of 5, deliberately tighter than the 1 to 240 the service accepts, because this is the control someone nudges half asleep. Surfaced as `duration_minutes` on the switch so the answer to "what happens if I flip this" is visible before flipping it. |
 | Sensor | \<person\> Cooling Ends | `_{zoneId}_cooling_ends` | TIMESTAMP device class, so Home Assistant renders a live countdown that ticks on its own. `None` whenever cooling is not running. The same value exists as an `ends_at` attribute on the switch, but an attribute is static text. |
 | Button | Swap Bed Sides | `_action_swap_sides` | `POST /v1/sleep-configurations/user-swap`. Enabled by default: pressing it again reverses it, so a misfire is cheap. |
 | Button (disabled) | Split Zones | `_action_split_zones` | `POST /v1/sleep-configurations/user-split`. Disabled by default because **nothing in the live payload reports split state**, so a press has no observable result and no way to confirm what it did. |
 
-**A two-zone device with no partner linked exposes 69 base entities. A linked partner adds 35 more, for 104.**
+**A two-zone device with no partner linked exposes 71 base entities. A linked partner adds 35 more, for 106.**
 
 - 2 climate entities, one per zone.
 - 33 sensors: 11 insights, 5 schedule temperatures and duration, current offset, live connection, 6 topper sensor readings, 2 measured and 2 target zone temperatures, 2 cooling countdowns, LED brightness, firmware, and Wi-Fi signal.
-- 5 numbers: 4 schedule-phase temperature offsets plus LED brightness.
+- 7 numbers: 4 schedule-phase temperature offsets, LED brightness, and 2 rapid-cool durations.
 - 2 time entities: bedtime and wake up time.
 - 9 switches: runtime power, Away Mode, quiet mode, 2 rapid cool, and 4 schedule flags. Away Mode is omitted for accounts with multiple devices because the API action is account-global.
 - 7 binary sensors: sleep session, 2 occupancy sensors, 2 cooling sensors, safety problem, and the schedule override indicator.
@@ -561,6 +562,44 @@ The service accepts 1 to 240 and lets the server reject what it dislikes.
 ## Verification Log
 
 Live-request confirmations, newest first. A claim only earns "measured" by appearing here.
+
+### 2026-07-27 — `duration_minutes` is honoured, and occupancy lies again
+
+Two findings from one test.
+
+**The window length is real.** Set the Rapid Cool Duration slider to 5, flipped
+the switch on `zone_a`, and the response carried:
+
+```
+ends_at        2026-07-27T10:08:38Z
+previous_temp  17.5
+previous_on    true
+```
+
+Start was 10:03:32Z, so the window came back **five minutes**, not the thirty
+the switch used to hardcode. `duration_minutes` is therefore **MEASURED**, not
+just accepted. Cancelled at 10:03:54, twenty-two seconds of actual cooling, and
+the zone returned to its previous setpoint on its own.
+
+Five was chosen deliberately over a longer value. It is distinguishable from the
+thirty-minute default, so the test still proves the number is honoured, and it
+is its own failsafe: had the cancel failed, the bed would have restored itself
+in five minutes rather than forty-five. **Prefer the shortest distinguishable
+value for any test that changes a bed someone may be lying in.**
+
+Still unmeasured on this route: durations above 120, and any `type` other than
+`cool`.
+
+**Second sighting of the duplicate-signal occupancy bug.** At the moment of the
+test, both pads reported occupancy and **both reported an identical 55 bpm**,
+while only one person was upstairs. Same signature as the earlier observation:
+not two plausible-but-different readings, the exact same number on both sides.
+
+That strengthens the working theory considerably. The topper is not making a
+weak-signal judgment call on an empty pad, it is copying a derived figure onto a
+side it cannot read. A duplicate check across pads is a far cheaper and more
+reliable detector than any plausible-heart-rate gate, which would pass this
+cleanly.
 
 ### 2026-07-27 — Thermal relief (rapid cooling) works
 

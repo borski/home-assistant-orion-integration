@@ -123,7 +123,7 @@ There is no option to disable it.
 
 ## Entities
 
-One Home Assistant device per paired topper. A two-zone bed with no partner linked exposes **69 entities**. Linking a partner adds 35 more.
+One Home Assistant device per paired topper. A two-zone bed with no partner linked exposes **71 entities**. Linking a partner adds 35 more.
 
 Names below use `<person>` where the display alias is substituted, and `<zone>` for a bed side.
 
@@ -158,7 +158,8 @@ The minute sensors use `measurement`, deliberately. A cumulative state class wou
 
 | Entity | Platform | Description |
 |---|---|---|
-| `<person>` Rapid Cool | Switch | Hot flash relief on that side. On starts 30 minutes, off cancels and restores the previous setpoint. |
+| `<person>` Rapid Cool | Switch | Hot flash relief on that side. On starts a window, off cancels it and restores the previous setpoint. Reports the window it will use as a `duration_minutes` attribute. |
+| `<person>` Rapid Cool Duration | Number | How long that side cools for, 5 to 120 minutes. A local preference, not device state, so it survives restarts. The `start_cooling` service still takes anything from 1 to 240. |
 | `<person>` Cooling Ends | Sensor | Timestamp, so Home Assistant renders a countdown that ticks on its own. |
 | `<zone>` Cooling | Binary sensor | Active only when the end time is in the future, which is the app's own test. |
 | Power | Switch | All zones on or off. |
@@ -243,6 +244,8 @@ views:
               - type: divider
               - entity: switch.sleepy_alex_rapid_cool
                 name: Rapid Cool
+              - entity: number.sleepy_alex_rapid_cool_duration
+                name: Cool for
               # Countdown only while cooling is actually running.
               - type: conditional
                 conditions:
@@ -308,6 +311,8 @@ views:
               - type: divider
               - entity: switch.sleepy_sam_rapid_cool
                 name: Rapid Cool
+              - entity: number.sleepy_sam_rapid_cool_duration
+                name: Cool for
               - type: conditional
                 conditions:
                   - entity: switch.sleepy_sam_rapid_cool

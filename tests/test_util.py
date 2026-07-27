@@ -690,3 +690,61 @@ def test_timeline_target_temps_reads_zones_and_rejects_junk():
     assert util.timeline_target_temps(_entry("u1", "x", zones=[{"id": "z", "temp": True}])) == {}
     for bad in (None, {}, {"action": None}, {"action": {"zones": "no"}}, "str"):
         assert util.timeline_target_temps(bad) == {}
+
+
+# ── Rapid cool duration ───────────────────────────────────────────────
+#
+# This number is sent to a route that changes the physical bed, so the
+# failure that matters is not a wrong value, it is a plausible-looking
+# wrong value. Zero, True, and None all have to land on the default
+# rather than on something the server has never been asked to honour.
+
+_D, _LO, _HI = 30, 1, 240
+
+
+def test_clamp_cooling_minutes_accepts_sensible_values():
+    assert util.clamp_cooling_minutes(45, _D, _LO, _HI) == 45
+    assert util.clamp_cooling_minutes(45.0, _D, _LO, _HI) == 45
+    assert util.clamp_cooling_minutes(_LO, _D, _LO, _HI) == _LO
+    assert util.clamp_cooling_minutes(_HI, _D, _LO, _HI) == _HI
+
+
+def test_clamp_cooling_minutes_rounds_rather_than_truncates():
+    assert util.clamp_cooling_minutes(29.6, _D, _LO, _HI) == 30
+    assert util.clamp_cooling_minutes(29.4, _D, _LO, _HI) == 29
+
+
+def test_clamp_cooling_minutes_saturates_out_of_range():
+    assert util.clamp_cooling_minutes(0, _D, _LO, _HI) == _LO
+    assert util.clamp_cooling_minutes(-500, _D, _LO, _HI) == _LO
+    assert util.clamp_cooling_minutes(99999, _D, _LO, _HI) == _HI
+
+
+def test_clamp_cooling_minutes_rejects_bool_rather_than_reading_it_as_one():
+    """True is an int. A one-minute cooling window is not what was meant."""
+    assert util.clamp_cooling_minutes(True, _D, _LO, _HI) == _D
+    assert util.clamp_cooling_minutes(False, _D, _LO, _HI) == _D
+
+
+def test_clamp_cooling_minutes_falls_back_on_anything_unusable():
+    for bad in (None, "", "30", [], {}, (), object(), b"30", float("nan")):
+        got = util.clamp_cooling_minutes(bad, _D, _LO, _HI)
+        assert got == _D, f"{bad!r} produced {got}"
+
+
+def test_clamp_cooling_minutes_treats_infinity_as_unusable_not_as_the_maximum():
+    """Infinity falls back to the default rather than clamping to the top.
+
+    Clamping would be the tidier arithmetic and the worse outcome: it
+    turns a nonsense value into the longest cooling window the bed will
+    accept. Nothing legitimate produces infinity here, so the safe read
+    is that the input is broken, not that someone wanted four hours.
+    """
+    assert util.clamp_cooling_minutes(float("inf"), _D, _LO, _HI) == _D
+    assert util.clamp_cooling_minutes(float("-inf"), _D, _LO, _HI) == _D
+
+
+def test_clamp_cooling_minutes_always_returns_a_real_int():
+    for value in (45, 45.7, None, True, 99999, -1):
+        got = util.clamp_cooling_minutes(value, _D, _LO, _HI)
+        assert isinstance(got, int) and not isinstance(got, bool)

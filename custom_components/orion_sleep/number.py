@@ -4,15 +4,20 @@ from __future__ import annotations
 
 import logging
 
-from homeassistant.components.number import NumberEntity, NumberMode
+from homeassistant.components.number import NumberEntity, NumberMode, RestoreNumber
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import PERCENTAGE
+from homeassistant.const import PERCENTAGE, UnitOfTime
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import util
+from .const import (
+    RAPID_COOL_SLIDER_MAX,
+    RAPID_COOL_SLIDER_MIN,
+    RAPID_COOL_SLIDER_STEP,
+)
 from .coordinator import OrionDataUpdateCoordinator
 from .entity import OrionBaseEntity, OrionLiveSettingMixin
 
@@ -66,6 +71,10 @@ async def async_setup_entry(
                         coordinator, device_id, key, label, icon, field, user_id
                     )
                 )
+        for zone_id in coordinator.device_zone_ids(device_id):
+            entities.append(
+                OrionRapidCoolDurationNumber(coordinator, device_id, zone_id)
+            )
         entities.append(OrionLedBrightnessNumber(coordinator, device_id))
 
     async_add_entities(entities)
@@ -198,3 +207,62 @@ class OrionLedBrightnessNumber(OrionLiveSettingMixin, OrionBaseEntity, NumberEnt
         await self._async_write_live_setting(
             int(round(value)), self._reported_value()
         )
+
+
+class OrionRapidCoolDurationNumber(OrionBaseEntity, RestoreNumber):
+    """How long this side's Rapid Cool switch should run for.
+
+    A local preference, not device state. Nothing is sent to Orion when
+    this changes: the number is only read at the moment the switch is
+    turned on, and the bed is told the window once, up front.
+
+    That is why it restores rather than polls. The server does report a
+    running window's `end_time`, but only while one is running, so there
+    is nothing to read back the rest of the time and no way to learn what
+    was last chosen except by remembering it.
+
+    Bounds here are narrower than `orion_sleep.start_cooling`, which
+    still accepts 1 to 240. The slider is the thing someone nudges half
+    asleep, so it is capped where a mistake stays comfortable. The
+    service is the escape hatch.
+    """
+
+    _attr_icon = "mdi:timer-sand"
+    _attr_entity_category = EntityCategory.CONFIG
+    _attr_native_min_value = RAPID_COOL_SLIDER_MIN
+    _attr_native_max_value = RAPID_COOL_SLIDER_MAX
+    _attr_native_step = RAPID_COOL_SLIDER_STEP
+    _attr_native_unit_of_measurement = UnitOfTime.MINUTES
+    _attr_mode = NumberMode.SLIDER
+
+    def __init__(
+        self,
+        coordinator: OrionDataUpdateCoordinator,
+        device_id: str,
+        zone_id: str,
+    ) -> None:
+        super().__init__(coordinator, device_id)
+        self._zone_id = zone_id
+        self._attr_unique_id = f"{device_id}_{zone_id}_rapid_cool_duration"
+        self._attr_name = (
+            f"{coordinator.zone_label(device_id, zone_id)} Rapid Cool Duration"
+        )
+
+    async def async_added_to_hass(self) -> None:
+        """Restore the last chosen window and hand it to the coordinator."""
+        await super().async_added_to_hass()
+        last = await self.async_get_last_number_data()
+        if last is not None and last.native_value is not None:
+            self.coordinator.set_rapid_cool_duration(
+                self._zone_id, last.native_value
+            )
+
+    @property
+    def native_value(self) -> float:
+        """The window the switch will request, in minutes."""
+        return float(self.coordinator.rapid_cool_duration(self._zone_id))
+
+    async def async_set_native_value(self, value: float) -> None:
+        """Record a new window. Does not touch a running cooling session."""
+        self.coordinator.set_rapid_cool_duration(self._zone_id, value)
+        self.async_write_ha_state()

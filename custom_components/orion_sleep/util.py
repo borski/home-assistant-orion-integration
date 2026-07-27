@@ -608,3 +608,28 @@ def timeline_target_temps(entry: object) -> dict[str, float]:
             if not isinstance(temp, bool):
                 targets[zone_id] = float(temp)
     return targets
+
+
+def clamp_cooling_minutes(value: object, default: int, low: int, high: int) -> int:
+    """Coerce a rapid-cool duration to a usable whole number of minutes.
+
+    The duration is chosen locally and then sent to a route that changes
+    the physical bed, so this refuses to guess. A missing, malformed, or
+    non-numeric value falls back to ``default`` rather than to zero,
+    because a zero-minute window is a request the server has never been
+    asked to honour.
+
+    ``bool`` is rejected explicitly: it subclasses ``int``, so ``True``
+    would otherwise be accepted as a one-minute window.
+
+    Out-of-range values are clamped rather than rejected. A slider that
+    silently refuses is worse than one that saturates, and both bounds
+    are ours rather than the vendor's.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return default
+    try:
+        minutes = int(round(float(value)))
+    except (TypeError, ValueError, OverflowError):
+        return default
+    return max(low, min(high, minutes))
