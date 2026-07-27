@@ -593,6 +593,52 @@ The third guard is the load-bearing one. The server would presumably reject a
 foreign ID, but "presumably" is not a good enough basis for the one call that
 cannot be taken back.
 
+## Git Hygiene
+
+Two ways to damage somebody else's work from inside this repo. Both have
+been hit, one for real and one caught a second before it happened.
+
+### Never rewrite a commit you did not author
+
+The history scrub used `git filter-repo --replace-message` to strip
+biometric readings. One rule matched a bare unit rather than the full
+reading it belonged to. That matched a line in an April commit message
+written by a different contributor, rewrote it, and cascaded new hashes onto
+all 27 commits downstream.
+
+**A tree diff did not catch it.** The file contents were untouched, so
+`git diff` between the old and new branches was empty and everything looked
+clean. The damage was only in the commit objects.
+
+Before running any history rewrite:
+
+1. Check every replacement string against `git log --all --format='%an %s%n%b'`
+   and confirm no match lands on a commit you do not own.
+2. Match the longest unambiguous phrase. A bare unit appears everywhere.
+   The full reading appears once. Never write the value you are removing
+   into the rule as an example, or into the notes explaining the rule.
+3. Verify with `git log --format='%h %an %s'` on both sides and diff the
+   **raw commit objects**, not the trees. Identical trees prove nothing.
+
+The recovery is to reverse the offending replacement and re-run, which
+restores the original hashes. Signatures do not survive `filter-repo`, so
+re-sign afterwards with
+`git rebase --no-ff --committer-date-is-author-date <boundary>`.
+
+### Point `gh` at the right repository
+
+This clone carries five remotes, including `upstream` for the original
+project. `gh` resolves to whichever it decides is the base, and it picked
+`upstream`. A `gh release create` without a flag would have published a
+release on somebody else's repository.
+
+`gh repo set-default` is now set locally, so bare commands resolve
+correctly. It lives in `.git/config` as `remote.origin.gh-resolved`, which
+means it is per-clone and a fresh clone needs it set again.
+
+When in doubt, pass `--repo` explicitly. Check with
+`gh repo view --json nameWithOwner` before anything that writes.
+
 ## Verification Log
 
 ### 2026-07-27 — Two writes promoted, and two bugs that hid from every check
@@ -793,7 +839,7 @@ start_time, last_updated_at, user_fallasleep_timestamp. `start_time`
 tracks the fall-asleep value with a measured twenty-minute lead.
 
 Restoring the original pair restored every derived metric byte for byte,
-checked field by field: time_asleep 233, stages 18.5/77.5/135.5/0,
+checked field by field: minutes asleep, all four stage totals,
 confidence 0.8, apnea 0.3/60/0/60. The earlier assumption that
 recomputation would be irreversible was wrong, and is now disproven
 rather than merely doubted.
@@ -882,7 +928,7 @@ The listing service is **MEASURED**. The delete route is **APP-DERIVED** and has
 deliberately never been executed against a real session.
 
 The listing immediately paid for itself. Run against the primary account at
-roughly 03:15 local, with the account holder demonstrably not in the bed at any
+hours later, with the account holder demonstrably not in the bed at any
 point that night:
 
 | session | local window | asleep | in progress |
@@ -949,7 +995,7 @@ Still unmeasured on this route: durations above 120, and any `type` other than
 `cool`.
 
 **Second sighting of the duplicate-signal occupancy bug.** At the moment of the
-test, both pads reported occupancy and **both reported an identical 55 bpm**,
+test, both pads reported occupancy and **both reported an identical heart rate, to the digit**,
 while only one person was upstairs. Same signature as the earlier observation:
 not two plausible-but-different readings, the exact same number on both sides.
 
