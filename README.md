@@ -406,4 +406,6 @@ The one rule that matters: **do not ship a control against an unverified route.*
 
 ## License
 
+MIT. See [LICENSE](LICENSE).
+
 Not affiliated with or endorsed by Orion Longevity Inc.
