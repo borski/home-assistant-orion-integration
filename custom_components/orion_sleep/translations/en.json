@@ -449,6 +449,40 @@
           "description": "Punctuation and a leading plus are fine."
         }
       }
+    },
+    "assign_zones": {
+      "name": "Assign zones",
+      "description": "Put somebody on one or more zones of this bed. The Orion app calls this Replace. Moving somebody onto an occupied zone displaces whoever was there.",
+      "fields": {
+        "user_id": {
+          "name": "User ID",
+          "description": "From the people attribute on the Bed Access sensor."
+        },
+        "zone_ids": {
+          "name": "Zone IDs",
+          "description": "A list, usually [zone_a] or [zone_b]."
+        }
+      }
+    },
+    "set_device_name": {
+      "name": "Set device name",
+      "description": "Rename the bed in Orion. Home Assistant keeps its own name, so this only changes what the phone app shows.",
+      "fields": {
+        "name": {
+          "name": "Name",
+          "description": "The new name."
+        }
+      }
+    },
+    "set_device_timezone": {
+      "name": "Set device timezone",
+      "description": "Set the bed's timezone. Not cosmetic: schedules are stored per weekday and the bed decides which day it is from this.",
+      "fields": {
+        "timezone": {
+          "name": "Timezone",
+          "description": "An IANA name such as America/Los_Angeles."
+        }
+      }
     }
   }
 }

@@ -50,6 +50,9 @@ SERVICE_ACCEPT_INVITE = "accept_invite"
 SERVICE_REMOVE_USER_ACCESS = "remove_user_access"
 SERVICE_CREATE_GUEST = "create_guest"
 SERVICE_UPDATE_USER_PHONE = "update_user_phone"
+SERVICE_ASSIGN_ZONES = "assign_zones"
+SERVICE_SET_DEVICE_NAME = "set_device_name"
+SERVICE_SET_DEVICE_TIMEZONE = "set_device_timezone"
 
 _INSIGHT_DISPLAY_NAMES = {
     "sleep_score": "Sleep Score",
@@ -684,6 +687,8 @@ async def async_setup_entry(
         entities.append(OrionFirmwareSensor(coordinator, device_id))
         entities.append(OrionWifiSignalSensor(coordinator, device_id))
         entities.append(OrionAccessSensor(coordinator, device_id))
+        entities.append(OrionSchedulePhaseSensor(coordinator, device_id))
+        entities.append(OrionZoneSplitModeSensor(coordinator, device_id))
         if coordinator.has_partner_for_device(device_id):
             for description in INSIGHT_SENSOR_DESCRIPTIONS:
                 entities.append(OrionPartnerInsightSensor(coordinator, device_id, description))
@@ -782,6 +787,24 @@ async def async_setup_entry(
             vol.Required("phone"): cv.string,
         },
         "async_update_user_phone",
+    )
+    platform.async_register_entity_service(
+        SERVICE_ASSIGN_ZONES,
+        {
+            vol.Required("user_id"): cv.string,
+            vol.Required("zone_ids"): vol.All(cv.ensure_list, [cv.string]),
+        },
+        "async_assign_zones",
+    )
+    platform.async_register_entity_service(
+        SERVICE_SET_DEVICE_NAME,
+        {vol.Required("name"): cv.string},
+        "async_set_device_name",
+    )
+    platform.async_register_entity_service(
+        SERVICE_SET_DEVICE_TIMEZONE,
+        {vol.Required("timezone"): cv.string},
+        "async_set_device_timezone",
     )
 
 
@@ -1743,4 +1766,157 @@ class OrionAccessSensor(OrionBaseEntity, SensorEntity):
             raise HomeAssistantError(
                 f"Orion could not update that phone number: {err}"
             ) from err
+        await self.coordinator.async_request_refresh()
+
+
+class OrionSchedulePhaseSensor(OrionBaseEntity, SensorEntity):
+    """Which part of tonight's schedule the bed is currently in.
+
+    From `/v1/sleep-session`, which carries `current_phase` plus a
+    `phases` map of `{start, end}` Unix seconds per phase.
+
+    This is the data the WebSocket `timeline` was supposed to provide.
+    The server sends an empty timeline array even mid-schedule, which is
+    why the sensor built on it was deleted. This route has the same
+    information and actually returns it.
+
+    Reads the authenticated account's schedule. Phases are per user, so a
+    linked partner would need her own fetch.
+    """
+
+    _attr_icon = "mdi:timeline-clock-outline"
+
+    def __init__(self, coordinator, device_id: str) -> None:
+        super().__init__(coordinator, device_id)
+        self._attr_unique_id = f"{device_id}_current_phase"
+        self._attr_name = f"{coordinator.primary_name()} Schedule Phase"
+
+    @property
+    def native_value(self) -> str | None:
+        phase = self.coordinator.live_session().get("current_phase")
+        if isinstance(phase, str) and phase:
+            return phase.replace("_", " ").title()
+        return None
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        """Phase windows as ISO timestamps.
+
+        The API gives Unix seconds. Converting here rather than shipping
+        raw epochs means the attribute is readable in the UI without a
+        template, and a malformed value is dropped rather than rendered
+        as 1970.
+        """
+        phases = self.coordinator.live_session().get("phases")
+        if not isinstance(phases, dict):
+            return {}
+        out: dict = {}
+        for name, window in phases.items():
+            if not isinstance(window, dict):
+                continue
+            for edge in ("start", "end"):
+                value = window.get(edge)
+                if isinstance(value, bool) or not isinstance(value, (int, float)):
+                    continue
+                out[f"{name}_{edge}"] = dt_util.utc_from_timestamp(value).isoformat()
+        return out
+
+
+class OrionZoneSplitModeSensor(OrionBaseEntity, SensorEntity):
+    """Whether the two halves of the bed are driven as one.
+
+    `combined` means one set of controls covers the whole bed. `split`
+    means each side runs independently, which is what the app's Split
+    Zones action produces.
+
+    Worth having on its own: the session payload carries `is_combined`
+    and `combined_zone_ids`, which the Orion app never reads and which
+    this integration therefore refuses to build on. This field is the
+    same question answered by a route the app does use.
+    """
+
+    _attr_icon = "mdi:bed-king-outline"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(self, coordinator, device_id: str) -> None:
+        super().__init__(coordinator, device_id)
+        self._attr_unique_id = f"{device_id}_zone_split_mode"
+        self._attr_name = "Zone Mode"
+
+    @property
+    def available(self) -> bool:
+        return super().available and self.coordinator.zone_split_mode() is not None
+
+    @property
+    def native_value(self) -> str | None:
+        mode = self.coordinator.zone_split_mode()
+        return mode.title() if isinstance(mode, str) else None
+
+    async def async_assign_zones(self, user_id: str, zone_ids: list[str]) -> None:
+        """Put somebody on one or more zones of this bed.
+
+        The app calls this "Replace {name}". It is how a spare-room bed
+        gets handed to whoever is staying without anyone opening the
+        phone app.
+
+        Moving somebody onto an occupied zone displaces whoever was
+        there. That is deliberate on Orion's side and is what the
+        `push_away_behavior` the app always sends governs.
+        """
+        known = {p["user_id"] for p in self._people()}
+        primary = self.coordinator.user_id
+        if primary:
+            known.add(primary)
+        if user_id not in known:
+            raise HomeAssistantError(
+                f"{user_id} is not on this bed. Invite them first, or check "
+                "the people attribute on this sensor."
+            )
+        try:
+            await self.coordinator.api_client.assign_zones(
+                user_id, self._device_id, zone_ids
+            )
+        except ValueError as err:
+            raise HomeAssistantError(str(err)) from err
+        except OrionApiError as err:
+            raise HomeAssistantError(f"Orion could not assign that zone: {err}") from err
+        _LOGGER.info("Assigned Orion zones %s to user %s", zone_ids, user_id)
+        await self.coordinator.async_request_refresh()
+
+    async def async_set_device_name(self, name: str) -> None:
+        """Rename the bed.
+
+        Cosmetic on Orion's side. Home Assistant keeps its own device
+        name, so this changes what the phone app shows and nothing here.
+        """
+        try:
+            await self.coordinator.api_client.set_device_name(self._device_id, name)
+        except ValueError as err:
+            raise HomeAssistantError(str(err)) from err
+        except OrionApiError as err:
+            raise HomeAssistantError(f"Orion could not rename the bed: {err}") from err
+        await self.coordinator.async_request_refresh()
+
+    async def async_set_device_timezone(self, timezone: str) -> None:
+        """Set the bed's timezone.
+
+        Not cosmetic. Schedules are stored per weekday and the bed works
+        out which day it is from this, so a wrong value moves bedtime
+        rather than just relabelling it.
+        """
+        try:
+            await self.coordinator.api_client.set_device_timezone(
+                self._device_id, timezone
+            )
+        except ValueError as err:
+            raise HomeAssistantError(str(err)) from err
+        except OrionApiError as err:
+            raise HomeAssistantError(
+                f"Orion could not set the timezone: {err}"
+            ) from err
+        _LOGGER.warning(
+            "Changed the Orion bed timezone to %s. Schedules are stored per "
+            "weekday, so check tonight's bedtime is still what you expect.",
+            timezone,
+        )
         await self.coordinator.async_request_refresh()

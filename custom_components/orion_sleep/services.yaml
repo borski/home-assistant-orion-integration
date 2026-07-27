@@ -291,3 +291,42 @@ update_user_phone:
       example: "+1 415 555 1234"
       selector:
         text:
+
+assign_zones:
+  target:
+    entity:
+      integration: orion_sleep
+      domain: sensor
+  fields:
+    user_id:
+      required: true
+      selector:
+        text:
+    zone_ids:
+      required: true
+      example: "[zone_a]"
+      selector:
+        object:
+
+set_device_name:
+  target:
+    entity:
+      integration: orion_sleep
+      domain: sensor
+  fields:
+    name:
+      required: true
+      selector:
+        text:
+
+set_device_timezone:
+  target:
+    entity:
+      integration: orion_sleep
+      domain: sensor
+  fields:
+    timezone:
+      required: true
+      example: America/Los_Angeles
+      selector:
+        text:

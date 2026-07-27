@@ -919,3 +919,17 @@ def summarize_access(devices: object, device_id: object = None) -> list[dict]:
                 }
             )
     return sorted(people, key=lambda p: (p["role"], p["name"]))
+
+
+# ── Account configuration ─────────────────────────────────────────────
+
+# The scale the Orion app displays. `relative` is the -10 to +10 offset
+# ladder this integration exposes as number entities; `fahrenheit` is the
+# absolute scale. Both lookup tables ship on the device, so this changes
+# what the app shows rather than what the bed does.
+TEMPERATURE_DISPLAY_UNITS = ("relative", "fahrenheit")
+
+# Whether the two halves of the bed are driven as one. MEASURED as
+# `combined` on a two-person bed; `split` is what the app's Split Zones
+# action produces.
+ZONE_SPLIT_MODES = ("combined", "split")

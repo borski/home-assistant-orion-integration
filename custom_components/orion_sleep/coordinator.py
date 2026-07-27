@@ -164,6 +164,8 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
             "schedules": (self.data or {}).get("schedules", {}),
             "insights": (self.data or {}).get("insights", {}),
             "partner_insights": (self.data or {}).get("partner_insights", {}),
+            "live_session": (self.data or {}).get("live_session", {}),
+            "sleep_config": (self.data or {}).get("sleep_config", {}),
         }
 
         # Re-fetch devices each poll so zone/user changes surface.
@@ -231,6 +233,24 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
             raise ConfigEntryAuthFailed(str(err)) from err
         except (OrionApiError, OrionConnectionError) as err:
             _LOGGER.warning("Failed to fetch insights: %s", err)
+
+        # Orion's own view of whether anyone is in bed, and where the
+        # schedule currently is. Both are cheap, and `is_in_bed` is the
+        # only occupancy signal in this API that the vendor's own app
+        # actually consumes.
+        try:
+            data["live_session"] = await self.api_client.get_live_session()
+        except OrionAuthError as err:
+            raise ConfigEntryAuthFailed(str(err)) from err
+        except (OrionApiError, OrionConnectionError) as err:
+            _LOGGER.warning("Failed to fetch the live session: %s", err)
+
+        try:
+            data["sleep_config"] = await self.api_client.get_sleep_configurations()
+        except OrionAuthError as err:
+            raise ConfigEntryAuthFailed(str(err)) from err
+        except (OrionApiError, OrionConnectionError) as err:
+            _LOGGER.warning("Failed to fetch sleep configurations: %s", err)
 
         if self.partner_api_client is not None:
             await self._async_refresh_partner_identity()
@@ -344,6 +364,48 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
         if not serial:
             return False
         return len(self.devices) == 1 and serial == self.partner_device_serial
+
+    # ── Live session and account configuration ────────────────────
+
+    def live_session(self) -> dict:
+        """Orion's own live-session record for the authenticated user."""
+        return util.nested_mapping(self.data, "live_session", "response") or (
+            util.nested_mapping(self.data, "live_session")
+        )
+
+    def server_says_in_bed(self) -> bool | None:
+        """Whether Orion thinks this user is in bed right now.
+
+        Deliberately separate from the topper's own occupancy reading.
+        The two disagree, and the vendor's app trusts this one: it never
+        reads `status_text` at all. Returns None when the field is
+        missing so an absent answer is not mistaken for a no.
+        """
+        value = self.live_session().get("is_in_bed")
+        return value if isinstance(value, bool) else None
+
+    def sleep_config(self) -> dict:
+        """Account-level configuration from /v1/sleep-configurations."""
+        return util.nested_mapping(self.data, "sleep_config", "response") or (
+            util.nested_mapping(self.data, "sleep_config")
+        )
+
+    def zone_split_mode(self) -> str | None:
+        """Whether the two halves of the bed are driven as one.
+
+        `combined` or `split`. Answers a question this project spent a
+        long time unable to settle from the session payload alone.
+        """
+        value = self.sleep_config().get("zone_split_mode")
+        return value if isinstance(value, str) and value else None
+
+    def temperature_display_unit(self) -> str | None:
+        """The scale the Orion app shows, `relative` or `fahrenheit`."""
+        temperature = self.sleep_config().get("temperature")
+        if not isinstance(temperature, dict):
+            return None
+        value = temperature.get("display_unit")
+        return value if isinstance(value, str) and value else None
 
     def get_today_schedule(self, user_id: str | None = None) -> dict | None:
         """Today's sleep schedule row for one Orion user.

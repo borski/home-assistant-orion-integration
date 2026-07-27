@@ -595,6 +595,50 @@ cannot be taken back.
 
 ## Verification Log
 
+### 2026-07-27 — `/v1/sleep-session` and `/v1/sleep-configurations`
+
+Two GETs that had never been called, both MEASURED, and between them
+they answer three open questions.
+
+**`GET /v1/sleep-session`** returns `is_in_bed`, `in_bed_start`,
+`in_bed_end`, `session_id`, `zone_id`, `device_id`, `current_phase`, and
+`phases` (a map of phase name to `{start, end}` Unix seconds).
+
+`is_in_bed` matters most. It is Orion's own occupancy determination,
+made server side, and it is what the app consumes. The per-pad occupancy
+this integration ships is derived from `status_text`, which the app
+never reads and which has been observed reporting an occupant on a
+provably empty side for fifty minutes. Both are now exposed as separate
+entities, deliberately, because the disagreement between them is the
+evidence needed to characterise the fault.
+
+**`GET /v1/sleep-configurations`** returns `away`
+(`{is_away, returns_at, return_device_id}`), `temperature`
+(`{control_unit, display_unit}`), `zone_split_mode`, `text_opt_in`,
+`text_opt_in_at`, `healthkit_last_synced_at`.
+
+**`zone_split_mode` settles the `is_combined` question**, or at least
+relocates it. Measured value `combined` on a two-person bed where each
+sleeper owns a zone. This is the same question the session's unreadable
+`is_combined` field appears to answer, asked of a route the app uses.
+
+**Open and NOT understood: the `phases` windows do not line up with the
+schedule.** On an account with a 23:00 bedtime, `phases` reported
+`phase_1` running 14:09 to 15:09 local and `phase_2` running 15:09 to
+19:09 local. Those are afternoon hours with no obvious relationship to
+either the stored schedule or the previous night's session. The sensor
+ships the values as given rather than pretending to interpret them. Do
+not describe this as "the schedule" until somebody works out what
+anchors those timestamps.
+
+**`PUT /v1/sleep-configurations/devices` body**, from both app call
+sites (decompiled 820577 and 828588):
+`{user_id, device_id, zone_ids, push_away_behavior}`. Both send
+`switch_zone_first` and no other value has been seen, so it is defaulted
+rather than exposed.
+
+
+
 ### 2026-07-27 — `is_combined` and `combined_zone_ids`: not built, and why
 
 Both fields appear on every session in `/v2/insights`. **Neither appears

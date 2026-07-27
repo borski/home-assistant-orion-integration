@@ -13,6 +13,7 @@ import aiohttp
 from .const import API_BASE_URL
 from .util import (
     SCHEDULE_TEMPERATURE_FIELDS,
+    TEMPERATURE_DISPLAY_UNITS,
     auth_session_from_response,
     auth_tokens_from_session,
     describe_api_error,
@@ -810,6 +811,152 @@ class OrionApiClient:
         """
         await self.ensure_valid_token()
         return await self._request("POST", "/v1/sleep-sessions/end")
+
+    # ── Live session and account configuration ────────────────────
+
+    async def get_live_session(self) -> dict:
+        """GET /v1/sleep-session — what the bed thinks is happening now.
+
+        Confidence: MEASURED 2026-07-27. Returns `is_in_bed`,
+        `in_bed_start`, `in_bed_end`, `session_id`, `zone_id`,
+        `device_id`, `current_phase`, and `phases`, the last being a map
+        of schedule phase names to `{start, end}` Unix seconds.
+
+        Worth more than it looks. `is_in_bed` is Orion's own occupancy
+        call, arrived at server side, which makes it an independent
+        second opinion on the topper's `status_text`. The app never reads
+        `status_text`; it has this instead.
+
+        `phases` also carries the scheduled temperature windows that the
+        WebSocket `timeline` was supposed to provide and never did.
+        """
+        await self.ensure_valid_token()
+        return await self._request("GET", "/v1/sleep-session")
+
+    async def get_sleep_configurations(self) -> dict:
+        """GET /v1/sleep-configurations — account-level settings.
+
+        Confidence: MEASURED 2026-07-27. Returns `away`
+        (`{is_away, returns_at, return_device_id}`), `temperature`
+        (`{control_unit, display_unit}`), `zone_split_mode`,
+        `text_opt_in`, `text_opt_in_at`, and `healthkit_last_synced_at`.
+
+        `zone_split_mode` is the answer to a question this project could
+        not previously settle: whether the two halves of the bed are
+        being driven as one. Observed value `combined`, with `split` as
+        the other state the app's Split Zones action produces.
+        """
+        await self.ensure_valid_token()
+        return await self._request("GET", "/v1/sleep-configurations")
+
+    async def set_temperature_units(
+        self, control_unit: int | None = None, display_unit: str | None = None
+    ) -> dict:
+        """PUT /v1/sleep-configurations/temperature — display preferences.
+
+        Confidence: APP-DERIVED for the write. Path at decompiled line
+        675240, body keys `temp_control_unit` and `temp_display_unit` in
+        the chain at 674780 through 674884. The current values were
+        MEASURED from the GET: `control_unit: 1`,
+        `display_unit: 'relative'`.
+
+        `display_unit` picks the scale the app shows: `relative` is the
+        -10 to +10 offset ladder this integration already exposes as
+        number entities, and `fahrenheit` is the absolute scale. Both
+        lookup tables ship on the device, so changing this alters what
+        the vendor app displays, not what the bed does.
+        """
+        payload: dict[str, Any] = {}
+        if control_unit is not None:
+            if isinstance(control_unit, bool) or not isinstance(control_unit, int):
+                raise ValueError("control_unit must be an integer")
+            payload["temp_control_unit"] = control_unit
+        if display_unit is not None:
+            if display_unit not in TEMPERATURE_DISPLAY_UNITS:
+                raise ValueError(
+                    "display_unit must be one of "
+                    f"{', '.join(TEMPERATURE_DISPLAY_UNITS)}"
+                )
+            payload["temp_display_unit"] = display_unit
+        if not payload:
+            raise ValueError("set_temperature_units needs at least one value")
+
+        await self.ensure_valid_token()
+        return await self._request(
+            "PUT", "/v1/sleep-configurations/temperature", json_data=payload
+        )
+
+    async def set_device_name(self, device_id: str, name: str) -> dict:
+        """PUT /v1/devices/{deviceId} — rename the bed.
+
+        Confidence: APP-DERIVED. Same route as orientation, one key per
+        request, at decompiled lines 535827 and 535835. This is one of
+        the few device routes that genuinely takes the UUID rather than
+        the serial.
+        """
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError("set_device_name requires a name")
+        return await self.update_device(device_id, {"name": name.strip()})
+
+    async def set_device_timezone(self, device_id: str, timezone: str) -> dict:
+        """PUT /v1/devices/{deviceId} — set the bed's timezone.
+
+        Confidence: APP-DERIVED, same route and shape as the rename.
+
+        Not cosmetic. Schedules are stored per weekday and the bed
+        decides which day it is from this, so a wrong timezone shifts
+        bedtime rather than just relabelling it. An IANA name is
+        expected, matching the value the GET returns.
+        """
+        if not isinstance(timezone, str) or "/" not in timezone:
+            raise ValueError(
+                "set_device_timezone expects an IANA name such as America/Denver"
+            )
+        return await self.update_device(device_id, {"timezone": timezone})
+
+    async def assign_zones(
+        self,
+        user_id: str,
+        device_id: str,
+        zone_ids: list[str],
+        push_away_behavior: str = "switch_zone_first",
+    ) -> dict:
+        """PUT /v1/sleep-configurations/devices — put someone on a zone.
+
+        Confidence: APP-DERIVED. Path at decompiled line 675694. Both
+        call sites, 820577 and 828588, build the body as
+        `{user_id, device_id, zone_ids, push_away_behavior}` and both
+        send `switch_zone_first`. No other value for that key has been
+        seen, so it defaults rather than being exposed as a choice.
+
+        This is the app's "Replace {name}" action. It is how a guest room
+        bed gets handed to whoever is staying, without anybody touching
+        the phone app.
+
+        Moving someone onto an occupied zone displaces whoever was there,
+        which is what `push_away_behavior` governs.
+        """
+        if not isinstance(user_id, str) or not user_id.strip():
+            raise ValueError("assign_zones requires a user_id")
+        if not isinstance(device_id, str) or not device_id.strip():
+            raise ValueError("assign_zones requires a device_id")
+        if not isinstance(zone_ids, list) or not zone_ids:
+            raise ValueError("assign_zones requires at least one zone id")
+        for zone_id in zone_ids:
+            if not isinstance(zone_id, str) or not zone_id.strip():
+                raise ValueError("assign_zones zone ids must be non-empty strings")
+
+        await self.ensure_valid_token()
+        return await self._request(
+            "PUT",
+            "/v1/sleep-configurations/devices",
+            json_data={
+                "user_id": user_id,
+                "device_id": device_id,
+                "zone_ids": list(zone_ids),
+                "push_away_behavior": push_away_behavior,
+            },
+        )
 
     # ── User access management ────────────────────────────────────
     #

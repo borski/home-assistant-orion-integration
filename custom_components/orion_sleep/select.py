@@ -37,6 +37,7 @@ async def async_setup_entry(
         device_id = device.get("id")
         if device_id:
             entities.append(OrionOrientationSelect(coordinator, device_id))
+        entities.append(OrionTemperatureDisplaySelect(coordinator, device_id))
     async_add_entities(entities)
 
 
@@ -101,4 +102,53 @@ class OrionOrientationSelect(OrionBaseEntity, SelectEntity):
             )
         except OrionApiError as err:
             raise HomeAssistantError(f"Orion rejected the orientation change: {err}") from err
+        await self.coordinator.async_request_refresh()
+
+
+class OrionTemperatureDisplaySelect(OrionBaseEntity, SelectEntity):
+    """Which temperature scale the Orion app shows.
+
+    `relative` is the -10 to +10 offset ladder this integration already
+    exposes as number entities. `fahrenheit` is the absolute scale. Both
+    lookup tables ship on the device, so this changes what the phone app
+    displays rather than anything the bed does.
+
+    Account level, not per device. Changing it affects every bed on the
+    account.
+    """
+
+    _attr_entity_category = EntityCategory.CONFIG
+    _attr_icon = "mdi:thermometer-lines"
+    _attr_options = list(util.TEMPERATURE_DISPLAY_UNITS)
+
+    def __init__(self, coordinator, device_id: str) -> None:
+        super().__init__(coordinator, device_id)
+        self._attr_unique_id = f"{device_id}_temperature_display_unit"
+        self._attr_name = "App Temperature Scale"
+
+    @property
+    def available(self) -> bool:
+        return (
+            super().available
+            and self.coordinator.temperature_display_unit() in self._attr_options
+        )
+
+    @property
+    def current_option(self) -> str | None:
+        return self.coordinator.temperature_display_unit()
+
+    async def async_select_option(self, option: str) -> None:
+        _LOGGER.warning(
+            "Changing the Orion app's temperature scale to %s. This write has "
+            "not been observed against the live API.",
+            option,
+        )
+        try:
+            await self.coordinator.api_client.set_temperature_units(display_unit=option)
+        except ValueError as err:
+            raise HomeAssistantError(str(err)) from err
+        except OrionApiError as err:
+            raise HomeAssistantError(
+                f"Orion rejected the temperature scale change: {err}"
+            ) from err
         await self.coordinator.async_request_refresh()

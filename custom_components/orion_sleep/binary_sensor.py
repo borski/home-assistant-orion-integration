@@ -54,6 +54,7 @@ async def async_setup_entry(
             )
         entities.append(OrionDeviceOnlineBinarySensor(coordinator, device_id))
         entities.append(OrionSafetyProblemBinarySensor(coordinator, device_id))
+        entities.append(OrionServerOccupancyBinarySensor(coordinator, device_id))
         for user_id in coordinator.schedule_user_ids():
             entities.append(
                 OrionScheduleOverrideBinarySensor(coordinator, device_id, user_id)
@@ -394,3 +395,47 @@ class OrionDeviceOnlineBinarySensor(OrionBaseEntity, BinarySensorEntity):
     @property
     def is_on(self) -> bool | None:
         return self.coordinator.device_online(self._device_id)
+
+
+class OrionServerOccupancyBinarySensor(OrionBaseEntity, BinarySensorEntity):
+    """Whether Orion's servers think this person is in bed.
+
+    Deliberately a second, separate entity rather than a replacement for
+    the topper's own occupancy reading. The two disagree, and the
+    disagreement is the point.
+
+    The per-pad sensors derive occupancy from `status_text`, a field the
+    Orion app never reads. This one comes from `/v1/sleep-session`, which
+    the app does read. Where they differ, this is the better bet, and
+    having both visible is what will eventually show how the topper gets
+    it wrong.
+
+    Covers the authenticated account only. The route reports for whoever
+    holds the token, so a linked partner would need her own fetch.
+    """
+
+    _attr_device_class = BinarySensorDeviceClass.OCCUPANCY
+    _attr_icon = "mdi:bed-outline"
+
+    def __init__(self, coordinator, device_id: str) -> None:
+        super().__init__(coordinator, device_id)
+        self._attr_unique_id = f"{device_id}_server_in_bed"
+        self._attr_name = f"{coordinator.primary_name()} In Bed (Orion)"
+
+    @property
+    def available(self) -> bool:
+        return super().available and self.coordinator.server_says_in_bed() is not None
+
+    @property
+    def is_on(self) -> bool | None:
+        return self.coordinator.server_says_in_bed()
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        session = self.coordinator.live_session()
+        return {
+            "in_bed_start": session.get("in_bed_start"),
+            "in_bed_end": session.get("in_bed_end"),
+            "session_id": session.get("session_id"),
+            "zone_id": session.get("zone_id") or None,
+        }
