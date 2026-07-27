@@ -2,14 +2,14 @@
 
 [![hacs_badge](https://img.shields.io/badge/HACS-Custom-orange.svg)](https://github.com/hacs/integration)
 
-Custom [Home Assistant](https://www.home-assistant.io/) integration for the **Orion Sleep** smart mattress topper. Control bed temperature, react to occupancy in real time, monitor sleep metrics, and manage sleep schedules — all from your Home Assistant dashboard.
+Custom [Home Assistant](https://www.home-assistant.io/) integration for the **Orion Sleep** smart mattress topper. Control each bed zone, react to occupancy in real time, monitor sleep metrics, and adjust schedule temperatures from your Home Assistant dashboard.
 
 ## Features
 
 - **Live WebSocket stream** — Temperature, power, and sensor readings update in realtime when the bed or the Orion app changes anything; no need to wait for the next poll.
 - **Bed occupancy** — Per-topper-sensor binary sensors track who is on the bed. Latency varies; expect ~30 s to 1 minute after sitting down or leaving before the sensor flips (the topper itself is slow to decide).
 - **Live heart rate and breath rate** — Per-sensor realtime readings from the topper (distinct from the post-session averages).
-- **Climate control** — Target bed temperature per-zone, with the current measured temperature pulled from the latest session.
+- **Per-zone climate control** — Independent target temperature, measured temperature, power state, and thermal action for each Orion zone.
 - **Power and presence switches** — One-click power via the canonical `/v1/devices/{serial}/live` endpoint, plus an Away Mode switch that reads the authoritative presence signal from `zones[*].user`.
 - **Sleep insight sensors** — Sleep score, HRV, heart rate, breath rate, sleep-stage durations (awake / light / deep / REM), total time asleep, restless time, and body-movement rate for your most recent session.
 - **Schedule sensors and sliders** — Today's bedtime, wake-up time, duration, and target temperatures, plus Number sliders for adjusting the four schedule-phase temperature offsets (-10 … +10, app-style).
@@ -83,15 +83,22 @@ One device is created per paired topper. Each device exposes the entities listed
 
 | Entity | Description |
 |---|---|
-| Bed Climate | Target temperature read from today's schedule, current temperature from the latest session's most-recent sample. HVAC mode reflects whether a session is in progress. |
+| Zone Climate | One entity per Orion zone. Target and measured temperatures come from the live device snapshot. HVAC mode controls that zone's runtime power state. |
 
 ### Switches
 
 | Entity | Description |
 |---|---|
 | Power | All zones on/off via `PUT /v1/devices/{serial}/live`. State derived from each zone's `on` field. |
-| Away Mode | Marks you present/away via `POST /v1/sleep-configurations/user-away`. State derived from whether any zone carries a populated `user` object (the authoritative presence signal). |
-| Sleep Schedule | Enable/disable today's bedtime action via `PUT /v1/sleep-schedules`. |
+| Away Mode | Marks the authenticated user present or away via `POST /v1/sleep-configurations/user-away`. State is on only when that user is absent from every zone. Another sleeper's assignment does not affect it. |
+
+Away Mode is omitted for accounts with multiple Orion devices because the vendor action is account-global and does not identify a target device.
+
+### Buttons
+
+| Entity | Description |
+|---|---|
+| Reboot Control Tower | Disabled by default. When enabled, performs the measured `reboot` device action if the account permits it. Destructive actions such as Forget Wi-Fi and device deactivation are intentionally not exposed. |
 
 ### Numbers (temperature-offset sliders)
 
@@ -170,12 +177,13 @@ The raw `status_text`, `is_working`, `firmware_version`, and `hardware_version` 
       custom_components.orion_sleep: debug
   ```
 
-- **Diagnostics** — Use **Settings > Devices & Services > Orion Sleep > three-dot menu > Download diagnostics** to generate a debug bundle. Access tokens, refresh tokens, user identifiers, names, serial numbers, IP and MAC addresses are automatically redacted.
+- **Diagnostics** — Use **Settings > Devices & Services > Orion Sleep > three-dot menu > Download diagnostics** to generate a debug bundle. Tokens, identifiers, names, contact details, network details, activation codes, and health profile fields are automatically redacted.
 
 ## Notes and limitations
 
-- Writing to `PUT /v1/sleep-configurations/temperature` has not been verified against the live API; climate `set_temperature` and the Number sliders use `PUT /v1/sleep-schedules` instead, which is confirmed.
-- Home Assistant's climate `async_turn_off` / `async_set_hvac_mode(OFF)` are no-ops for Bed Climate — the underlying system is schedule-driven. Use the **Power** switch to actually turn the device off.
+- Climate controls use the measured `/v1/devices/{serial}/live/zones/{zoneId}` route. The older `/v1/sleep-configurations/temperature` route is not part of the verified contract.
+- Turning a zone off is a runtime action. It does not disable the schedule, so a later scheduled action can turn the zone back on.
+- Global schedule enable and disable behavior has not been verified and is not exposed. The four schedule temperature sliders use verified partial updates.
 - HRV values are frequently `null` in real data; the HRV sensor will then report as `unknown`.
 - Starting and stopping sleep sessions is not supported by the API.
 - Zone splitting / merging and guest-user management are not exposed.

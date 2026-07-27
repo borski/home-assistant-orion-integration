@@ -229,14 +229,6 @@ def get_sleep_schedules(token: str) -> Any:
     return _check(resp, "get_sleep_schedules")
 
 
-def get_sleep_config_devices(token: str) -> Any:
-    """GET /v1/sleep-configurations/devices — sleep config + temp data."""
-    resp = requests.get(
-        _url("/v1/sleep-configurations/devices"), headers=_headers(token)
-    )
-    return _check(resp, "get_sleep_config_devices")
-
-
 def get_insights(token: str, days: int = 7) -> Any:
     """GET /v2/insights for the last *days* days."""
     today = date.today()
@@ -266,27 +258,18 @@ def set_user_away(token: str, user_id: str, is_away: bool = True) -> Any:
     return _check(resp, "set_user_away")
 
 
-def get_sleep_config_temperature(token: str) -> Any:
-    """GET /v1/sleep-configurations/temperature — current temperature config."""
-    resp = requests.get(
-        _url("/v1/sleep-configurations/temperature"), headers=_headers(token)
-    )
-    return _check(resp, "get_sleep_config_temperature")
-
-
 # ── device power / zone control ───────────────────────────────────────────────
+# Measured against the live API. The app's on/off toggle calls:
 #
-# Reverse-engineered from Hermes bytecode.  The app's on/off toggle calls:
-#
-#   PUT /v1/devices/{device_id}/live/zones/{zone_id}   body: {"on": bool, "temp"?: n}
-#   PUT /v1/devices/{device_id}/live                   body: {"zones": [{"id", "on", "temp"?}, ...]}
+#   PUT /v1/devices/{serial}/live/zones/{zone_id}   body: {"on": bool, "temp"?: n}
+#   PUT /v1/devices/{serial}/live                   body: {"zones": [{"id", "on", "temp"?}, ...]}
 #
 # These are the canonical power-control endpoints used by the mobile app's
 # UI toggle (useDeviceControlStore, lines 1027388-1027684 of the decompiled
 # bundle).  They are distinct from:
 #   - POST /v1/sleep-configurations/user-away   (presence / schedule override)
 #   - POST /v1/devices/{id}/activate|deactivate (pairing lifecycle, not power)
-#   - POST /v1/devices/{id}/action              (quiet_mode, reboot, etc.)
+#   - POST /v1/devices/{serial}/action          (reboot or forget_wifi only)
 
 
 def _put_raw(token: str, path: str, body: dict) -> tuple[int, str]:
@@ -304,8 +287,7 @@ def set_zone(
 ) -> tuple[int, str]:
     """PUT /v1/devices/{device_ident}/live/zones/{zone_id} — per-zone control.
 
-    `device_ident` is whatever the server accepts in the path (id or
-    serial_number — that's what we're probing).  Returns (status, text).
+    `device_ident` must be the serial number. Returns (status, text).
     """
     body: dict = {}
     if on is not None:
@@ -342,66 +324,53 @@ def _zones_body(device: dict, on: bool, temp: float | None = None) -> list[dict]
     return zones_body
 
 
-def probe_power(token: str, device: dict, on: bool) -> None:
-    """Probe the live power endpoints using both id and serial_number.
-
-    Prints the server response for each variant so we can figure out which
-    identifier and endpoint the API actually accepts.  The OpenAPI says
-    `id`, but the WebSocket path uses `serial_number` — this probes both.
-    """
-    device_id = device.get("id", "")
+def set_power(token: str, device: dict, on: bool) -> None:
+    """Write all zones through the verified serial-number live route."""
     serial = device.get("serial_number", "")
-    zone_list = device.get("zones") or []
-    first_zone_id = zone_list[0]["id"] if zone_list else ""
+    if not serial:
+        print("\n[ERROR] Device has no serial_number. Cannot set power.")
+        return
 
-    attempts: list[tuple[str, str, dict]] = []
-    # Bulk-zone endpoint
-    if device_id:
-        attempts.append(
-            (
-                "bulk/id",
-                f"/v1/devices/{device_id}/live",
-                {"zones": _zones_body(device, on)},
-            )
-        )
-    if serial and serial != device_id:
-        attempts.append(
-            (
-                "bulk/serial",
-                f"/v1/devices/{serial}/live",
-                {"zones": _zones_body(device, on)},
-            )
-        )
-    # Single-zone endpoint (only works if we have a zone id)
-    if first_zone_id:
-        if device_id:
-            attempts.append(
-                (
-                    "zone/id",
-                    f"/v1/devices/{device_id}/live/zones/{first_zone_id}",
-                    {"on": on},
-                )
-            )
-        if serial and serial != device_id:
-            attempts.append(
-                (
-                    "zone/serial",
-                    f"/v1/devices/{serial}/live/zones/{first_zone_id}",
-                    {"on": on},
-                )
-            )
+    path = f"/v1/devices/{serial}/live"
+    body = {"zones": _zones_body(device, on)}
+    print(f"\n>>> Setting power={on} for serial={serial}")
+    status, text = _put_raw(token, path, body)
+    print(f"  PUT {path}")
+    print(f"  body={json.dumps(body)}")
+    print(f"  -> {status}  {text[:300]}")
 
-    print(f"\n>>> Probing power={on} for device id={device_id} serial={serial}")
-    for label, path, body in attempts:
-        status, text = _put_raw(token, path, body)
-        print(f"  [{label:12s}] PUT {path}")
-        print(f"               body={json.dumps(body)}")
-        print(f"               -> {status}  {text[:300]}")
-        if 200 <= status < 300:
-            print(f"  [SUCCESS via {label}]")
-            # Don't keep trying once one works so we don't re-toggle the bed.
-            return
-    print("  [ALL ATTEMPTS FAILED]")
+
+def set_live_setting(token: str, device: dict, field: str, value: object) -> None:
+    """Write ONE device settings key through the live route.
+
+    Confidence: MEASURED 2026-07-26. `PUT /v1/devices/{serial}/live`
+    accepts `led_brightness` (int, the app applies Math.round) and
+    `quiet_mode` (bool). Both were read out of the Orion Android v2.4.1
+    Hermes bytecode at decompiled lines 1083548 and 1083704, then each
+    confirmed against the live device four ways: HTTP 200 echoing the
+    value, the device pushing it back over its own WebSocket, the Home
+    Assistant entity changing, and the vendor's app agreeing.
+
+    This exists so a key can be proven from the CLI, against a value the
+    user can physically see change, BEFORE the Home Assistant entities are
+    trusted. One key per request, matching the app.
+    """
+    serial = device.get("serial_number", "")
+    if not serial:
+        print(f"\n[ERROR] Device has no serial_number. Cannot set {field}.")
+        return
+
+    path = f"/v1/devices/{serial}/live"
+    body = {field: value}
+    print(f"\n>>> Setting {field}={value!r} for serial={serial}")
+    status, text = _put_raw(token, path, body)
+    print(f"  PUT {path}")
+    print(f"  body={json.dumps(body)}")
+    print(f"  -> {status}  {text[:400]}")
+    if 200 <= status < 300:
+        print(f"  [OK] Confirm visually, then re-run to restore the prior {field}.")
+    else:
+        print(f"  [FAILED] Route rejected {field}. Do NOT promote it to measured.")
 
 
 # ── websocket ──────────────────────────────────────────────────────────────
@@ -490,8 +459,9 @@ async def _ws_listen_one(
     stop: asyncio.Event,
 ) -> None:
     """Open one /device/<serial> WebSocket and log incoming messages."""
-    import websockets
     from urllib.parse import quote
+
+    import websockets
 
     url = f"{WS_BASE_URL}/device/{quote(serial, safe='')}?token={token}"
     print(f"\nConnecting to {WS_BASE_URL}/device/{serial}?token=<JWT>")
@@ -613,8 +583,9 @@ async def _ws_capture_one(
     start: float,
 ) -> None:
     """Open a WS and log every frame until `stop` is set."""
-    import websockets
     from urllib.parse import quote
+
+    import websockets
 
     url = f"{WS_BASE_URL}/device/{quote(serial, safe='')}?token={token}"
     _scenario_log("WS", f"connecting serial={serial}", start=start)
@@ -889,24 +860,36 @@ def main() -> None:
     parser.add_argument(
         "--set-away",
         action="store_true",
-        help="Turn off the mattress (set user away) then show state",
+        help="Mark the authenticated user away, then show state",
     )
     parser.add_argument(
         "--set-present",
         action="store_true",
-        help="Turn on the mattress (undo away) then show state",
+        help="Mark the authenticated user present, then show state",
     )
     parser.add_argument(
         "--power-on",
         action="store_true",
-        help="Probe PUT /v1/devices/<ident>/live with on=true against each "
-        "device, trying id then serial_number (stops at first 2xx).",
+        help="Set all zones on through each device's verified serial route",
     )
     parser.add_argument(
         "--power-off",
         action="store_true",
-        help="Probe PUT /v1/devices/<ident>/live with on=false against each "
-        "device, trying id then serial_number (stops at first 2xx).",
+        help="Set all zones off through each device's verified serial route",
+    )
+    parser.add_argument(
+        "--set-led-brightness",
+        type=int,
+        metavar="0-100",
+        help=(
+            "MEASURED 2026-07-26: PUT {led_brightness: N} to the live route. "
+            "Physically visible on the Control Tower, so it proves the route."
+        ),
+    )
+    parser.add_argument(
+        "--set-quiet-mode",
+        choices=("on", "off"),
+        help="MEASURED 2026-07-26: PUT {quiet_mode: bool} to the live route",
     )
     parser.add_argument(
         "--websocket",
@@ -955,18 +938,9 @@ def main() -> None:
         if isinstance(raw, list):
             device_list = raw
 
-    sleep_configs = get_sleep_config_devices(access_token)
-    if sleep_configs is not None:
-        _pretty("Sleep Configurations (devices)", sleep_configs)
-
-    # Try to GET the temperature config
-    temp_config = get_sleep_config_temperature(access_token)
-    if temp_config is not None:
-        _pretty("Sleep Configurations (temperature)", temp_config)
-
     session = get_session_state(access_token)
     if session is not None:
-        _pretty("Current Session State", session)
+        _pretty("Onboarding State", session)
 
     schedules = get_sleep_schedules(access_token)
     if schedules is not None:
@@ -1007,17 +981,33 @@ def main() -> None:
             if schedules2 is not None:
                 _pretty("Sleep Schedules (after)", schedules2)
 
-    # ── Power probe (PUT /v1/devices/<ident>/live) ───────────────────
+    # ── Runtime power (PUT /v1/devices/<serial>/live) ────────────────
     if args.power_on or args.power_off:
         desired = args.power_on  # True for power-on, False for power-off
         for device in device_list:
-            probe_power(access_token, device, on=desired)
+            set_power(access_token, device, on=desired)
 
-        # Re-fetch to show the post-probe state
-        print("\n>>> Re-fetching devices after power probe...")
+        # Re-fetch to show the updated state
+        print("\n>>> Re-fetching devices after power change...")
         devices_after = list_devices(access_token)
         if devices_after is not None:
-            _pretty("Devices (after power probe)", devices_after)
+            _pretty("Devices (after power change)", devices_after)
+
+    # ── Live device settings (MEASURED 2026-07-26) ───────────────────
+    if args.set_led_brightness is not None:
+        if not 0 <= args.set_led_brightness <= 100:
+            print("\n[ERROR] --set-led-brightness must be between 0 and 100")
+        else:
+            for device in device_list:
+                set_live_setting(
+                    access_token, device, "led_brightness", args.set_led_brightness
+                )
+
+    if args.set_quiet_mode is not None:
+        for device in device_list:
+            set_live_setting(
+                access_token, device, "quiet_mode", args.set_quiet_mode == "on"
+            )
 
     # ── WebSocket ─────────────────────────────────────────────────────
     if args.websocket:

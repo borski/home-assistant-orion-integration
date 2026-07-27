@@ -23,6 +23,7 @@ from .const import (
     CONF_ACCESS_TOKEN,
     CONF_AUTH_METHOD,
     CONF_AUTH_VALUE,
+    CONF_DISPLAY_ALIASES,
     CONF_EXPIRES_AT,
     CONF_INSIGHTS_DAYS,
     CONF_PARTNER_ACCESS_TOKEN,
@@ -299,36 +300,15 @@ class OrionSleepOptionsFlow(OptionsFlow):
         has_partner = bool(self._config_entry.data.get(CONF_PARTNER_ACCESS_TOKEN))
         if user_input is not None:
             options = dict(user_input)
-            partner_action = options.pop("partner_action", "keep")
-
-            if partner_action == "remove" and has_partner:
-                partner_keys = {
-                    CONF_PARTNER_AUTH_METHOD,
-                    CONF_PARTNER_AUTH_VALUE,
-                    CONF_PARTNER_ACCESS_TOKEN,
-                    CONF_PARTNER_REFRESH_TOKEN,
-                    CONF_PARTNER_EXPIRES_AT,
-                    CONF_PARTNER_DEVICE_SERIAL,
-                }
-                self.hass.config_entries.async_update_entry(
-                    self._config_entry,
-                    data={
-                        key: value
-                        for key, value in self._config_entry.data.items()
-                        if key not in partner_keys
-                    },
-                )
-                options[CONF_PARTNER_CONFIGURED] = False
-                return self.async_create_entry(title="", data=options)
-
-            if partner_action == "add":
-                options[CONF_PARTNER_CONFIGURED] = True
-                options[CONF_PARTNER_REVISION] = uuid4().hex
+            # Preserve aliases across an options save that did not touch them.
+            options.setdefault(
+                CONF_DISPLAY_ALIASES,
+                dict(self._config_entry.options.get(CONF_DISPLAY_ALIASES) or {}),
+            )
+            if options.pop("edit_aliases", False):
                 self._pending_options = options
-                return await self.async_step_partner_method()
-
-            options[CONF_PARTNER_CONFIGURED] = has_partner
-            return self.async_create_entry(title="", data=options)
+                return await self.async_step_aliases()
+            return await self._async_finish_init(options)
 
         current_interval = self._config_entry.options.get(
             CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL
@@ -356,9 +336,101 @@ class OrionSleepOptionsFlow(OptionsFlow):
                     vol.Required("partner_action", default="keep"): vol.In(
                         partner_actions
                     ),
+                    vol.Required("edit_aliases", default=False): bool,
                 }
             ),
         )
+
+    def _known_users(self) -> list[dict[str, str]]:
+        """Users discovered from the loaded entry, empty if it is not loaded."""
+        coordinator = getattr(self._config_entry, "runtime_data", None)
+        if coordinator is None:
+            return []
+        try:
+            return coordinator.known_users()
+        except Exception:  # noqa: BLE001 - options UI must never hard-fail
+            _LOGGER.debug("Could not enumerate Orion users for the alias form")
+            return []
+
+    async def async_step_aliases(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Set a display name per person.
+
+        Keyed on the immutable Orion user id. Form field labels are the
+        vendor's own names so the mapping is obvious, but nothing about a
+        name reaches a unique id, so renaming is always non-breaking.
+        """
+        users = self._known_users()
+        labels = util.unique_alias_labels(users)
+        label_to_id = {label: user_id for user_id, label in labels.items()}
+        existing = dict(self._config_entry.options.get(CONF_DISPLAY_ALIASES) or {})
+
+        if user_input is not None:
+            aliases = {
+                label_to_id[label]: value
+                for label, value in user_input.items()
+                if label in label_to_id
+            }
+            options = dict(self._pending_options)
+            options[CONF_DISPLAY_ALIASES] = util.clean_alias_map(
+                aliases, set(labels)
+            )
+            return await self._async_finish_init(options)
+
+        if not labels:
+            # Nothing to rename yet. Save what the first step collected
+            # rather than dead-ending on an empty form.
+            return await self._async_finish_init(dict(self._pending_options))
+
+        return self.async_show_form(
+            step_id="aliases",
+            data_schema=vol.Schema(
+                {
+                    vol.Optional(
+                        label, default=existing.get(user_id, "")
+                    ): str
+                    for user_id, label in labels.items()
+                }
+            ),
+            description_placeholders={"people": ", ".join(labels.values())},
+        )
+
+    async def _async_finish_init(
+        self, options: dict[str, Any]
+    ) -> ConfigFlowResult:
+        """Apply the partner action and write the options entry."""
+        has_partner = bool(self._config_entry.data.get(CONF_PARTNER_ACCESS_TOKEN))
+        partner_action = options.pop("partner_action", "keep")
+
+        if partner_action == "remove" and has_partner:
+            partner_keys = {
+                CONF_PARTNER_AUTH_METHOD,
+                CONF_PARTNER_AUTH_VALUE,
+                CONF_PARTNER_ACCESS_TOKEN,
+                CONF_PARTNER_REFRESH_TOKEN,
+                CONF_PARTNER_EXPIRES_AT,
+                CONF_PARTNER_DEVICE_SERIAL,
+            }
+            self.hass.config_entries.async_update_entry(
+                self._config_entry,
+                data={
+                    key: value
+                    for key, value in self._config_entry.data.items()
+                    if key not in partner_keys
+                },
+            )
+            options[CONF_PARTNER_CONFIGURED] = False
+            return self.async_create_entry(title="", data=options)
+
+        if partner_action == "add":
+            options[CONF_PARTNER_CONFIGURED] = True
+            options[CONF_PARTNER_REVISION] = uuid4().hex
+            self._pending_options = options
+            return await self.async_step_partner_method()
+
+        options[CONF_PARTNER_CONFIGURED] = has_partner
+        return self.async_create_entry(title="", data=options)
 
     async def async_step_partner_method(
         self, user_input: dict[str, Any] | None = None

@@ -8,10 +8,12 @@ from typing import Any
 from homeassistant.components.switch import SwitchEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .coordinator import OrionDataUpdateCoordinator
-from .entity import OrionBaseEntity
+from .entity import OrionBaseEntity, OrionLiveSettingMixin
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -30,8 +32,14 @@ async def async_setup_entry(
         if not device_id:
             continue
         entities.append(OrionPowerSwitch(coordinator, device_id))
-        entities.append(OrionAwayModeSwitch(coordinator, device_id))
-        entities.append(OrionScheduleSwitch(coordinator, device_id))
+        entities.append(OrionQuietModeSwitch(coordinator, device_id))
+        if len(coordinator.devices) == 1:
+            entities.append(OrionAwayModeSwitch(coordinator, device_id))
+
+    if len(coordinator.devices) > 1:
+        _LOGGER.warning(
+            "Away Mode is unavailable because the Orion account has multiple devices"
+        )
 
     async_add_entities(entities)
 
@@ -39,12 +47,11 @@ async def async_setup_entry(
 class OrionPowerSwitch(OrionBaseEntity, SwitchEntity):
     """Switch to turn the Orion mattress topper on/off.
 
-    Uses the canonical power primitive `PUT /v1/devices/{id}/live` to
+    Uses the canonical power primitive `PUT /v1/devices/{serial}/live` to
     set all zones on/off in one call. This is distinct from Away Mode,
     which is a presence/schedule override.
 
-    State is derived from each zone's `on` / `is_on` field returned by
-    `GET /v1/devices`.
+    State is derived from each zone's `on` field in the live snapshot.
     """
 
     _attr_translation_key = "power"
@@ -74,12 +81,12 @@ class OrionPowerSwitch(OrionBaseEntity, SwitchEntity):
         """Send on=<bool> to every zone via PUT /v1/devices/{serial}/live."""
         device = self._device()
         if not device:
-            return
+            raise HomeAssistantError("Orion device is unavailable")
         # The /live endpoints use serial_number in the path, NOT the UUID.
         serial = device.get("serial_number")
         zone_ids = [z.get("id") for z in device.get("zones", []) if z.get("id")]
         if not serial or not zone_ids:
-            return
+            raise HomeAssistantError("Orion device has no controllable zones")
         await self.coordinator.api_client.update_live_device_zones(
             device_serial=serial,
             zones=[{"id": zid, "on": on} for zid in zone_ids],
@@ -98,8 +105,8 @@ class OrionPowerSwitch(OrionBaseEntity, SwitchEntity):
 class OrionAwayModeSwitch(OrionBaseEntity, SwitchEntity):
     """Switch to control the user's away mode.
 
-    When away mode is ON, the user is marked as away and the device
-    stops heating/cooling. Zones lose their user assignment.
+    When away mode is ON, the authenticated user is marked as away and
+    their zone assignment is removed.
 
     When away mode is OFF, the user is marked as present and the device
     resumes normal operation.
@@ -107,9 +114,9 @@ class OrionAwayModeSwitch(OrionBaseEntity, SwitchEntity):
     Away mode is **distinct from the Power switch**. The mattress can be
     powered off without the user being marked away (e.g. the schedule's
     turn_off action just ran), so this switch reads the authoritative
-    signal from ``zones[*].user`` on ``/v1/devices`` — null across all
-    zones means away, populated means present. Deriving away from
-    ``is_device_on`` would desync the switch and cause
+    signal from ``zones[*].user`` on ``/v1/devices``. The authenticated
+    user being absent from every zone means away. Deriving away from
+    device power, or from another user's assignment, would desync the switch and cause
     ``POST /v1/sleep-configurations/user-away`` to return
     ``400 "User has no previous device to return to"`` when a click
     results in a no-op toggle.
@@ -131,6 +138,11 @@ class OrionAwayModeSwitch(OrionBaseEntity, SwitchEntity):
         """Return True if the user is currently marked away."""
         return self.coordinator.is_user_away(self._device_id)
 
+    @property
+    def available(self) -> bool:
+        """Available only while the account has exactly one Orion device."""
+        return super().available and len(self.coordinator.devices) == 1
+
     async def _set_away(self, is_away: bool) -> None:
         """Call set_user_away, tolerating the no-op 400 from the server.
 
@@ -142,14 +154,20 @@ class OrionAwayModeSwitch(OrionBaseEntity, SwitchEntity):
         """
         from .api import OrionApiError
 
+        if len(self.coordinator.devices) != 1:
+            raise HomeAssistantError(
+                "Away Mode is unavailable for Orion accounts with multiple devices"
+            )
+        if not self.coordinator.user_id:
+            raise HomeAssistantError("Orion user is unavailable")
+
         try:
             await self.coordinator.api_client.set_user_away(
                 user_id=self.coordinator.user_id,
                 is_away=is_away,
             )
         except OrionApiError as err:
-            message = str(err)
-            if "has no previous device to return to" in message:
+            if err.error_code == "user_already_present":
                 _LOGGER.debug(
                     "set_user_away(%s) was a no-op; server state already matched",
                     is_away,
@@ -167,43 +185,46 @@ class OrionAwayModeSwitch(OrionBaseEntity, SwitchEntity):
         await self._set_away(False)
 
 
-class OrionScheduleSwitch(OrionBaseEntity, SwitchEntity):
-    """Switch entity for sleep schedule active state.
+class OrionQuietModeSwitch(OrionLiveSettingMixin, OrionBaseEntity, SwitchEntity):
+    """Control Tower quiet mode.
 
-    Real schedule data is keyed by user_id, with each day having
-    bedtime_is_active and wakeup_is_active fields. This switch reflects
-    whether today's schedule has bedtime_is_active set.
+    Confidence: APP-DERIVED. Same `PUT /v1/devices/{serial}/live` route the
+    power switch already uses successfully, with `quiet_mode` as the body
+    key. Read out of the Orion Android v2.4.1 bytecode at decompiled line
+    1083704, never observed executing.
+
+    Supersedes the read-only `binary_sensor.*_quiet_mode`, which the
+    codebase created because no write path was known at the time.
     """
 
-    _attr_translation_key = "sleep_schedule"
-    _attr_icon = "mdi:calendar-clock"
+    _attr_icon = "mdi:volume-off"
+    _attr_name = "Quiet Mode"
+    _attr_entity_category = EntityCategory.CONFIG
+    _live_field = "quiet_mode"
 
     def __init__(
-        self,
-        coordinator: OrionDataUpdateCoordinator,
-        device_id: str,
+        self, coordinator: OrionDataUpdateCoordinator, device_id: str
     ) -> None:
         super().__init__(coordinator, device_id)
-        self._attr_unique_id = f"{device_id}_sleep_schedule"
+        self._attr_unique_id = f"{device_id}_quiet_mode"
+
+    def _reported_state(self) -> bool | None:
+        return self.coordinator.device_quiet_mode(self._device_id)
 
     @property
     def is_on(self) -> bool | None:
-        """Return True if today's sleep schedule is active."""
-        schedule = self.coordinator.get_today_schedule()
-        if not schedule:
-            return None
-        return schedule.get("bedtime_is_active", False)
+        """Quiet mode state, preferring an in-flight optimistic value."""
+        return self._live_display_value(self._reported_state())
+
+    @property
+    def available(self) -> bool:
+        """Only available once the device has reported a quiet mode state."""
+        return super().available and self._reported_state() is not None
 
     async def async_turn_on(self, **kwargs: Any) -> None:
-        """Enable the sleep schedule."""
-        await self.coordinator.api_client.update_sleep_schedule(
-            {"enabled": True}, action="enable"
-        )
-        await self.coordinator.async_request_refresh()
+        """Enable quiet mode."""
+        await self._async_write_live_setting(True, self._reported_state())
 
     async def async_turn_off(self, **kwargs: Any) -> None:
-        """Disable the sleep schedule."""
-        await self.coordinator.api_client.update_sleep_schedule(
-            {"enabled": False}, action="disable"
-        )
-        await self.coordinator.async_request_refresh()
+        """Disable quiet mode."""
+        await self._async_write_live_setting(False, self._reported_state())

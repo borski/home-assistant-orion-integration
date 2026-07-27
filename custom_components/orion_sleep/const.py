@@ -41,6 +41,12 @@ DEFAULT_SCAN_INTERVAL = 600  # 10 minutes
 CONF_INSIGHTS_DAYS = "insights_days"
 DEFAULT_INSIGHTS_DAYS = 7
 
+# Display aliases. Maps an immutable Orion user id to the name Alex wants
+# shown ("Ada" -> "Alex"). Affects friendly names ONLY. Unique ids and
+# entity ids are built from device and zone ids, never from a person's name,
+# so renaming never orphans history, dashboards, or voice assistant mappings.
+CONF_DISPLAY_ALIASES = "display_aliases"
+
 # The Orion app displays temperature as a relative offset (-10 to +10).
 # The mapping between offset and absolute Celsius is NON-LINEAR and comes
 # from the device's temperature_scale.relative[] lookup table.

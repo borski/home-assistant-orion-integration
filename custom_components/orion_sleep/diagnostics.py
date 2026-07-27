@@ -10,6 +10,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
 from .coordinator import OrionDataUpdateCoordinator
+from .util import omit_sensitive_diagnostic_branches, redact_identifier_keys
 
 TO_REDACT = {
     "access_token",
@@ -23,15 +24,38 @@ TO_REDACT = {
     "name",
     "first_name",
     "last_name",
+    "firstName",
+    "lastName",
     "serial_number",
     "intercom_jwt",
     "dob",
+    "birth_date",
+    "date_of_birth",
     "profile_image_url",
+    "activation_code",
+    "age",
+    "gender",
+    "height",
+    "height_unit",
+    "weight",
+    "weight_unit",
+    "sex",
+    # Partner credentials and account identifiers.
+    "partner_access_token",
+    "partner_refresh_token",
+    "partner_auth_value",
+    "partner_device_serial",
     # Network PII from the live-device WS payload.
     "ip",
     "mac",
     # SSID (appears as `name` inside status.network but redacted above too).
 }
+
+
+def _redact(value: Any) -> Any:
+    """Redact sensitive values and identifiers used as mapping keys."""
+    without_health_data = omit_sensitive_diagnostic_branches(value)
+    return redact_identifier_keys(async_redact_data(without_health_data, TO_REDACT))
 
 
 async def async_get_config_entry_diagnostics(
@@ -59,11 +83,11 @@ async def async_get_config_entry_diagnostics(
         )
 
     return {
-        "config_entry_data": async_redact_data(dict(entry.data), TO_REDACT),
-        "config_entry_options": dict(entry.options),
-        "coordinator_data": async_redact_data(coordinator.data or {}, TO_REDACT),
-        "devices": async_redact_data(coordinator.devices, TO_REDACT),
-        "live_devices": async_redact_data(dict(coordinator.live_devices), TO_REDACT),
-        "user": async_redact_data(coordinator.user, TO_REDACT),
-        "websocket": async_redact_data(websocket_summary, TO_REDACT),
+        "config_entry_data": _redact(dict(entry.data)),
+        "config_entry_options": _redact(dict(entry.options)),
+        "coordinator_data": _redact(coordinator.data or {}),
+        "devices": _redact(coordinator.devices),
+        "live_devices": _redact(dict(coordinator.live_devices)),
+        "user": _redact(coordinator.user),
+        "websocket": _redact(websocket_summary),
     }

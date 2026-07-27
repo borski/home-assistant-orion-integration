@@ -15,17 +15,18 @@ home-assistant-orion-integration/
 ├── custom_components/
 │   └── orion_sleep/
 │       ├── __init__.py                # async_setup_entry / async_unload_entry
-│       ├── manifest.json              # HA integration manifest (v1.0.0)
+│       ├── manifest.json              # HA integration manifest (v2.0.0)
 │       ├── const.py                   # DOMAIN, config keys, defaults, temp lookup table
 │       ├── api.py                     # Async aiohttp API client
 │       ├── coordinator.py             # DataUpdateCoordinator + data helpers
 │       ├── config_flow.py             # Three-step auth flow + options flow
 │       ├── entity.py                  # Base entity with DeviceInfo + temp conversion helpers
-│       ├── climate.py                 # Bed temperature control
-│       ├── sensor.py                  # Sleep insight + schedule + offset + WS state sensors (18 per device)
+│       ├── climate.py                 # Independent live control for each device zone
+│       ├── sensor.py                  # Sleep, schedule, live, and diagnostic sensors
 │       ├── websocket.py                # Live device WebSocket client (per-device aiohttp)
-│       ├── binary_sensor.py           # Sleep session active
-│       ├── switch.py                  # Power (user-away) + sleep schedule switches
+│       ├── binary_sensor.py           # Session, occupancy, quiet mode, and safety
+│       ├── button.py                  # Measured reboot and forget-WiFi actions
+│       ├── switch.py                  # Runtime power and authenticated-user away mode
 │       ├── diagnostics.py             # Diagnostics with PII redaction
 │       ├── strings.json               # UI translations
 │       ├── translations/
@@ -35,7 +36,7 @@ home-assistant-orion-integration/
 
 ## Source-of-Truth Policy
 
-Both `openapi.yaml` and `orion_info.py` are kept in sync as new endpoints or behaviors are discovered. The REST section of the spec is reverse-engineered from the Android bytecode with spot-checks against the live API; the WebSocket section (`/device/{serial_number}` path and `x-websocket` block) is validated by an on-wire capture (`orion_info.py --ws-scenario`). Neither file is inherently more authoritative — when they disagree, re-verify against the live server rather than trusting one blindly.
+Both `openapi.yaml` and `orion_info.py` are kept in sync as new endpoints or behaviors are discovered. Live requests and captured mobile app traffic are authoritative. Android bytecode and UI capability lists are discovery aids only. `openapi.yaml` uses `x-verification-status` on important operations to distinguish measured behavior from app-derived behavior. When the files disagree, re-verify against the live server.
 
 Known gaps and unverified endpoints are called out in the tables below. When adding or changing behavior:
 
@@ -63,9 +64,9 @@ https://api1.orionbed.com
 | POST | `/v1/sleep-configurations/user-away` | Bearer | Presence override. Body: `{"user_id": "...", "is_away": bool}`. Also powers the device down; prefer `/v1/devices/{id}/live` for pure power control. |
 | PUT | `/v1/devices/{deviceId}` | Bearer | Update metadata (`name`, `orientation`, `timezone`). Partial updates accepted. |
 | GET | `/v1/devices/{serial_number}/live` | Bearer | **Live runtime snapshot** (zones with `on`/`temp`, status, sensors, firmware). Path uses `serial_number`, NOT UUID. |
-| PUT | `/v1/devices/{serial_number}/live` | Bearer | **Canonical power/temp primitive.** Path uses `serial_number`, NOT UUID (UUID returns `403 "Device not found"`). Body: `{"zones": [{"id": "zone_a", "on": bool, "temp": float}, ...]}`. Each zone requires `id` and at least one of `on`/`temp` (Celsius). |
+| PUT | `/v1/devices/{serial_number}/live` | Bearer | **Canonical power/temp/settings primitive.** Path uses `serial_number`, NOT UUID (UUID returns `403 "Device not found"`). Four known body keys, **one per request**: `zones` (array of `{id, on?, temp?}`, Celsius), `led_brightness` (int 0-100), `quiet_mode` (bool), `water_fill` (`"pour_water"` or `"unknown"`). The app never merges keys; `zones` is the only thing it batches. Returns the full live-device object, so a caller can update local state without a refetch. |
 | PUT | `/v1/devices/{serial_number}/live/zones/{zoneId}` | Bearer | Single-zone power/temp. Path uses `serial_number`. Body: `{on?, temp?}` with `minProperties: 1`. |
-| POST | `/v1/devices/{serial_number}/action` | Bearer | **Measured.** Accepts only `{"action_type": "reboot"}` or `{"action_type": "forget_wifi"}`. Uses serial number, not UUID. LED brightness and quiet mode have no discovered write route. |
+| POST | `/v1/devices/{serial_number}/action` | Bearer | **Measured.** Accepts only `{"action_type": "reboot"}` or `{"action_type": "forget_wifi"}`. Uses serial number, not UUID. Note the wire values have no `device_` prefix, unlike the `allowed_actions` capability list. |
 | POST | `/v1/devices/{deviceId}/activate` | Bearer | Pair device to account. Body: `{"model": "OSCT001-1"}`. |
 | POST | `/v1/devices/{deviceId}/deactivate` | Bearer | Unpair device. |
 | POST | `/v1/devices/{deviceId}/update` | Bearer | Trigger firmware update. |
@@ -75,12 +76,11 @@ https://api1.orionbed.com
 
 | Path | Status | Notes |
 |------|--------|-------|
-| `/v1/sleep-configurations/devices` | **404** | Does not exist despite OpenAPI spec |
-| `/v1/sleep-configurations/temperature` | Unverified | PUT to set temp — not tested against live API |
-| `/v1/sleep-schedules?action=enable` | Unverified | Schedule enable/disable — body format `{"enabled": bool}` not confirmed |
+| `/v1/sleep-configurations/devices` | **404** | A prior speculative contract listed it. The route does not exist. |
+| `/v1/sleep-configurations/temperature` | Removed from measured contract | Use the verified live zone endpoints for runtime temperature writes. |
+| `/v1/sleep-schedules?action=enable` | Unverified and not exposed | Only partial schedule field updates are verified. |
 | `/v1/session-state` | Returns onboarding state | `{patch_step, is_survey_complete, ...}` — NOT sleep session state |
-| LED brightness write | No route discovered | Readable as `live.led_brightness`. The `/action` route rejects `device_led_brightness`. Capture the mobile app request before exposing a Number entity. |
-| Quiet mode write | No route discovered | Readable as `live.quiet_mode`. The `/action` route rejects `device_quiet_mode`. |
+| `device_led_brightness` / `device_quiet_mode` at `/action` | **Rejected** | These are UI capability identifiers, not action names. They decide whether the app renders a control. Three separate efforts fired them at `/action` and were rejected. The real write route is `PUT .../live`, documented below. |
 
 ### Real API Response Shapes
 
@@ -118,7 +118,7 @@ https://api1.orionbed.com
 - Temperature values throughout the API are in **Celsius**
 - Device zones are `zone_a`/`zone_b`, not `left`/`right`
 - Sleep session detection uses `is_in_progress` from insights, not `/v1/session-state`
-- Device power state is read from each zone's `on`/`is_on` field (set via `PUT /v1/devices/{id}/live`); `set_user_away` affects the `user` field but is a separate presence override
+- Device power state is read from each zone's `on`/`is_on` field and written through `/v1/devices/{serial_number}/live`. `set_user_away` is a separate, user-specific presence override.
 - Temperature offsets (app-style -10 to +10) map **non-linearly** to absolute Celsius via `temperature_scale.relative` table
 
 ## Architecture
@@ -162,14 +162,13 @@ Per-device live WebSocket (wss://live.api1.orionbed.com/device/<serial>):
        |
        v
 Entities read from coordinator:
-  - Climate: schedule (target temp, HVAC mode) + session (current temp)
+  - Climate: live per-zone setpoint, measured temp, power, and thermal state
   - Number: per-phase app-style temperature offsets (-10..+10)
   - Sensors: insights sessions + schedule + overview scores
              + per-topper-sensor live HR/BR/status (from WS)
   - Binary sensors: session.is_in_progress
                     + per-topper-sensor occupancy (from WS)
-  - Switches: device zones (power) + user-away (away mode)
-              + schedule.bedtime_is_active
+  - Switches: device zones (runtime power) + authenticated-user away mode
   - Diagnostic sensors: per-device WS connection state
                         + per-topper-sensor raw status_text
 ```
@@ -178,7 +177,7 @@ Entities read from coordinator:
 
 | Platform | Entity | Key / unique_id suffix | Data Source |
 |----------|--------|----------------------|-------------|
-| Climate | Bed Climate | `_climate` | Target temp from `today_sleep_schedule.bedtime_temp`, current from latest session `temperature.values[-1]` |
+| Climate | Per-zone Climate | `_climate_{zone_id}` | Live zone setpoint, measured temperature, power state, and thermal state. Writes through `/v1/devices/{serial}/live/zones/{zoneId}`. |
 | Sensor | Sleep Score | `_sleep_score` | `insights.overview.{latest_date}.score` with `quality_rating` extra attr |
 | Sensor | Total Sleep Time | `_total_sleep_time` | `session.sleep_summary.time_asleep` (formatted as "Xh Ym") |
 | Sensor | Deep Sleep Time | `_deep_sleep_time` | `session.sleep_summary.deep_sleep` |
@@ -195,27 +194,28 @@ Entities read from coordinator:
 | Sensor | Schedule Duration | `_schedule_duration` | Calculated from bedtime/wakeup (handles overnight) |
 | Sensor | Bedtime Temperature | `_bedtime_temp` | `today_sleep_schedule.bedtime_temp` + phase/smart temp extra attrs |
 | Sensor | Wake-up Temperature | `_wakeup_temp` | `today_sleep_schedule.wakeup_temp` |
-| Sensor | Current Temp Offset | `_current_temp_offset` | Latest session `temperature.values[-1]` converted to app-style offset. **Registered twice (pre-existing bug), see Known Issues.** |
+| Sensor | Current Temp Offset | `_current_temp_offset` | Latest session `temperature.values[-1]` converted to app-style offset. |
 | Sensor (diag) | Live Connection | `_websocket_state` | WS connection state (`connecting`/`connected`/`reconnecting`/`device_offline`/`auth_failed`/`stopped`) plus `seconds_since_last_message` extra attr |
 | Sensor | Sensor 1/2 Heart Rate | `_sensorN_live_heart_rate` | WS `status.sensors.sensorN.heart_rate` (bpm). `0` (empty bed) and `255` (no reading yet) both mapped to `None`. |
 | Sensor | Sensor 1/2 Breath Rate | `_sensorN_live_breath_rate` | WS `status.sensors.sensorN.breath_rate` (br/min). Same sentinel handling. |
 | Sensor (diag) | Sensor 1/2 Status | `_sensorN_sensor_status` | Raw `status_text`: observed `left_bed` (empty) and `normal` (occupied). |
 | Binary Sensor | Sleep Session Active | `_session_active` | `session.is_in_progress` (shows "Asleep" / "Not asleep") |
 | Binary Sensor | Sensor 1/2 On Bed | `_sensorN_on_bed` | Occupancy device class. `status_text != "left_bed"`. The WS push itself is realtime, but the topper takes ~30s–1min to decide someone has sat down or left, so `status_text` transitions lag the real event. |
-| Switch | Power | `_power` | On = all zones on, Off = all zones off. Uses `PUT /v1/devices/{id}/live` (canonical power primitive). State read from each zone's `on`/`is_on` field. |
-| Switch | Away Mode | `_away_mode` | On = user marked away, Off = user present. State read from `zones[*].user` (null across all zones = away). `POST /v1/sleep-configurations/user-away`. Returns `400 "User has no previous device to return to"` on no-op toggle — swallowed in the switch. |
-| Switch | Sleep Schedule | `_sleep_schedule` | `today_sleep_schedule.bedtime_is_active`. Toggle via `update_sleep_schedule`. |
+| Switch | Power | `_power` | On = all zones on, Off = all zones off. Uses `PUT /v1/devices/{serial_number}/live`. State is read from each zone's `on`/`is_on` field. |
+| Switch | Away Mode | `_away_mode` | On = authenticated user marked away, Off = present. State checks that user's ID across `zones[*].user`. `POST /v1/sleep-configurations/user-away`. The known redundant-toggle 400 is swallowed. |
 | Number | Bedtime Temperature Offset | `_bedtime_temp_offset` | App-style -10..+10 slider. Reads `today_sleep_schedule.bedtime_temp`, converts to offset via per-device relative table; writes back via `PUT /v1/sleep-schedules` on today's day-of-week. |
 | Number | Asleep Phase 1 Offset | `_phase_1_temp_offset` | As above, `phase_1_temp` field. |
 | Number | Asleep Phase 2 Offset | `_phase_2_temp_offset` | As above, `phase_2_temp` field. |
 | Number | Wake Up Temperature Offset | `_wakeup_temp_offset` | As above, `wakeup_temp` field. |
 
-**Per device: 1 climate + 4 number + 24 sensors + 3 binary sensors + 3 switches = 35 entities**
+**A two-zone device exposes 41 base entities. A linked partner adds 11 partner insight sensors.**
 
-- 24 sensors = 11 insights + 5 schedule + 1 current-temp-offset + 1 live-connection + 6 per-sensor live (2× HR + 2× BR + 2× diag status_text). The current-temp-offset is accidentally registered twice (same unique_id, HA keeps one) — the 24 count reflects the logical set.
-- 4 number sliders: one per schedule-phase temperature offset (bedtime / phase_1 / phase_2 / wakeup).
-- 3 binary sensors: Sleep Session Active + 2× On Bed (sensor1/sensor2).
-- 3 switches: Power, Away Mode, Sleep Schedule.
+- 2 climate entities, one per zone.
+- 27 sensors: 11 insights, 5 schedule, current offset, live connection, 6 topper sensor readings, LED brightness, firmware, and Wi-Fi signal.
+- 4 number sliders, one per schedule-phase temperature offset.
+- 5 binary sensors: sleep session, 2 occupancy sensors, quiet mode, and safety problem.
+- 2 switches: runtime power and Away Mode. Away Mode is omitted for accounts with multiple devices because the API action is account-global.
+- 1 button: reboot. Forget Wi-Fi is intentionally not exposed.
 
 ### Sensor Implementation Notes
 
@@ -240,7 +240,6 @@ Entities read from coordinator:
 ### Action Methods
 | Method | Endpoint | Status |
 |--------|----------|--------|
-| `set_temperature(device_id, temperature, zone_id)` | `PUT /v1/sleep-configurations/temperature` | **Unverified** (prefer `update_live_device_zone[s]`) |
 | `set_user_away(user_id, is_away)` | `POST /v1/sleep-configurations/user-away` | Working (used by away-mode switch; presence override) |
 | `update_device(device_id, **fields)` | `PUT /v1/devices/{deviceId}` | Metadata updates (name/orientation/timezone) |
 | `update_live_device_zones(serial_number, zones)` | `PUT /v1/devices/{serial_number}/live` | **Canonical power primitive** (used by power switch) |
@@ -250,7 +249,6 @@ Entities read from coordinator:
 | `deactivate_device(device_id)` | `POST /v1/devices/{deviceId}/deactivate` | Unpair device |
 | `trigger_firmware_update(device_id)` | `POST /v1/devices/{deviceId}/update` | Firmware update |
 | `update_schedule_temperature(day, field, celsius)` | `PUT /v1/sleep-schedules` | Partial updates verified |
-| `update_sleep_schedule(schedule_data, action)` | `PUT /v1/sleep-schedules` | **Unverified** for enable/disable action |
 
 ## Testing
 
@@ -264,7 +262,7 @@ Tokens cache to `~/.orion_tokens.json`. Use `--relogin` to force fresh auth.
 Additional `orion_info.py` flags:
 - `--insights-days N` — number of days of insights to fetch
 - `--set-away` / `--set-present` — toggle device power, then re-fetch devices/schedules to show changes
-- `--power-on` / `--power-off` — probe `PUT /v1/devices/{ident}/live` against both `id` and `serial_number`
+- `--power-on` / `--power-off` — write all zones through the verified serial-number live route
 - `--websocket [--ws-duration N]` — open `/device/<serial>?token=<JWT>` and log every frame for N seconds (default 60)
 - `--ws-scenario` — open the WebSocket and drive a scripted sequence of REST edits (zone on/off, temp low/high, bulk on/off, user-away) while logging frames; restores the original zone state at the end. Use this to re-verify the event taxonomy against the live server.
 
@@ -337,20 +335,61 @@ Notable:
 - Firmware-update-in-progress transitions
 - Water-fill-mode transitions
 
-## Known Issues
+## Verification Log
 
-- **Duplicate entity**: `OrionCurrentTempOffsetSensor` is appended twice per device in `sensor.py:351-352` (same `unique_id`, HA will reject or warn about the second)
-- **Unused translations**: `bed_climate_left` and `bed_climate_right` defined in strings.json but no entities use them
+Live-request confirmations, newest first. A claim only earns "measured" by appearing here.
+
+### 2026-07-26 — `user_id` on `PUT /v1/sleep-schedules`
+
+The vendor app sends `user_id` alongside `schedules` on this route (decompiled 673558, 673560). This integration never did, and assumed the write was scoped to the bearer token's owner. It is not.
+
+Test at 21:43, using the PRIMARY account's token throughout:
+
+1. Full schedule blob backed up to `working/orion-schedules-backup-20260726-214301.json` before any write.
+2. `PUT /v1/sleep-schedules` with body `{"schedules": [{"day": 0, "phase_1_temp": 10}], "user_id": "<partner>"}` returned `200`.
+3. Read back: the **partner's** `phase_1_temp` moved `16.7 -> 10`. The **primary's** stayed at `17.5`, untouched.
+4. Restored the partner's original value through the same route. A final GET was deep-compared against the backup and came back byte-identical.
+
+**Verdict: HONOURED.** One account can write another person's schedule by naming them in the body. A partner account is NOT required for schedule temperature writes.
+
+Omitting `user_id` still writes the token owner's own schedule, so existing behaviour is unchanged.
+
+**Incidental finding worth carrying forward:** the partner's `phase_1_temp` was `16.7`, which is not a value on the device's `temperature_scale.relative` ladder (`... 16, 17.5 ...`). Off-table Celsius values exist in production data. Round-tripping such a value through `_celsius_to_offset` and back would silently rewrite it to `16` or `17.5`. Any per-person slider must not write on read.
+
+### 2026-07-26 — `quiet_mode` write key
+
+`PUT /v1/devices/AA11BB22CC33/live` with body `{"quiet_mode": true}` returned `200` and echoed `"quiet_mode":true`. Confirmed four independent ways:
+
+1. HTTP 200 with the new value in the response body.
+2. The device pushed the change back over its own live WebSocket.
+3. `binary_sensor.sleepy_quiet_mode` in Home Assistant flipped to `on` at 21:35:52.
+4. The vendor's own Orion app showed quiet mode enabled.
+
+Restored to `false` immediately after. Promotes the `quiet_mode` key from app-derived to measured.
+
+`water_fill` is now the only key on this route that remains app-derived.
+
+### 2026-07-26 — `led_brightness` write route
+
+`PUT /v1/devices/AA11BB22CC33/live` with body `{"led_brightness": 30}` returned `200` and echoed `"led_brightness":30` in the response. Confirmed four independent ways:
+
+1. HTTP 200 with the new value in the response body.
+2. The device pushed 30 back over its own live WebSocket ~8 seconds later.
+3. `sensor.sleepy_led_brightness` in Home Assistant changed 100 -> 30 at 21:27:37.
+4. The vendor's own Orion app showed the change.
+
+Restored to 100 immediately after. Promotes the route and the `led_brightness` key from app-derived to measured.
+
+`water_fill` uses the identical mechanism on the same route but has NOT been observed executing. It remains app-derived.
 
 ## Known Limitations / Future Work
 
-- `set_temperature` endpoint not verified against live API
-- Schedule enable/disable (`PUT /v1/sleep-schedules?action=enable`) not verified
-- `async_set_hvac_mode(OFF)` and `async_turn_off()` on climate entity are no-ops (schedule-based control only)
-- Firmware versions are not exposed as dedicated entities yet (available in the WS payload at `status.firmware.{cb,ib}` and on each sensor block's `firmware_version` — plumb through if surfacing them becomes useful)
+- `water_fill` writes are app-derived, not measured. The route and the other three body keys are proven; this one is not.
+- Schedule enable and disable behavior is not verified and is not exposed.
+- Runtime climate power does not modify the schedule. A later scheduled action can turn a zone back on.
 - HRV values frequently null in real data
 - No way to start/stop sleep sessions via API
 - Zone splitting/merging not supported
 - Guest user management not supported
-- `OrionPowerSwitch` and `OrionScheduleSwitch` don't catch API errors — they propagate to the HA UI as failed-action notifications. `OrionAwayModeSwitch` specifically swallows the `400 "User has no previous device to return to"` that the server returns on a no-op toggle.
+- Power failures propagate to the Home Assistant UI. Away Mode specifically swallows the known `400 "User has no previous device to return to"` response for a redundant present action.
 - Topper sensor1 ↔ sensor2 to zone_a ↔ zone_b mapping is unverified — entities are named per sensor rather than per side until a split-occupancy capture confirms the mapping

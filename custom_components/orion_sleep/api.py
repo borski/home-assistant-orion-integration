@@ -11,12 +11,40 @@ from typing import Any, Callable
 import aiohttp
 
 from .const import API_BASE_URL
+from .util import (
+    auth_session_from_response,
+    auth_tokens_from_session,
+    describe_api_error,
+    safe_api_error_code,
+    should_refresh_token,
+)
+
+_SCHEDULE_TEMPERATURE_FIELDS = frozenset(
+    {"bedtime_temp", "phase_1_temp", "phase_2_temp", "wakeup_temp"}
+)
+
+# Body keys accepted by PUT /v1/devices/{serial}/live besides `zones`.
+# APP-DERIVED from Orion Android v2.4.1 bytecode. `water_fill` is a real
+# fifth key (values `pour_water` and `unknown`) but drives a physical
+# water-fill workflow, so it is deliberately not exposed as an entity.
+_LIVE_SETTING_FIELDS = frozenset({"led_brightness", "quiet_mode"})
 
 _LOGGER = logging.getLogger(__name__)
 
 
 class OrionApiError(Exception):
     """General API error."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        status: int | None = None,
+        error_code: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.status = status
+        self.error_code = error_code
 
 
 class OrionAuthError(OrionApiError):
@@ -44,9 +72,7 @@ class OrionApiClient:
         self._token_refresh_callback: Callable[[str, str, float], None] | None = None
         self._refresh_lock = asyncio.Lock()
 
-    def set_token_refresh_callback(
-        self, callback: Callable[[str, str, float], None]
-    ) -> None:
+    def set_token_refresh_callback(self, callback: Callable[[str, str, float], None]) -> None:
         """Register callback invoked when tokens are refreshed."""
         self._token_refresh_callback = callback
 
@@ -79,26 +105,39 @@ class OrionApiClient:
                 method, url, headers=headers, json=json_data, params=params
             ) as resp:
                 if resp.status == 401:
-                    body = await resp.text()
-                    raise OrionAuthError(f"Authentication failed: {resp.status} {body}")
+                    raise OrionAuthError(
+                        "Authentication failed for Orion API request: 401",
+                        status=resp.status,
+                    )
                 if not resp.ok:
-                    body = await resp.text()
+                    error_code = await self._response_error_code(resp)
                     raise OrionApiError(
-                        f"API error on {method} {path}: {resp.status} {resp.reason} - {body}"
+                        f"Orion API request failed: {method} {resp.status}",
+                        status=resp.status,
+                        error_code=error_code,
                     )
                 if resp.content_length == 0:
                     return {}
                 return await resp.json()
         except aiohttp.ClientError as err:
             raise OrionConnectionError(
-                f"Connection error for {method} {path}: {err}"
-            ) from err
+                f"Orion API connection error: {type(err).__name__}"
+            ) from None
+
+    @staticmethod
+    async def _response_error_code(resp: aiohttp.ClientResponse) -> str | None:
+        """Extract only a stable, non-sensitive error identifier."""
+        try:
+            data = await resp.json(content_type=None)
+        except (aiohttp.ContentTypeError, ValueError):
+            return None
+        if not isinstance(data, dict):
+            return None
+        return safe_api_error_code(data)
 
     # ── Auth methods (used by config_flow, no bearer token needed) ────
 
-    async def request_auth_code(
-        self, email: str | None = None, phone: str | None = None
-    ) -> bool:
+    async def request_auth_code(self, email: str | None = None, phone: str | None = None) -> bool:
         """POST /v1/auth/code — send a verification code."""
         body: dict[str, str] = {}
         if email:
@@ -106,10 +145,18 @@ class OrionApiClient:
         if phone:
             body["phone"] = phone
 
-        data = await self._request(
-            "POST", "/v1/auth/code", with_auth=False, json_data=body
-        )
-        return data.get("success", False)
+        data = await self._request("POST", "/v1/auth/code", with_auth=False, json_data=body)
+        channel = "email" if email else "phone" if phone else "unknown"
+        success = bool(data.get("success", False)) if isinstance(data, dict) else False
+        if success:
+            _LOGGER.debug("Orion accepted the %s verification code request", channel)
+        else:
+            _LOGGER.warning(
+                "Orion rejected the %s verification code request (%s)",
+                channel,
+                describe_api_error(data),
+            )
+        return success
 
     async def verify_auth_code(
         self,
@@ -127,26 +174,20 @@ class OrionApiClient:
         if phone:
             body["phone"] = phone
 
-        data = await self._request(
-            "POST", "/v1/auth/verify", with_auth=False, json_data=body
-        )
+        data = await self._request("POST", "/v1/auth/verify", with_auth=False, json_data=body)
 
-        # Extract session from nested response structure
-        session = (data.get("response") or {}).get("session")
-        if not session or "access_token" not in session:
-            raise OrionAuthError(f"Unexpected verify response shape: {data}")
+        tokens = auth_tokens_from_session(auth_session_from_response(data))
+        if tokens is None:
+            keys = sorted(data) if isinstance(data, dict) else []
+            raise OrionAuthError(f"Unexpected verify response shape (top-level keys: {keys})")
 
-        return {
-            "access_token": session["access_token"],
-            "refresh_token": session["refresh_token"],
-            "expires_at": session.get("expires_at", 0),
-        }
+        return tokens
 
     # ── Token management ──────────────────────────────────────────────
 
     def _token_expired(self, margin_seconds: int = 60) -> bool:
         """Return True if the access token is expired or about to expire."""
-        return time.time() + margin_seconds >= self._expires_at
+        return should_refresh_token(self._expires_at, time.time(), margin_seconds)
 
     async def ensure_valid_token(self) -> None:
         """Refresh the access token if it is expired or about to expire."""
@@ -157,15 +198,10 @@ class OrionApiClient:
                 return
             await self._refresh_tokens()
 
-    async def async_refresh_token(
-        self, rejected_access_token: str | None = None
-    ) -> None:
+    async def async_refresh_token(self, rejected_access_token: str | None = None) -> None:
         """Refresh once unless another task already replaced a rejected token."""
         async with self._refresh_lock:
-            if (
-                rejected_access_token is not None
-                and self._access_token != rejected_access_token
-            ):
+            if rejected_access_token is not None and self._access_token != rejected_access_token:
                 return
             await self._refresh_tokens()
 
@@ -181,19 +217,19 @@ class OrionApiClient:
             json_data={"refresh_token": self._refresh_token},
         )
 
-        # Handle both nested (response.session) and top-level response shapes
-        session = (data.get("response") or {}).get("session", data)
-        if "access_token" not in session:
-            raise OrionAuthError(f"Unexpected refresh response shape: {data}")
+        tokens = auth_tokens_from_session(
+            auth_session_from_response(data, allow_top_level=True)
+        )
+        if tokens is None:
+            keys = sorted(data) if isinstance(data, dict) else []
+            raise OrionAuthError(f"Unexpected refresh response shape (top-level keys: {keys})")
 
-        self._access_token = session["access_token"]
-        self._refresh_token = session["refresh_token"]
-        self._expires_at = session.get("expires_at", 0)
+        self._access_token = tokens["access_token"]
+        self._refresh_token = tokens["refresh_token"]
+        self._expires_at = tokens["expires_at"]
 
         if self._token_refresh_callback:
-            self._token_refresh_callback(
-                self._access_token, self._refresh_token, self._expires_at
-            )
+            self._token_refresh_callback(self._access_token, self._refresh_token, self._expires_at)
 
     # ── Data fetchers (all require valid token) ───────────────────────
 
@@ -255,26 +291,6 @@ class OrionApiClient:
 
     # ── Actions ───────────────────────────────────────────────────────
 
-    async def set_temperature(
-        self, device_id: str, temperature: float, zone_id: str | None = None
-    ) -> dict:
-        """PUT /v1/sleep-configurations/temperature — set target temperature.
-
-        NOTE: The exact request body format for this endpoint has not been
-        verified against the live API. The OpenAPI spec suggests deviceId +
-        temperature + side, but the real API may differ.
-        """
-        await self.ensure_valid_token()
-        body: dict[str, Any] = {
-            "deviceId": device_id,
-            "temperature": temperature,
-        }
-        if zone_id:
-            body["zone_id"] = zone_id
-        return await self._request(
-            "PUT", "/v1/sleep-configurations/temperature", json_data=body
-        )
-
     async def set_user_away(self, user_id: str, is_away: bool) -> dict:
         """POST /v1/sleep-configurations/user-away — toggle away/presence.
 
@@ -319,9 +335,7 @@ class OrionApiClient:
         await self.ensure_valid_token()
         return await self._request("PUT", f"/v1/devices/{device_id}", json_data=fields)
 
-    async def update_live_device_zones(
-        self, device_serial: str, zones: list[dict]
-    ) -> dict:
+    async def update_live_device_zones(self, device_serial: str, zones: list[dict]) -> dict:
         """PUT /v1/devices/{serial_number}/live — bulk update zone power/temp.
 
         This is the canonical power control endpoint. Each zone dict must
@@ -341,6 +355,60 @@ class OrionApiClient:
             "PUT",
             f"/v1/devices/{device_serial}/live",
             json_data={"zones": zones},
+        )
+
+    async def update_live_device_setting(
+        self, device_serial: str, field: str, value: Any
+    ) -> dict:
+        """PUT /v1/devices/{serial_number}/live — one device settings key.
+
+        Same route and same identifier rule as `update_live_device_zones`.
+        Only the body key differs.
+
+        **Confidence: MEASURED. Both keys.**
+
+        Verified against the live device on 2026-07-26, each key
+        independently, each confirmed four ways: HTTP 200 echoing the new
+        value, the device pushing it back over its own WebSocket, the
+        matching Home Assistant entity changing, and the vendor's own app
+        agreeing.
+
+        `{"led_brightness": 30}` at 21:27. `{"quiet_mode": true}` at
+        21:35. Both restored immediately after.
+
+        `water_fill` is the one key on this route still APP-DERIVED. It
+        is deliberately not exposed by this method.
+
+        Both keys were found in the Orion Android v2.4.1 Hermes
+        bytecode. `_updateLiveDevice` builds the path by literal
+        concatenation at decompiled line 938407, the LED caller assigns
+        `led_brightness` at 1083548, and the quiet mode caller assigns
+        `quiet_mode` at 1083704.
+
+        **One key per request.** All four call sites in the app construct
+        a fresh empty object and assign exactly one property before
+        dispatching. No code path merges keys, so multi-key on this route
+        is untested by the vendor's own client. The `zones` array is the
+        only thing the app ever batches.
+
+        `device_led_brightness` is NOT an action name. It is a UI
+        capability identifier that decides whether to render the slider.
+        Three separate efforts fired it at `POST .../action` and were
+        rejected. Do not try it a fourth time.
+
+        Returns the full live-device object so the caller can update
+        local state without a refetch, which is what the app does.
+        """
+        if field not in _LIVE_SETTING_FIELDS:
+            raise ValueError(
+                f"Unsupported live device setting {field!r}; "
+                f"expected one of {sorted(_LIVE_SETTING_FIELDS)}"
+            )
+        await self.ensure_valid_token()
+        return await self._request(
+            "PUT",
+            f"/v1/devices/{device_serial}/live",
+            json_data={field: value},
         )
 
     async def update_live_device_zone(
@@ -373,9 +441,7 @@ class OrionApiClient:
             json_data=body,
         )
 
-    async def device_action(
-        self, device_serial: str, action: str, value: Any | None = None
-    ) -> dict:
+    async def device_action(self, device_serial: str, action: str) -> dict:
         """POST /v1/devices/{serial_number}/action — perform device action.
 
         🔴 MEASURED 2026-07-26, against the live API: this endpoint accepts
@@ -389,13 +455,9 @@ class OrionApiClient:
                  "error": "Invalid action_type. Must be \\"reboot\\" or \\"forget_wifi\\""}
 
         The 12-member `DeviceAllowedAction` enum and the `allowed_actions`
-        array on `GET /v1/devices` are a **UI capability list** — they tell
-        the app which controls to render, NOT what this endpoint takes.
-        Each of those capabilities is performed by its own endpoint, e.g.::
-
-            split  -> POST /v1/sleep-configurations/user-split-user-zones
-            swap   -> POST /v1/sleep-configurations/user-swap-user-sides
-            name   -> PUT  /v1/devices/{deviceId}
+        array on `GET /v1/devices` are a UI capability list. They tell the
+        app which controls to render, not what this endpoint accepts. The
+        write routes for most of those capabilities remain undiscovered.
 
         `device_quiet_mode` and `device_led_brightness` are readable in the
         live snapshot but have **no discovered write path at all**.
@@ -413,14 +475,10 @@ class OrionApiClient:
         # returned the *same* "Invalid action_type" error — so the server
         # was never reading `action` at all. Sending `action` means this
         # endpoint has never worked.
+        if action not in ("reboot", "forget_wifi"):
+            raise ValueError(f"Unsupported Orion device action: {action}")
         body: dict[str, Any] = {"action_type": action}
-        if value is not None:
-            # No observed action takes a payload (`reboot`/`forget_wifi`
-            # are both bare), so this key name is still unverified.
-            body["value"] = value
-        return await self._request(
-            "POST", f"/v1/devices/{device_serial}/action", json_data=body
-        )
+        return await self._request("POST", f"/v1/devices/{device_serial}/action", json_data=body)
 
     async def activate_device(self, device_id: str, model: str) -> dict:
         """POST /v1/devices/{deviceId}/activate — pair/register a device."""
@@ -442,34 +500,44 @@ class OrionApiClient:
         return await self._request("POST", f"/v1/devices/{device_id}/update")
 
     async def update_schedule_temperature(
-        self, day: int, field: str, celsius: float
+        self,
+        day: int,
+        field: str,
+        celsius: float,
+        user_id: str | None = None,
     ) -> dict:
         """Update a single temperature field on a specific schedule day.
 
-        PUT /v1/sleep-schedules with body {"schedules": [{"day": N, field: value}]}.
-        Verified against live API — partial updates work (only the specified
-        field is changed, other fields are preserved).
+        PUT /v1/sleep-schedules with body
+        {"schedules": [{"day": N, field: value}], "user_id": "..."}.
+
+        Confidence: MEASURED.
+
+        Partial updates work: only the specified field changes, every other
+        field on that day is preserved.
+
+        `user_id` targets ANOTHER person's schedule using this account's
+        token, which is what the vendor app does (decompiled 673558, 673560).
+        Measured 2026-07-26 21:43: writing the partner's `phase_1_temp` from
+        the primary token moved the partner's value 16.7 -> 10 and left the
+        primary's 17.5 untouched. Restored, and the full schedule blob came
+        back byte-identical to a pre-write backup.
+
+        Omit `user_id` to write the token owner's own schedule, which is the
+        historical behaviour and remains correct.
 
         Args:
             day: Day of week (0=Monday ... 6=Sunday).
             field: One of bedtime_temp, phase_1_temp, phase_2_temp, wakeup_temp.
             celsius: Absolute Celsius value.
+            user_id: Orion user id to target. None means the token owner.
         """
+        if field not in _SCHEDULE_TEMPERATURE_FIELDS:
+            raise ValueError(f"Unsupported Orion schedule temperature field: {field}")
+        if day not in range(7):
+            raise ValueError(f"Orion schedule day must be 0 through 6, got {day}")
         await self.ensure_valid_token()
-        return await self._request(
-            "PUT",
-            "/v1/sleep-schedules",
-            json_data={"schedules": [{"day": day, field: celsius}]},
-        )
-
-    async def update_sleep_schedule(
-        self, schedule_data: dict, action: str | None = None
-    ) -> dict:
-        """PUT /v1/sleep-schedules — update sleep schedule."""
-        await self.ensure_valid_token()
-        params = {}
-        if action:
-            params["action"] = action
-        return await self._request(
-            "PUT", "/v1/sleep-schedules", json_data=schedule_data, params=params
-        )
+        payload: dict[str, Any] = {"schedules": [{"day": day, field: celsius}]}
+        if user_id:
+            payload["user_id"] = user_id
+        return await self._request("PUT", "/v1/sleep-schedules", json_data=payload)

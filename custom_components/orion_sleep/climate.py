@@ -12,9 +12,9 @@ All reads and writes go through the live runtime endpoints:
 
 These are the endpoints the app itself drives and they have been observed
 on the wire. The previous device-level entity wrote through
-`PUT /v1/sleep-configurations/temperature`, which is documented in
-`openapi.yaml` as **never verified against the live API**, and its
-`turn_off` was a no-op.
+`PUT /v1/sleep-configurations/temperature`, an unverified legacy route
+that is no longer part of the measured API contract. Its `turn_off` was
+also a no-op.
 """
 
 from __future__ import annotations
@@ -31,9 +31,9 @@ from homeassistant.components.climate import (
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import ATTR_TEMPERATURE, UnitOfTemperature
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
+from . import util
 from .coordinator import OrionDataUpdateCoordinator
 from .entity import OrionBaseEntity
 
@@ -119,8 +119,10 @@ class OrionZoneClimateEntity(OrionBaseEntity, ClimateEntity):
     def _zone_label(self) -> str:
         """Human label for this zone.
 
-        Prefers the assigned user's first name, because that is how the
-        bed is actually discussed ("my side"). Falls back to the zone id.
+        Prefers the assigned user's display name, because that is how the
+        bed is actually discussed ("my side"). Routes through the
+        coordinator so a configured alias wins over the vendor's own
+        first name. Falls back to the zone id.
 
         Deliberately NOT left/right: the device does carry an
         `orientation` field, but the zone -> side mapping has never been
@@ -129,22 +131,16 @@ class OrionZoneClimateEntity(OrionBaseEntity, ClimateEntity):
         """
         for zone in self._get_device().get("zones", []) or []:
             if zone.get("id") == self._zone_id:
-                user = zone.get("user") or {}
-                first = (user.get("first_name") or "").strip()
-                if first:
-                    return first
+                user = zone.get("user")
+                if isinstance(user, dict):
+                    user_id = user.get("id")
+                    if isinstance(user_id, str) and user_id:
+                        return self.coordinator.display_name_for_user(user_id)
+                    label = util.orion_user_label(user)
+                    if label:
+                        return label
                 break
         return self._zone_id.replace("_", " ").title()
-
-    def _serial(self) -> str:
-        """Serial number — the live endpoints reject the UUID with a 403."""
-        serial = self._get_device().get("serial_number")
-        if not serial:
-            raise HomeAssistantError(
-                f"No serial_number for Orion device {self._device_id}; "
-                "cannot address the live zone endpoint"
-            )
-        return str(serial)
 
     @property
     def available(self) -> bool:

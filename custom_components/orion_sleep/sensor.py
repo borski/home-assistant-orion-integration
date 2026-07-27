@@ -19,6 +19,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
+from . import util
 from .coordinator import OrionDataUpdateCoordinator
 from .entity import OrionBaseEntity
 
@@ -46,39 +47,39 @@ _INSIGHT_DISPLAY_NAMES = {
 # ── Helpers ────────────────────────────────────────────────────────────────
 
 
+def _insight_label(key: str) -> str:
+    """Human label for one insight metric, used to build per-person names."""
+    return _INSIGHT_DISPLAY_NAMES.get(key, key.replace("_", " ").title())
+
+
 def _get_sleep_summary(session: dict | None) -> dict:
-    """Get sleep_summary from a session."""
-    if not session:
-        return {}
-    return session.get("sleep_summary", {})
+    """Get sleep_summary from a session.
+
+    Type-guarded: every caller immediately does `.get(...)` on the result,
+    so returning a vendor-supplied list here would raise AttributeError
+    deep inside a value_fn lambda where nothing catches it.
+    """
+    return util.session_subsection(session, "sleep_summary")
 
 
 def _get_heart_rate(session: dict | None) -> dict:
     """Get heart_rate from a session."""
-    if not session:
-        return {}
-    return session.get("heart_rate", {})
+    return util.session_subsection(session, "heart_rate")
 
 
 def _get_breath_rate(session: dict | None) -> dict:
     """Get breath_rate from a session."""
-    if not session:
-        return {}
-    return session.get("breath_rate", {})
+    return util.session_subsection(session, "breath_rate")
 
 
 def _get_hrv(session: dict | None) -> dict:
     """Get hrv from a session."""
-    if not session:
-        return {}
-    return session.get("hrv", {})
+    return util.session_subsection(session, "hrv")
 
 
 def _get_movement(session: dict | None) -> dict:
     """Get movement from a session."""
-    if not session:
-        return {}
-    return session.get("movement", {})
+    return util.session_subsection(session, "movement")
 
 
 def _minutes_to_hm(minutes: float | int | None) -> str | None:
@@ -393,6 +394,10 @@ class OrionSensorEntity(OrionBaseEntity, SensorEntity):
         super().__init__(coordinator, device_id)
         self.entity_description = description
         self._attr_unique_id = f"{device_id}_{description.key}"
+        # These are the AUTHENTICATED account holder's insights, not a
+        # device aggregate. Naming them explicitly keeps them symmetric
+        # with the partner set instead of leaving one side unlabelled.
+        self._attr_name = f"{coordinator.primary_name()} {_insight_label(description.key)}"
 
     def _session(self) -> dict | None:
         return self.coordinator.get_latest_session()
@@ -445,10 +450,9 @@ class OrionPartnerInsightSensor(OrionSensorEntity):
     ) -> None:
         super().__init__(coordinator, device_id, description)
         self._attr_unique_id = f"{device_id}_partner_{description.key}"
-        display_name = _INSIGHT_DISPLAY_NAMES.get(
-            description.key, description.key.replace("_", " ").title()
+        self._attr_name = (
+            f"{coordinator.partner_name()} {_insight_label(description.key)}"
         )
-        self._attr_name = f"{coordinator.partner_name()} {display_name}"
 
     def _session(self) -> dict | None:
         return self.coordinator.get_latest_partner_session(self._device_id)

@@ -6,20 +6,12 @@ conflating them is what broke the first cut of this platform:
 
   `allowed_actions` is a **UI capability list** — the right question for
   "should this control exist?", the wrong answer for "what do I call?".
-  `POST /v1/devices/{id}/action` accepts only `reboot` / `forget_wifi`
-  (measured 2026-07-26); everything else has a dedicated endpoint.
+  `POST /v1/devices/{serial}/action` accepts only `reboot` and
+  `forget_wifi` (measured 2026-07-26). Other write routes are unknown.
 
-⚠️ `split` and `swap` are NOT exposed despite appearing in
-`allowed_actions`. `openapi.yaml` documents them as
-`POST /v1/sleep-configurations/user-{split-user-zones,swap-user-sides}`,
-but both return a **bare `404 Not Found`** with no JSON body — the route
-does not exist on the server, exactly like `/v1/sleep-configurations/
-devices` already does. Measured 2026-07-26. Note the distinction: an
-app-level miss returns `404 {"success":false,"error":"Device not found"}`,
-a missing *route* returns bare text. Where the app really performs these
-is unknown; `PUT /v1/sleep-configurations/user-update`
-({deviceId, userId, side}) is the plausible candidate for swap, but it is
-untested and sits in the same unverified block of the spec.
+`split` and `swap` are not exposed despite appearing in `allowed_actions`.
+The candidate routes returned a bare 404 and were removed from the measured
+OpenAPI contract. Their real write routes remain unknown.
 
 ⚠️ `device_forget_wifi` and `device_deactivate` are permitted by the
 account and deliberately NOT exposed. Forgetting WiFi strands the bed —
@@ -57,11 +49,8 @@ class OrionButtonDef:
     icon: str
     # Capability name in permissions.allowed_actions — the DISPLAY gate.
     gate: str
-    # How to perform it — the DISPATCH. Takes (client, device_id, serial).
-    # Both identifiers are passed because the endpoints disagree about
-    # which one they want: /action needs the SERIAL, while the
-    # sleep-configuration endpoints take deviceId in the body.
-    call: Callable[[OrionApiClient, str, str], Awaitable[dict]]
+    # How to perform it. The measured action route takes the serial number.
+    call: Callable[[OrionApiClient, str], Awaitable[dict]]
 
 
 BUTTONS: tuple[OrionButtonDef, ...] = (
@@ -72,7 +61,7 @@ BUTTONS: tuple[OrionButtonDef, ...] = (
         gate="device_reboot",
         # Bare "reboot" (not "device_reboot"), keyed as action_type,
         # addressed by SERIAL. All three were wrong in the first cut.
-        call=lambda client, device_id, serial: client.device_action(
+        call=lambda client, serial: client.device_action(
             device_serial=serial, action="reboot"
         ),
     ),
@@ -109,6 +98,7 @@ class OrionActionButton(OrionBaseEntity, ButtonEntity):
     """Fires one device action. No state — the API exposes none for these."""
 
     _attr_entity_category = EntityCategory.CONFIG
+    _attr_entity_registry_enabled_default = False
 
     def __init__(
         self,
@@ -132,5 +122,5 @@ class OrionActionButton(OrionBaseEntity, ButtonEntity):
             raise HomeAssistantError(
                 f"No serial_number for Orion device {self._device_id}"
             )
-        await self._def.call(self.coordinator.api_client, self._device_id, str(serial))
+        await self._def.call(self.coordinator.api_client, str(serial))
         await self.coordinator.async_request_refresh()

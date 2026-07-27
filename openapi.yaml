@@ -72,6 +72,7 @@ paths:
   # ──────────────────────────────────────────────
   /v1/auth/code:
     post:
+      x-verification-status: measured-live
       operationId: requestAuthCode
       summary: Request an authentication code
       description: |
@@ -88,16 +89,13 @@ paths:
               properties:
                 phone:
                   type: string
-                  description: Phone number with country code
-                  example: "+14155551234"
+                  description: US phone number with leading country code and no punctuation
+                  pattern: "^1[0-9]{10}$"
+                  example: "14155551234"
                 email:
                   type: string
                   format: email
                   description: Email address (alternative to phone)
-                country:
-                  type: string
-                  description: ISO country code
-                  example: "US"
       responses:
         "200":
           description: Code sent successfully
@@ -111,10 +109,11 @@ paths:
         "400":
           $ref: "#/components/responses/BadRequest"
 
-  /v1/auth/do:
+  /v1/auth/verify:
     post:
-      operationId: executeAuthAction
-      summary: Execute an authentication action
+      x-verification-status: measured-live
+      operationId: verifyAuthCode
+      summary: Verify an authentication code
       description: |
         Verifies the code sent via /v1/auth/code and completes sign-in or sign-up.
         Returns access and refresh tokens on success.
@@ -125,25 +124,44 @@ paths:
         content:
           application/json:
             schema:
-              type: object
-              properties:
-                code:
-                  type: string
-                  description: Verification code received via SMS or email
-                phone:
-                  type: string
-                  description: Phone number used to request the code
-                email:
-                  type: string
-                  format: email
-                  description: Email used to request the code
+              oneOf:
+                - type: object
+                  required: [code, phone]
+                  properties:
+                    code:
+                      type: string
+                      description: Verification code received by SMS
+                    phone:
+                      type: string
+                      pattern: "^1[0-9]{10}$"
+                - type: object
+                  required: [code, email]
+                  properties:
+                    code:
+                      type: string
+                      description: Verification code received by email
+                    email:
+                      type: string
+                      format: email
       responses:
         "200":
           description: Authentication successful
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/AuthTokens"
+                type: object
+                required: [success, response]
+                properties:
+                  success:
+                    type: boolean
+                  response:
+                    type: object
+                    required: [session]
+                    properties:
+                      session:
+                        $ref: "#/components/schemas/AuthTokens"
+                      user:
+                        $ref: "#/components/schemas/User"
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -197,6 +215,7 @@ paths:
 
   /v1/auth/refresh:
     post:
+      x-verification-status: measured-live
       operationId: refreshAuthToken
       summary: Refresh authentication tokens
       description: |
@@ -210,9 +229,10 @@ paths:
           application/json:
             schema:
               type: object
-              required: [refreshToken]
+              additionalProperties: false
+              required: [refresh_token]
               properties:
-                refreshToken:
+                refresh_token:
                   type: string
                   description: Current refresh token (JWT)
       responses:
@@ -221,7 +241,19 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/AuthTokens"
+                oneOf:
+                  - $ref: "#/components/schemas/AuthTokens"
+                  - type: object
+                    required: [success, response]
+                    properties:
+                      success:
+                        type: boolean
+                      response:
+                        type: object
+                        required: [session]
+                        properties:
+                          session:
+                            $ref: "#/components/schemas/AuthTokens"
         "401":
           $ref: "#/components/responses/Unauthorized"
 
@@ -598,29 +630,15 @@ paths:
   # ──────────────────────────────────────────────
   #  Sleep Configurations
   # ──────────────────────────────────────────────
-  /v1/sleep-configurations/devices:
-    get:
-      operationId: getSleepConfigDevices
-      summary: Get sleep configurations for all devices
-      description: Returns sleep configuration data for all devices associated with the user.
-      tags: [Sleep Configurations]
-      responses:
-        "200":
-          description: Device sleep configurations
-          content:
-            application/json:
-              schema:
-                type: array
-                items:
-                  $ref: "#/components/schemas/SleepConfiguration"
-
-  /v1/sleep-configurations/temperature:
-    put:
-      operationId: updateTemperature
-      summary: Update temperature setting
+  /v1/sleep-configurations/user-away:
+    post:
+      x-verification-status: measured-live
+      operationId: setUserAway
+      summary: Set the authenticated user's away state
       description: |
-        Updates the target temperature for a device zone.
-        This endpoint is called via debounced API calls during real-time temperature adjustment.
+        Sets the specified user's presence override. Away mode removes the
+        user's zone assignment and powers that zone down. This is separate
+        from direct zone power control.
       tags: [Sleep Configurations]
       requestBody:
         required: true
@@ -628,43 +646,14 @@ paths:
           application/json:
             schema:
               type: object
-              required: [deviceId, temperature]
+              additionalProperties: false
+              required: [user_id, is_away]
               properties:
-                deviceId:
+                user_id:
                   type: string
-                temperature:
-                  type: number
-                  format: float
-                  description: Target temperature value
-                side:
-                  type: string
-                  enum: [left, right]
-                  description: Bed side (if split zones)
-      responses:
-        "200":
-          description: Temperature updated
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/SleepConfiguration"
-
-  /v1/sleep-configurations/user-away:
-    post:
-      operationId: setUserAway
-      summary: Mark user as away
-      description: Sets the user's status to away, which may adjust device behavior.
-      tags: [Sleep Configurations]
-      requestBody:
-        content:
-          application/json:
-            schema:
-              type: object
-              properties:
-                deviceId:
-                  type: string
-                side:
-                  type: string
-                  enum: [left, right]
+                  format: uuid
+                is_away:
+                  type: boolean
       responses:
         "200":
           description: User marked as away
@@ -718,52 +707,6 @@ paths:
         "200":
           description: User removed
 
-  /v1/sleep-configurations/user-swap-user-sides:
-    post:
-      operationId: swapUserSides
-      summary: Swap user bed sides
-      description: Swaps the left/right bed side assignment for users on a device.
-      tags: [Sleep Configurations]
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              properties:
-                deviceId:
-                  type: string
-      responses:
-        "200":
-          description: Sides swapped
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/SleepConfiguration"
-
-  /v1/sleep-configurations/user-split-user-zones:
-    post:
-      operationId: splitUserZones
-      summary: Split temperature zones
-      description: Splits a device into independent temperature zones for each side.
-      tags: [Sleep Configurations]
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              properties:
-                deviceId:
-                  type: string
-      responses:
-        "200":
-          description: Zones split
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/SleepConfiguration"
-
   /v1/sleep-configurations/user-update:
     put:
       operationId: updateUserConfig
@@ -799,16 +742,11 @@ paths:
   # ──────────────────────────────────────────────
   /v1/sleep-schedules:
     get:
+      x-verification-status: measured-live
       operationId: getSleepSchedules
       summary: Get sleep schedules
-      description: Retrieves the user's sleep schedules with optional action filter.
+      description: Retrieves schedules keyed by Orion user ID.
       tags: [Sleep Schedules]
-      parameters:
-        - name: action
-          in: query
-          description: Filter or action type (e.g. enable, disable, update)
-          schema:
-            type: string
       responses:
         "200":
           description: Sleep schedule data
@@ -817,18 +755,15 @@ paths:
               schema:
                 $ref: "#/components/schemas/SleepSchedule"
     put:
+      x-verification-status: measured-live-partial-updates
       operationId: updateSleepSchedule
       summary: Update a sleep schedule
       description: |
-        Updates the user's sleep schedule. Supports per-day configuration
-        with bedtime, wake-up time, and enable/disable per weekday.
+        Partially updates the authenticated user's schedule. The measured
+        request body is `{"schedules": [{"day": N, field: value}]}`.
+        Unspecified fields are preserved. Global enable and disable actions
+        have not been verified and are intentionally omitted.
       tags: [Sleep Schedules]
-      parameters:
-        - name: action
-          in: query
-          description: The update action to perform
-          schema:
-            type: string
       requestBody:
         required: true
         content:
@@ -843,93 +778,36 @@ paths:
               schema:
                 $ref: "#/components/schemas/SleepSchedule"
 
-  # ──────────────────────────────────────────────
-  #  Sleep Sessions
-  # ──────────────────────────────────────────────
-  /v1/sleep-sessions/end:
-    post:
-      operationId: endSleepSession
-      summary: End a sleep session
-      description: Ends the current active sleep session for the user.
-      tags: [Sleep Sessions]
-      requestBody:
-        content:
-          application/json:
-            schema:
-              type: object
-              properties:
-                sessionId:
-                  type: string
-                deviceId:
-                  type: string
-      responses:
-        "200":
-          description: Session ended
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/SleepSession"
-
   /v1/session-state:
     get:
+      x-verification-status: measured-live
       operationId: getSessionState
-      summary: Get current session state
+      summary: Get onboarding state
       description: |
-        Returns the current live session state. Used by the app to
-        determine if a sleep session is active (fetchAndUpdateSessionState).
-      tags: [Sleep Sessions]
+        Despite the route name, this returns onboarding and survey progress.
+        It does not report whether a sleep session is active. Session activity
+        comes from `is_in_progress` in the insights response.
+      tags: [Onboarding]
       responses:
         "200":
-          description: Current session state
+          description: Current onboarding state
           content:
             application/json:
               schema:
                 type: object
+                additionalProperties: true
                 properties:
-                  active:
+                  patch_step:
+                    type: string
+                  is_survey_complete:
                     type: boolean
-                  sessionId:
-                    type: string
-                  startedAt:
-                    type: string
-                    format: date-time
 
   # ──────────────────────────────────────────────
   #  Insights
   # ──────────────────────────────────────────────
-  /v1/insights:
-    get:
-      operationId: getInsightsV1
-      summary: Get sleep insights (v1)
-      description: |
-        Returns sleep insight data for a date range.
-        Includes daily sleep metrics, HRV, breath rate, body movement.
-      tags: [Insights]
-      parameters:
-        - name: from
-          in: query
-          required: true
-          description: Start date (ISO 8601)
-          schema:
-            type: string
-            format: date
-        - name: to
-          in: query
-          required: true
-          description: End date (ISO 8601)
-          schema:
-            type: string
-            format: date
-      responses:
-        "200":
-          description: Sleep insights
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/InsightsResponse"
-
   /v2/insights:
     get:
+      x-verification-status: measured-live
       operationId: getInsightsV2
       summary: Get sleep insights (v2)
       description: |
@@ -946,6 +824,7 @@ paths:
             format: date
         - name: to
           in: query
+          required: true
           description: End date (ISO 8601)
           schema:
             type: string
@@ -1563,12 +1442,6 @@ x-websocket:
       tokenRefreshBeforeReconnect: true
     pingPong: protocol-level
 
-  connectionStates:
-    - connecting
-    - connected
-    - reconnecting
-    - deviceOffline
-
 components:
   securitySchemes:
     bearerAuth:
@@ -1576,7 +1449,7 @@ components:
       scheme: bearer
       bearerFormat: JWT
       description: |
-        JWT Bearer token obtained from /v1/auth/do.
+        JWT Bearer token obtained from /v1/auth/verify.
         Refresh via /v1/auth/refresh. The app validates tokens
         using isValidJWT before use.
 
@@ -1626,13 +1499,17 @@ components:
   schemas:
     AuthTokens:
       type: object
+      required: [access_token, refresh_token]
       properties:
-        accessToken:
+        access_token:
           type: string
           description: JWT access token
-        refreshToken:
+        refresh_token:
           type: string
           description: JWT refresh token for obtaining new access tokens
+        expires_at:
+          type: number
+          description: Unix timestamp when the access token expires
 
     User:
       type: object
@@ -1788,149 +1665,191 @@ components:
 
     SleepSchedule:
       type: object
+      required: [success, response]
       properties:
-        enabled:
+        success:
           type: boolean
-        days:
-          type: array
-          items:
-            $ref: "#/components/schemas/ScheduleDay"
+        response:
+          type: object
+          required: [schedules, today_sleep_schedule]
+          properties:
+            schedules:
+              type: object
+              additionalProperties:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ScheduleDay"
+            today_sleep_schedule:
+              type: object
+              additionalProperties:
+                $ref: "#/components/schemas/ScheduleDay"
+            recommendations:
+              type: object
+              additionalProperties:
+                type: array
+                items:
+                  type: object
+                  additionalProperties: true
 
     ScheduleDay:
       type: object
+      required: [day]
       properties:
-        dayOfWeek:
-          type: string
-          enum: [monday, tuesday, wednesday, thursday, friday, saturday, sunday]
-        enabled:
-          type: boolean
+        day:
+          type: integer
+          minimum: 0
+          maximum: 6
         bedtime:
           type: string
-          description: Bedtime in HH:mm format
-          example: "22:30"
-        wakeTime:
+          pattern: "^(?:[01][0-9]|2[0-3]):[0-5][0-9]$"
+        wakeup:
           type: string
-          description: Wake-up time in HH:mm format
-          example: "07:00"
-        autoTurnOff:
+          pattern: "^(?:[01][0-9]|2[0-3]):[0-5][0-9]$"
+        bedtime_is_active:
           type: boolean
-          description: Whether the device auto-turns off at wake time
-        phase2OffsetMinutes:
-          type: integer
-          description: Offset in minutes for phase 2 temperature adjustment
+        wakeup_is_active:
+          type: boolean
+        bedtime_temp:
+          type: number
+        phase_1_temp:
+          type: number
+        phase_2_temp:
+          type: number
+        wakeup_temp:
+          type: number
+        auto_turn_off:
+          type: boolean
+        is_smart_temperature_active:
+          type: boolean
+        override_date:
+          type: [string, "null"]
+          format: date
+        is_override_available:
+          type: boolean
+        is_override_applied:
+          type: boolean
 
     SleepScheduleUpdate:
       type: object
+      additionalProperties: false
+      required: [schedules]
       properties:
-        enabled:
-          type: boolean
-        bedtime:
-          type: string
-          example: "22:30"
-        wakeTime:
-          type: string
-          example: "07:00"
-        days:
+        schedules:
           type: array
+          minItems: 1
           items:
-            $ref: "#/components/schemas/ScheduleDay"
-        forceAllDays:
-          type: boolean
-          description: Apply changes to all days at once
+            $ref: "#/components/schemas/ScheduleTemperatureUpdate"
 
-    SleepSession:
+    ScheduleTemperatureUpdate:
       type: object
+      additionalProperties: false
+      required: [day]
+      minProperties: 2
+      anyOf:
+        - required: [bedtime_temp]
+        - required: [phase_1_temp]
+        - required: [phase_2_temp]
+        - required: [wakeup_temp]
       properties:
-        sessionId:
-          type: string
-        deviceId:
-          type: string
-        startedAt:
-          type: string
-          format: date-time
-        endedAt:
-          type: string
-          format: date-time
-        sleepStages:
-          type: array
-          items:
-            type: object
-            properties:
-              stage:
-                type: string
-                enum: [awake, light, deep, rem]
-              startTime:
-                type: string
-                format: date-time
-              endTime:
-                type: string
-                format: date-time
+        day:
+          type: integer
+          minimum: 0
+          maximum: 6
+        bedtime_temp:
+          type: number
+        phase_1_temp:
+          type: number
+        phase_2_temp:
+          type: number
+        wakeup_temp:
+          type: number
 
     InsightsResponse:
       type: object
       description: |
-        Sleep insights data. Transformed by the app's transformInsightsResponse
-        function before display.
+        Measured v2 response. Unlike most REST endpoints, this response is not
+        wrapped in `response` and `success` fields.
+      required: [user_id, data, overview]
       properties:
-        dailySleepInsights:
-          type: array
-          items:
-            $ref: "#/components/schemas/DailySleepInsight"
+        user_id:
+          type: string
+          format: uuid
+        data:
+          type: object
+          additionalProperties:
+            $ref: "#/components/schemas/InsightDay"
+        overview:
+          type: object
+          additionalProperties:
+            type: object
+            properties:
+              score:
+                type: [number, "null"]
 
-    DailySleepInsight:
+    InsightDay:
       type: object
+      required: [date, sessions]
       properties:
         date:
           type: string
           format: date
+        score:
+          type: [number, "null"]
+        sessions:
+          type: array
+          items:
+            $ref: "#/components/schemas/InsightSession"
+
+    InsightSession:
+      type: object
+      required: [session_id, zone_id, is_in_progress]
+      additionalProperties: true
+      properties:
+        session_id:
+          type: string
+        zone_id:
+          type: string
+        is_in_progress:
+          type: boolean
+        start_time:
+          type: [string, "null"]
+          format: date-time
+        end_time:
+          type: [string, "null"]
+          format: date-time
+        confidence:
+          type: [number, "null"]
+        sleep_summary:
+          type: object
+          additionalProperties:
+            type: [number, "null"]
+        heart_rate:
+          $ref: "#/components/schemas/InsightMetric"
+        breath_rate:
+          $ref: "#/components/schemas/InsightMetric"
         hrv:
+          $ref: "#/components/schemas/InsightMetric"
+        movement:
           type: object
-          description: Heart Rate Variability metrics
-          properties:
-            value:
-              type: number
-              format: float
-        breathRate:
+          additionalProperties: true
+        temperature:
           type: object
-          description: Breath rate metrics
-          properties:
-            value:
-              type: number
-              format: float
-        bodyMovement:
-          type: object
-          description: Body movement metrics
-          properties:
-            rate:
-              type: number
-              format: float
-            restlessTime:
-              type: number
-              description: Restless time in minutes
-            leftBed:
-              type: integer
-              description: Number of times the user left bed
-        sleepScore:
-          type: number
-          format: float
-        totalSleepTime:
-          type: number
-          description: Total sleep time in minutes
-        sleepStages:
-          type: object
-          properties:
-            awake:
-              type: number
-              description: Time awake in minutes
-            light:
-              type: number
-              description: Time in light sleep in minutes
-            deep:
-              type: number
-              description: Time in deep sleep in minutes
-            rem:
-              type: number
-              description: Time in REM sleep in minutes
+          additionalProperties: true
+
+    InsightMetric:
+      type: object
+      additionalProperties: true
+      properties:
+        average:
+          type: [number, "null"]
+        min:
+          type: [number, "null"]
+        max:
+          type: [number, "null"]
+        values:
+          type: array
+          items:
+            type: [number, object, "null"]
 
     NotificationPreferences:
       type: object

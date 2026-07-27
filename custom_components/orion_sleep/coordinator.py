@@ -15,6 +15,7 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 from . import live_state, util
 from .api import OrionApiClient, OrionApiError, OrionAuthError, OrionConnectionError
 from .const import (
+    CONF_DISPLAY_ALIASES,
     CONF_INSIGHTS_DAYS,
     CONF_PARTNER_DEVICE_SERIAL,
     CONF_SCAN_INTERVAL,
@@ -68,6 +69,12 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
         self.user_id: str = ""
         self.partner_user: dict = {}
         self.partner_update_ok = False
+        # User-facing display overrides keyed by immutable Orion user id.
+        # Aliases only ever change friendly names. Unique ids and entity ids
+        # are derived from device and zone ids, so renaming is non-breaking.
+        self.display_aliases: dict[str, str] = util.clean_alias_map(
+            self.options.get(CONF_DISPLAY_ALIASES)
+        )
         self.partner_device_serial = str(config_entry.data.get(CONF_PARTNER_DEVICE_SERIAL, ""))
         self.partner_mapping_valid = bool(self.partner_device_serial)
 
@@ -138,9 +145,15 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
         except (OrionApiError, OrionConnectionError) as err:
             raise UpdateFailed(f"Error refreshing token: {err}") from err
 
+        # Carry the previous poll's payloads forward. A failed sub-fetch
+        # logs and continues, so initialising these empty would blank every
+        # dependent entity for a full scan interval after one transient 500.
+        # `partner_insights` already did this. `schedules` and `insights`
+        # did not, which is a real bug: nine schedule entities today, and
+        # thirty-two once per-person schedules land.
         data: dict = {
-            "schedules": {},
-            "insights": {},
+            "schedules": (self.data or {}).get("schedules", {}),
+            "insights": (self.data or {}).get("insights", {}),
             "partner_insights": (self.data or {}).get("partner_insights", {}),
         }
 
@@ -231,28 +244,63 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
 
     def get_latest_session(self) -> dict | None:
         """Get the most recent sleep session from insights data."""
-        insights = (self.data or {}).get("insights", {})
-        return util.latest_session(insights.get("data"))
+        return util.latest_session(util.nested_mapping(self.data, "insights", "data"))
 
     def get_latest_session_for_zone(self, zone_id: str) -> dict | None:
         """Get the most recent sleep session for one device zone."""
-        insights = (self.data or {}).get("insights", {})
-        return util.latest_session_for_zone(insights.get("data"), zone_id)
+        return util.latest_session_for_zone(
+            util.nested_mapping(self.data, "insights", "data"), zone_id
+        )
 
     def get_latest_partner_session(self, device_id: str) -> dict | None:
         """Get the newest partner session for an unambiguous shared bed."""
         if not self.has_partner_for_device(device_id):
             return None
-        insights = (self.data or {}).get("partner_insights", {})
-        return util.latest_session(insights.get("data"))
+        return util.latest_session(
+            util.nested_mapping(self.data, "partner_insights", "data")
+        )
+
+    def known_users(self) -> list[dict[str, str]]:
+        """Every Orion user visible to this entry, for the alias options form.
+
+        Account objects are walked before device zones so the fuller
+        `/v1/auth/me` copies win over the sparser embedded ones.
+        """
+        return util.collect_known_users(self.devices, [self.user, self.partner_user])
+
+    def display_name_for_user(self, user_id: object) -> str:
+        """Friendly name for one Orion user.
+
+        Resolution order: configured alias, then whatever the vendor calls
+        them, then a stable id-derived fallback. Never raises and never
+        returns an empty string, because an entity with a blank name is
+        worse than one with an ugly name.
+
+        Affects friendly names ONLY. Unique ids are built from device and
+        zone ids, never from a person, so renaming cannot orphan history.
+        """
+        if not isinstance(user_id, str) or not user_id:
+            return "Unknown"
+        alias = self.display_aliases.get(user_id)
+        if isinstance(alias, str) and alias.strip():
+            return alias.strip()
+        for record in self.known_users():
+            if record["id"] == user_id and record["name"]:
+                return record["name"]
+        return f"User {user_id[:8]}"
+
+    def primary_name(self) -> str:
+        """Display name for the authenticated account holder."""
+        if self.user_id:
+            return self.display_name_for_user(self.user_id)
+        return util.orion_user_label(self.user) or "You"
 
     def partner_name(self) -> str:
-        """Return a stable display name for the linked partner account."""
-        for key in ("first_name", "name", "email", "phone"):
-            value = self.partner_user.get(key)
-            if value:
-                return str(value)
-        return "Partner"
+        """Display name for the linked partner account."""
+        partner_id = self.partner_user.get("id")
+        if isinstance(partner_id, str) and partner_id:
+            return self.display_name_for_user(partner_id)
+        return util.orion_user_label(self.partner_user) or "Partner"
 
     def has_partner_for_device(self, device_id: str) -> bool:
         """Return whether the partner account was verified for this bed."""
@@ -266,24 +314,21 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
             return False
         return len(self.devices) == 1 and serial == self.partner_device_serial
 
-    def get_today_schedule(self) -> dict | None:
-        """Get today's sleep schedule for the current user."""
-        schedules = (self.data or {}).get("schedules", {})
-        today = schedules.get("today_sleep_schedule", {})
-        return today.get(self.user_id)
+    def get_today_schedule(self, user_id: str | None = None) -> dict | None:
+        """Today's sleep schedule row for one Orion user.
 
-    def get_all_schedules(self) -> list[dict]:
-        """Get all schedule entries for the current user."""
-        schedules = (self.data or {}).get("schedules", {})
-        all_schedules = schedules.get("schedules", {})
-        return all_schedules.get(self.user_id, [])
-
-    def is_any_schedule_active(self) -> bool:
-        """Check if any schedule day has bedtime_is_active set."""
-        for sched in self.get_all_schedules():
-            if sched.get("bedtime_is_active"):
-                return True
-        return False
+        ``user_id=None`` means the authenticated user, which is what every
+        caller meant before per-person entities existed. The API returns
+        rows for every user on the bed in a single fetch with the primary
+        token, so reading a partner's row costs no extra request.
+        """
+        target = user_id or self.user_id
+        if not target:
+            return None
+        row = util.nested_mapping(self.data, "schedules", "today_sleep_schedule").get(
+            target
+        )
+        return row if isinstance(row, dict) else None
 
     # ── WebSocket integration ─────────────────────────────────────────
 
@@ -335,6 +380,24 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
             # dict reference, so build a shallow copy.
             data = dict(self.data or {})
             self.async_set_updated_data(data)
+
+    @callback
+    def apply_live_device(self, serial: str, payload: object) -> None:
+        """Merge a live-device payload returned by a write into local state.
+
+        `PUT /v1/devices/{serial}/live` returns the full live device
+        object, so a successful write does not need a follow-up GET. The
+        vendor app pipes the response straight into its store and we do
+        the same. Same merge semantics as the WebSocket handler.
+        """
+        if not isinstance(payload, dict):
+            return
+        dev_id = self._serial_to_id.get(serial)
+        if not dev_id:
+            return
+        previous = self.live_devices.get(dev_id, {})
+        self.live_devices[dev_id] = {**previous, **payload}
+        self.async_set_updated_data(dict(self.data or {}))
 
     @callback
     def _handle_ws_state(self, serial: str, state: str) -> None:
@@ -445,13 +508,12 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
         return bool(val) if val is not None else None
 
     def is_user_away(self, device_id: str) -> bool | None:
-        """Check whether the user is currently marked away on the device.
+        """Check whether the authenticated user is away from this device.
 
-        The server signals away-mode by nulling out ``zones[*].user`` on
-        the device returned from ``GET /v1/devices``; when the user is
-        present each zone carries a populated ``user`` object. Verified
-        by toggling ``POST /v1/sleep-configurations/user-away`` and
-        re-fetching the device list.
+        The server signals away mode by removing that user from the zone
+        assignment returned by ``GET /v1/devices``. Other users may remain
+        assigned, so checking whether any zone has any user gives the wrong
+        answer on shared beds.
 
         This is **distinct from device power state** (``is_device_on``).
         The mattress can be powered off while the user is still present
@@ -464,17 +526,7 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
         for device in self.devices:
             if device.get("id") != device_id:
                 continue
-            zones = device.get("zones") or []
-            if not zones:
-                return None
-            # User is present if any zone has a user object attached; away
-            # only if every zone's user is null. The app treats a partial
-            # state as "present" (safer default — avoids a 400 from the
-            # user-away endpoint).
-            for zone in zones:
-                if zone.get("user"):
-                    return False
-            return True
+            return util.user_is_away(device, self.user_id)
         return None
 
     def is_device_on(self, device_id: str) -> bool | None:

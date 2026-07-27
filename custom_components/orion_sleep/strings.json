@@ -53,8 +53,13 @@
         "data": {
           "scan_interval": "Polling interval (seconds)",
           "insights_days": "Days of sleep insights to fetch",
-          "partner_action": "Partner account"
+          "partner_action": "Partner account",
+          "edit_aliases": "Edit display names"
         }
+      },
+      "aliases": {
+        "title": "Display Names",
+        "description": "Set the name you want shown for each person: {people}.\n\nThis changes friendly names only. Entity IDs, history, dashboards, and voice assistant aliases are unaffected. Leave a field blank to use the name from the Orion account."
       },
       "partner_method": {
         "title": "Link Partner Account",
@@ -129,9 +134,6 @@
       },
       "away_mode": {
         "name": "Away Mode"
-      },
-      "sleep_schedule": {
-        "name": "Sleep Schedule"
       }
     },
     "number": {

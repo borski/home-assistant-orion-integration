@@ -41,7 +41,6 @@ async def async_setup_entry(
         entities.append(OrionSessionActiveBinarySensor(coordinator, device_id))
         for sensor_name in _TOPPER_SENSORS:
             entities.append(OrionSensorOnBedBinarySensor(coordinator, device_id, sensor_name))
-        entities.append(OrionQuietModeBinarySensor(coordinator, device_id))
         entities.append(OrionSafetyProblemBinarySensor(coordinator, device_id))
 
     async_add_entities(entities)
@@ -121,40 +120,6 @@ class OrionSensorOnBedBinarySensor(OrionBaseEntity, BinarySensorEntity):
         # Report available whenever we have a live payload at all,
         # even if the individual sensor hasn't reported yet.
         return self.coordinator.sensor_status_text(self._device_id, self._sensor_name) is not None
-
-
-class OrionQuietModeBinarySensor(OrionBaseEntity, BinarySensorEntity):
-    """Control Tower quiet mode — READ ONLY.
-
-    This was briefly modelled as a switch. It is not writable: the value
-    is readable in the live snapshot, but there is **no discovered write
-    path** for it anywhere in the API. `POST /v1/devices/{id}/action`
-    accepts only `reboot` / `forget_wifi` (measured 2026-07-26), and
-    `PUT .../live` requires `zones` and documents no quiet-mode field.
-
-    A control that cannot write is worse than no control, so this stays a
-    sensor until a write path is actually found on the wire.
-    """
-
-    _attr_name = "Quiet Mode"
-    _attr_icon = "mdi:volume-off"
-    _attr_entity_category = EntityCategory.DIAGNOSTIC
-
-    def __init__(
-        self,
-        coordinator: OrionDataUpdateCoordinator,
-        device_id: str,
-    ) -> None:
-        super().__init__(coordinator, device_id)
-        self._attr_unique_id = f"{device_id}_quiet_mode_state"
-
-    @property
-    def available(self) -> bool:
-        return super().available and self.coordinator.device_quiet_mode(self._device_id) is not None
-
-    @property
-    def is_on(self) -> bool | None:
-        return self.coordinator.device_quiet_mode(self._device_id)
 
 
 class OrionSafetyProblemBinarySensor(OrionBaseEntity, BinarySensorEntity):
