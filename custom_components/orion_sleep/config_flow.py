@@ -16,9 +16,14 @@ from homeassistant.config_entries import (
 )
 from homeassistant.core import callback
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from orion_sleep_api import (
+    OrionApiClient,
+    OrionApiError,
+    OrionAuthError,
+    OrionConnectionError,
+    util,
+)
 
-from . import util
-from .api import OrionApiClient, OrionApiError, OrionAuthError, OrionConnectionError
 from .const import (
     CONF_ACCESS_TOKEN,
     CONF_AUTH_METHOD,

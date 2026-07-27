@@ -22,8 +22,8 @@ from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import entity_platform
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from orion_sleep_api import util
 
-from . import util
 from .coordinator import OrionDataUpdateCoordinator
 from .entity import OrionBaseEntity
 

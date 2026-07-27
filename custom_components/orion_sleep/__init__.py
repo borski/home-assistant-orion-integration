@@ -8,8 +8,8 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from orion_sleep_api import OrionApiClient
 
-from .api import OrionApiClient
 from .const import (
     CONF_ACCESS_TOKEN,
     CONF_EXPIRES_AT,

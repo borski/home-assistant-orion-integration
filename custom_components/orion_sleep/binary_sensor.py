@@ -14,8 +14,8 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from orion_sleep_api import util
 
-from . import util
 from .const import OCCUPANCY_HOLD_SECONDS
 from .coordinator import OrionDataUpdateCoordinator
 from .entity import OrionBaseEntity

@@ -12,9 +12,16 @@ from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util import dt as dt_util
+from orion_sleep_api import (
+    OrionApiClient,
+    OrionApiError,
+    OrionAuthError,
+    OrionConnectionError,
+    OrionWebSocketManager,
+    live_state,
+    util,
+)
 
-from . import live_state, util
-from .api import OrionApiClient, OrionApiError, OrionAuthError, OrionConnectionError
 from .const import (
     CONF_DISPLAY_ALIASES,
     CONF_INSIGHTS_DAYS,
@@ -26,7 +33,6 @@ from .const import (
     MAX_COOLING_MINUTES,
     MIN_COOLING_MINUTES,
 )
-from .websocket import OrionWebSocketManager
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -93,7 +99,6 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
 
         # Live WebSocket manager — one connection per device serial.
         self._ws_manager: OrionWebSocketManager = OrionWebSocketManager(
-            hass=hass,
             session=async_get_clientsession(hass),
             api_client=api_client,
             on_message=self._handle_ws_message,

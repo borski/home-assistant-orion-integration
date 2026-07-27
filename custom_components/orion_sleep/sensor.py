@@ -26,9 +26,8 @@ from homeassistant.helpers.entity_platform import (
     async_get_current_platform,
 )
 from homeassistant.util import dt as dt_util
+from orion_sleep_api import OrionApiError, util
 
-from . import util
-from .api import OrionApiError
 from .coordinator import OrionDataUpdateCoordinator
 from .entity import OrionBaseEntity
 

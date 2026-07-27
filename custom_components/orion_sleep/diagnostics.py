@@ -8,9 +8,9 @@ from typing import Any
 from homeassistant.components.diagnostics import async_redact_data
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from orion_sleep_api.util import omit_sensitive_diagnostic_branches, redact_identifier_keys
 
 from .coordinator import OrionDataUpdateCoordinator
-from .util import omit_sensitive_diagnostic_branches, redact_identifier_keys
 
 TO_REDACT = {
     "access_token",

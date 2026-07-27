@@ -34,8 +34,8 @@ from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from orion_sleep_api import OrionApiClient
 
-from .api import OrionApiClient
 from .coordinator import OrionDataUpdateCoordinator
 from .entity import OrionBaseEntity
 

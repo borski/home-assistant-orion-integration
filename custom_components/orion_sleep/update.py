@@ -10,8 +10,8 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from orion_sleep_api import OrionApiError
 
-from .api import OrionApiError
 from .coordinator import OrionDataUpdateCoordinator
 from .entity import OrionBaseEntity
 

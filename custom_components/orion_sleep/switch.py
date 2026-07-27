@@ -11,8 +11,8 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from orion_sleep_api import util
 
-from . import util
 from .coordinator import OrionDataUpdateCoordinator
 from .entity import OrionBaseEntity, OrionLiveSettingMixin
 
@@ -174,7 +174,7 @@ class OrionAwayModeSwitch(OrionBaseEntity, SwitchEntity):
         toggle (e.g. after an automation re-asserts state) isn't a hard
         failure in the HA UI.
         """
-        from .api import OrionApiError
+        from orion_sleep_api import OrionApiError
 
         if len(self.coordinator.devices) != 1:
             raise HomeAssistantError(

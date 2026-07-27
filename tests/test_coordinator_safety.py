@@ -12,7 +12,6 @@ import ast
 
 import _orion
 
-util = _orion.load("util")
 COORD = _orion.tree("coordinator")
 COORD_SOURCE = _orion.source("coordinator")
 
@@ -162,53 +161,3 @@ HOSTILE = [
     {"schedules": {"today_sleep_schedule": None}},
     {"schedules": {"today_sleep_schedule": []}},
 ]
-
-
-def test_nested_mapping_never_raises_on_hostile_shapes():
-    for payload in HOSTILE:
-        assert util.nested_mapping(payload, "insights", "data") == {} or isinstance(
-            util.nested_mapping(payload, "insights", "data"), dict
-        )
-        assert isinstance(
-            util.nested_mapping(payload, "schedules", "today_sleep_schedule"), dict
-        )
-
-
-def test_nested_mapping_returns_empty_at_the_first_non_mapping_level():
-    assert util.nested_mapping({"a": {"b": {"c": 1}}}, "a", "b") == {"c": 1}
-    assert util.nested_mapping({"a": {"b": []}}, "a", "b") == {}
-    assert util.nested_mapping({"a": []}, "a", "b") == {}
-    assert util.nested_mapping({}, "a") == {}
-    assert util.nested_mapping(None, "a") == {}
-
-
-def test_session_subsection_never_raises():
-    """sensor.py chains .get() twice. A list in the middle used to crash."""
-    for session in (None, [], "s", 0, {}, {"sleep_summary": None},
-                    {"sleep_summary": []}, {"sleep_summary": "x"}):
-        assert util.session_subsection(session, "sleep_summary") == {}
-    assert util.session_subsection({"sleep_summary": {"deep_sleep": 5}},
-                                   "sleep_summary") == {"deep_sleep": 5}
-
-
-def test_no_completed_session_is_handled_everywhere():
-    """The real state of this bed until somebody finishes a night."""
-    for payload in ({}, None, [], {"2026-07-26": {"sessions": []}}):
-        assert util.latest_session(payload) is None
-        assert util.latest_completed_session(payload) is None
-
-
-def test_schedule_helpers_survive_malformed_rows():
-    for row in (None, [], "x", 0, {}, {"bedtime": None}, {"bedtime": "25:00"}):
-        assert util.schedule_duration_text(row) is None
-    for value in (None, [], 0, True, "24:00", "7:00", "0700", ""):
-        assert util.parse_schedule_time(value) is None
-
-
-def test_away_state_is_unknown_rather_than_guessed_on_bad_zones():
-    """A malformed zone must not resolve to a confident 'away'."""
-    assert util.user_is_away({"zones": [None]}, "u1") is None
-    assert util.user_is_away({"zones": [{"user": None}, None]}, "u1") is None
-    assert util.user_is_away({"zones": []}, "u1") is None
-    assert util.user_is_away({"zones": [{"user": {"id": "u1"}}]}, "u1") is False
-    assert util.user_is_away({"zones": [{"user": {"id": "u2"}}]}, "u1") is True
