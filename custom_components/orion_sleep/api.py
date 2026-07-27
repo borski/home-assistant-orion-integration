@@ -546,10 +546,10 @@ class OrionApiClient:
         PUT /v1/sleep-schedules with body
         {"schedules": [{"day": N, field: value}], "user_id": "..."}.
 
-        Confidence: MEASURED for the four temperature fields and for
-        `wakeup`. APP-DERIVED for `bedtime` and the four boolean flags,
-        which the vendor app sends through this same request builder but
-        which have not been individually executed.
+        Confidence: MEASURED. All ten writable fields were verified
+        against the live API on 2026-07-26 with a backup-and-restore probe
+        targeting a weekday that was not that day, so no test could change
+        how the bed behaved that night.
 
         This is the PERMANENT edit path. It changes the stored weekday row
         and leaves `is_override_applied` and `override_date` alone. Its
@@ -577,3 +577,58 @@ class OrionApiClient:
         if user_id:
             payload["user_id"] = user_id
         return await self._request("PUT", "/v1/sleep-schedules", json_data=payload)
+
+    async def override_schedule(
+        self,
+        day: int,
+        fields: dict[str, Any],
+        user_id: str | None = None,
+    ) -> dict:
+        """Override one day's schedule without changing the stored rows.
+
+        PUT /v1/sleep-schedules?action=override with a FLAT body:
+        {"user_id": "...", "day": N, "bedtime": "23:30", ...}.
+
+        Confidence: MEASURED 2026-07-26. Verified with backup and restore.
+
+        This is a DIFFERENT OPERATION from update_schedule_field, not a
+        variant of it. Three differences that matter:
+
+        1. It leaves the seven stored weekday rows untouched and instead
+           stamps `is_override_applied` and `override_date` on
+           `today_sleep_schedule`. The change lasts one day.
+        2. Its body is FLAT and accepts MANY fields at once, unlike the
+           permanent route which nests a single-key object inside a
+           `schedules` array. The vendor app builds one body with up to
+           ten optional keys, so multi-field is the measured behaviour
+           here even though it is not on the other route.
+        3. Its response body is STALE. It echoes the pre-change values.
+           A caller MUST refetch rather than trusting what comes back.
+
+        No route to CLEAR an existing override has been found. The flag
+        appears to reset when the date rolls over.
+
+        Args:
+            day: Day of week to override (0=Monday ... 6=Sunday).
+            fields: One or more members of SCHEDULE_WRITABLE_FIELDS.
+            user_id: Orion user id to target. None means the token owner.
+
+        Raises:
+            ValueError: if `fields` is empty, or any field or value is
+                invalid for its group.
+        """
+        if not fields:
+            raise ValueError("override_schedule requires at least one field")
+        for field, value in fields.items():
+            validate_schedule_write(day, field, value)
+
+        await self.ensure_valid_token()
+        payload: dict[str, Any] = {"day": day, **fields}
+        if user_id:
+            payload["user_id"] = user_id
+        return await self._request(
+            "PUT",
+            "/v1/sleep-schedules",
+            json_data=payload,
+            params={"action": "override"},
+        )

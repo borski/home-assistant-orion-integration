@@ -1,0 +1,68 @@
+override_schedule:
+  target:
+    entity:
+      integration: orion_sleep
+      domain: time
+  fields:
+    bedtime:
+      required: false
+      example: "23:30"
+      selector:
+        time:
+    wakeup:
+      required: false
+      example: "07:30"
+      selector:
+        time:
+    bedtime_temp_offset:
+      required: false
+      example: -3
+      selector:
+        number:
+          min: -10
+          max: 10
+          step: 1
+          mode: slider
+    phase_1_temp_offset:
+      required: false
+      example: -6
+      selector:
+        number:
+          min: -10
+          max: 10
+          step: 1
+          mode: slider
+    phase_2_temp_offset:
+      required: false
+      example: -4
+      selector:
+        number:
+          min: -10
+          max: 10
+          step: 1
+          mode: slider
+    wakeup_temp_offset:
+      required: false
+      example: 2
+      selector:
+        number:
+          min: -10
+          max: 10
+          step: 1
+          mode: slider
+    bedtime_is_active:
+      required: false
+      selector:
+        boolean:
+    wakeup_is_active:
+      required: false
+      selector:
+        boolean:
+    auto_turn_off:
+      required: false
+      selector:
+        boolean:
+    is_smart_temperature_active:
+      required: false
+      selector:
+        boolean:

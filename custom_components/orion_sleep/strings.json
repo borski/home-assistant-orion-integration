@@ -127,6 +127,9 @@
       "firmware_update_available": {
         "name": "Firmware Update Available"
       },
+      "device_online": {
+        "name": "Device Online"
+      },
       "safety_problem": {
         "name": "Safety Problem"
       }
@@ -211,6 +214,54 @@
       },
       "wifi_signal": {
         "name": "Wi-Fi Signal"
+      }
+    }
+  },
+  "services": {
+    "override_schedule": {
+      "name": "Override schedule for today",
+      "description": "Change one person's schedule for today only, without touching their stored weekday settings. Target the Bedtime or Wake Up Time entity of whoever's schedule should change. Everything given is sent in a single request. Temperatures use the app's -10 to +10 offset scale.",
+      "fields": {
+        "bedtime": {
+          "name": "Bedtime",
+          "description": "Bedtime for tonight only."
+        },
+        "wakeup": {
+          "name": "Wake up time",
+          "description": "Wake up time for tonight only."
+        },
+        "bedtime_temp_offset": {
+          "name": "Bedtime temperature offset",
+          "description": "Temperature at bedtime, on the -10 to +10 scale."
+        },
+        "phase_1_temp_offset": {
+          "name": "Asleep phase 1 offset",
+          "description": "Temperature during the first asleep phase."
+        },
+        "phase_2_temp_offset": {
+          "name": "Asleep phase 2 offset",
+          "description": "Temperature during the second asleep phase."
+        },
+        "wakeup_temp_offset": {
+          "name": "Wake up temperature offset",
+          "description": "Temperature leading into wake up."
+        },
+        "bedtime_is_active": {
+          "name": "Bedtime enabled",
+          "description": "Whether the bedtime action runs tonight."
+        },
+        "wakeup_is_active": {
+          "name": "Wake up enabled",
+          "description": "Whether the wake up action runs tomorrow."
+        },
+        "auto_turn_off": {
+          "name": "Automatic turn off",
+          "description": "Whether the bed powers down after wake up."
+        },
+        "is_smart_temperature_active": {
+          "name": "Smart temperature",
+          "description": "Whether Orion adjusts temperatures automatically."
+        }
       }
     }
   }

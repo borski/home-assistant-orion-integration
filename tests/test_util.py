@@ -1,5 +1,6 @@
 """Tests for dependency-free utility helpers."""
 
+import datetime
 import importlib.util
 from datetime import time as _dt_time
 from pathlib import Path
@@ -141,6 +142,58 @@ def test_safe_api_error_code_never_returns_free_form_pii():
         util.safe_api_error_code({"message": "User has no previous device to return to"})
         == "user_already_present"
     )
+
+
+def test_session_in_progress_only_trusts_an_explicit_true():
+    assert util.session_in_progress({"is_in_progress": True}) is True
+    assert util.session_in_progress({"is_in_progress": False}) is False
+    # A missing or malformed flag reads as finished. Hiding a completed
+    # night behind a field the vendor forgot to send is the worse failure.
+    assert util.session_in_progress({}) is False
+    assert util.session_in_progress({"is_in_progress": None}) is False
+    assert util.session_in_progress({"is_in_progress": "true"}) is False
+    assert util.session_in_progress({"is_in_progress": 1}) is False
+    assert util.session_in_progress(None) is False
+    assert util.session_in_progress([]) is False
+
+
+def test_latest_completed_session_ignores_a_night_in_progress():
+    # Measured shape: the vendor fills end_time in WHILE is_in_progress
+    # is still true, so an end_time check would report this as complete.
+    data = {
+        "2026-07-25": {
+            "sessions": [
+                {"session_id": "old", "is_in_progress": False, "end_time": "2026-07-25T14:00:00Z"}
+            ]
+        },
+        "2026-07-26": {
+            "sessions": [
+                {"session_id": "live", "is_in_progress": True, "end_time": "2026-07-27T06:00:00Z"}
+            ]
+        },
+    }
+    assert util.latest_session(data)["session_id"] == "live"
+    assert util.latest_completed_session(data)["session_id"] == "old"
+
+
+def test_latest_completed_session_prefers_the_newest_finished_one():
+    data = {
+        "2026-07-24": {"sessions": [{"session_id": "older", "is_in_progress": False}]},
+        "2026-07-25": {"sessions": [{"session_id": "newer", "is_in_progress": False}]},
+    }
+    assert util.latest_completed_session(data)["session_id"] == "newer"
+
+
+def test_latest_completed_session_handles_empty_and_malformed():
+    assert util.latest_completed_session(None) is None
+    assert util.latest_completed_session({}) is None
+    assert util.latest_completed_session([]) is None
+    assert util.latest_completed_session({"2026-07-26": None}) is None
+    assert util.latest_completed_session({"2026-07-26": {"sessions": "bad"}}) is None
+    assert util.latest_completed_session({"2026-07-26": {"sessions": [None, "x"]}}) is None
+    # Every session still running means there is nothing completed yet.
+    running = {"2026-07-26": {"sessions": [{"is_in_progress": True}]}}
+    assert util.latest_completed_session(running) is None
 
 
 def test_describe_api_error_maps_recognized_codes():
@@ -555,3 +608,89 @@ def test_schedule_duration_rejects_malformed_input():
         {"bedtime": "23:00", "wakeup": None},
     ):
         assert util.schedule_duration_text(bad) is None
+
+
+# ── Timeline helpers ──────────────────────────────────────────────────
+
+_UTC = datetime.timezone.utc
+NOW = datetime.datetime(2026, 7, 26, 22, 0, tzinfo=_UTC)
+
+
+def _entry(user, when, label="bedtime", zones=None):
+    return {
+        "user_id": user,
+        "label": label,
+        "scheduled_time": when,
+        "action": {"zones": zones or []},
+    }
+
+
+def test_timeline_label_maps_known_and_passes_through_unknown():
+    assert util.timeline_label("wake_up") == "Wake Up"
+    assert util.timeline_label("phase_1") == "Asleep Phase 1"
+    assert util.timeline_label("turn_off") == "Turn Off"
+    # An unrecognized vendor label is surfaced, not dropped.
+    assert util.timeline_label("brand_new_thing") == "Brand New Thing"
+    for bad in (None, "", 5, [], {}):
+        assert util.timeline_label(bad) is None
+
+
+def test_parse_iso_datetime_handles_z_and_offsets():
+    assert util.parse_iso_datetime("2026-07-26T23:00:00Z") == datetime.datetime(
+        2026, 7, 26, 23, 0, tzinfo=_UTC
+    )
+    assert util.parse_iso_datetime("2026-07-26T23:00:00+00:00") == datetime.datetime(
+        2026, 7, 26, 23, 0, tzinfo=_UTC
+    )
+    # A naive timestamp is treated as UTC, never as local time.
+    assert util.parse_iso_datetime("2026-07-26T23:00:00").tzinfo == _UTC
+
+
+def test_parse_iso_datetime_rejects_malformed():
+    for bad in (None, "", "not a date", "2026-13-01T00:00:00Z", 5, [], {}, True):
+        assert util.parse_iso_datetime(bad) is None
+
+
+def test_next_timeline_entry_picks_the_soonest_future_entry():
+    timeline = [
+        _entry("u1", "2026-07-26T23:30:00Z", "phase_1"),
+        _entry("u1", "2026-07-26T23:00:00Z", "bedtime"),
+        _entry("u1", "2026-07-27T07:00:00Z", "wake_up"),
+    ]
+    found = util.next_timeline_entry(timeline, "u1", NOW)
+    assert found is not None and found["label"] == "bedtime"
+
+
+def test_next_timeline_entry_ignores_the_past_and_other_people():
+    timeline = [
+        _entry("u1", "2026-07-26T21:00:00Z"),          # already happened
+        _entry("u2", "2026-07-26T22:30:00Z"),          # somebody else
+        _entry("u1", "2026-07-26T23:00:00Z", "wake_up"),
+    ]
+    found = util.next_timeline_entry(timeline, "u1", NOW)
+    assert found is not None and found["label"] == "wake_up"
+    # An entry exactly at `now` counts as already fired.
+    assert util.next_timeline_entry([_entry("u1", "2026-07-26T22:00:00Z")], "u1", NOW) is None
+
+
+def test_next_timeline_entry_returns_none_on_empty_or_malformed():
+    assert util.next_timeline_entry([], "u1", NOW) is None
+    assert util.next_timeline_entry(None, "u1", NOW) is None
+    assert util.next_timeline_entry("nope", "u1", NOW) is None
+    assert util.next_timeline_entry([None, "bad", {}], "u1", NOW) is None
+    assert util.next_timeline_entry([_entry("u1", "garbage")], "u1", NOW) is None
+    assert util.next_timeline_entry([_entry("u1", "2026-07-26T23:00:00Z")], "", NOW) is None
+    assert util.next_timeline_entry([_entry("u1", "2026-07-26T23:00:00Z")], "u1", None) is None
+
+
+def test_timeline_target_temps_reads_zones_and_rejects_junk():
+    entry = _entry(
+        "u1",
+        "2026-07-26T23:00:00Z",
+        zones=[{"id": "zone_a", "temp": 23.5}, {"id": "zone_b", "temp": 19}],
+    )
+    assert util.timeline_target_temps(entry) == {"zone_a": 23.5, "zone_b": 19.0}
+    # bool is a subclass of int and must not read as a temperature.
+    assert util.timeline_target_temps(_entry("u1", "x", zones=[{"id": "z", "temp": True}])) == {}
+    for bad in (None, {}, {"action": None}, {"action": {"zones": "no"}}, "str"):
+        assert util.timeline_target_temps(bad) == {}

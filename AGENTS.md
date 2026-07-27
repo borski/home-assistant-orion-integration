@@ -189,6 +189,13 @@ Entities read from coordinator:
 | Sensor | HRV | `_hrv` | `session.hrv.average` + min/max extra attrs |
 | Sensor | Body Movement Rate | `_body_movement_rate` | `session.movement.movement_rate` |
 | Sensor | Restless Time | `_restless_time` | `session.movement.total_seconds` (formatted as "Xm Ys") |
+| Sensor | Total Sleep Minutes | `_total_sleep_minutes` | `session.sleep_summary.time_asleep`, numeric. `state_class=measurement`, so it keeps long-term statistics. The string sensors above cannot. |
+| Sensor | Deep Sleep Minutes | `_deep_sleep_minutes` | `session.sleep_summary.deep_sleep`, numeric |
+| Sensor | REM Sleep Minutes | `_rem_sleep_minutes` | `session.sleep_summary.rem_sleep`, numeric |
+| Sensor | Light Sleep Minutes | `_light_sleep_minutes` | `session.sleep_summary.light_sleep`, numeric |
+| Sensor | Awake Minutes | `_awake_minutes` | `session.sleep_summary.awake_time`, numeric |
+| Sensor | Last Session End | `_last_session_end` | `session.end_time` of the newest FINISHED session. Timestamp. Selected via `is_in_progress`, never via a missing `end_time`. |
+| Binary Sensor | Sleep Session (partner) | `_partner_session_active` | Partner `session.is_in_progress`. Only created when a partner is linked. |
 | Sensor | Bedtime | `_bedtime` | `today_sleep_schedule.bedtime` (HH:mm) |
 | Sensor | Wake-up Time | `_wakeup_time` | `today_sleep_schedule.wakeup` |
 | Sensor | Schedule Duration | `_schedule_duration` | Calculated from bedtime/wakeup (handles overnight) |
@@ -217,11 +224,13 @@ Entities read from coordinator:
 
 | Sensor | \<zone\> Measured Temperature | `_{zoneId}_measured_temp` | `status.zones[].temp`. Duplicates the climate entity's `current_temperature` on purpose: climate attributes are not retained as long-term statistics, a `sensor` with a `state_class` is. |
 | Sensor | \<zone\> Target Temperature | `_{zoneId}_target_temp` | `zones[].temp`, the LIVE setpoint. Distinct from `today_sleep_schedule.*_temp`, which is schedule intent and diverges the moment a zone is nudged by hand. |
+| Sensor | \<person\> Next Scheduled Action | `_user_{userId}_next_scheduled_action` | Timestamp of the next temperature change the bed will make on its own, with the action name and per-zone targets as attrs. Built from the WS `timeline`, which is materialized server-side and so reflects overrides and smart temperature. Unavailable until an `update` frame arrives, and again after the last action of the day. |
+| Binary Sensor (diag) | Device Online | `_device_online` | `status.online`, the server's view of the topper. Distinct from Live Connection, which is OUR socket to Orion. The two can legitimately disagree in both directions. |
 | Binary Sensor (diag) | Firmware Update Available | `_firmware_update_available` | `status.pending_update.is_available`. Deliberately not an `update` entity: nothing in the payload carries the available version string. |
 | Number | LED Brightness | `_led_brightness` | 0-100 write via `PUT /v1/devices/{serial_number}/live`. Debounced with an optimistic local write and a post-write lock, mirroring the vendor app. |
 | Switch | Quiet Mode | `_quiet_mode` | Write via the same live route. Replaced the old read-only binary sensor once the write was measured. |
 
-**A two-zone device with no partner linked exposes 54 base entities. A linked partner adds 27 more, for 81.**
+**A two-zone device with no partner linked exposes 62 base entities. A linked partner adds 35 more, for 97.**
 
 - 2 climate entities, one per zone.
 - 31 sensors: 11 insights, 5 schedule temperatures and duration, current offset, live connection, 6 topper sensor readings, 2 measured and 2 target zone temperatures, LED brightness, firmware, and Wi-Fi signal.
@@ -386,9 +395,70 @@ Notable:
 - Firmware-update-in-progress transitions
 - Water-fill-mode transitions
 
+## Services
+
+### `orion_sleep.override_schedule`
+
+Changes one person's schedule for **today only**, leaving their seven
+stored weekday rows untouched. Target the Bedtime or Wake Up Time entity
+of whoever's schedule should change, which is how the caller identifies
+the person without ever handling a raw Orion user id.
+
+This is a genuinely different operation from setting a value on those
+entities. Writing to the entity edits the stored weekday row permanently.
+The service applies a one-day override and stamps `is_override_applied`
+and `override_date`. "Warmer just for tonight" is the override; "we go to
+bed later on Tuesdays now" is the entity.
+
+Accepts `bedtime`, `wakeup`, the four temperature offsets on the app's
+-10..+10 scale, and the four schedule flags. Any combination, all sent in
+one request, because the override route takes a flat multi-field body.
+That differs from the permanent route, which takes one field at a time.
+
+Two behaviours worth knowing:
+
+- The response body is **stale**, echoing pre-change values, so the
+  handler refetches rather than trusting it.
+- **No route to clear an override has been found.** It appears to reset
+  when the date rolls over.
+
 ## Verification Log
 
 Live-request confirmations, newest first. A claim only earns "measured" by appearing here.
+
+### 2026-07-26 — Insights session shape, read off a live in-progress session
+
+`GET /v2/insights` was fetched with the partner token while that account
+was genuinely mid-session, purely to learn key names. Read-only, no writes.
+
+**The five sleep-stage field names are now MEASURED.** They had been
+asserted upstream since April 2026 with no capture behind them, and the
+schema types `sleep_summary` as `additionalProperties` naming zero keys.
+Confirmed present: `time_asleep`, `deep_sleep`, `rem_sleep`,
+`light_sleep`, `awake_time`. Also present and previously unknown:
+`hypnogram`.
+
+Also confirmed: `movement.{total_seconds, movement_rate,
+left_bed_seconds, values}` and `{heart_rate, breath_rate,
+hrv}.{average, min, max, values, axis}`. The `axis` sub-object is new.
+
+**The trap this closed.** `end_time` is populated while
+`is_in_progress` is still `true`. Any "last completed session" selector
+that filters on a missing `end_time` will report a night currently
+being slept as finished. `is_in_progress` is the only trustworthy
+discriminator, and `util.latest_completed_session` uses it.
+
+**Session fields present but not yet modelled** (all values were `null`
+mid-session, so their shapes are still unknown): `apnea`, `hypnogram`,
+`confidence`, `device`, `timezone`, `user`, `is_combined`,
+`combined_zone_ids`, `has_been_edited`, `has_been_rated`,
+`manual_confirmation`, `user_rating`, `last_updated_at`,
+`in_bed_start_time`, `in_bed_end_time`, `user_fallasleep_timestamp`,
+`user_wakeup_timestamp`, `temperature_control`, `temperature_setpoint`.
+Note `in_bed_*` is distinct from `start_time` / `end_time`. Re-probe
+once a session has completed and been processed to learn the shapes.
+
+Day buckets also carry `color` and `quality` alongside `score`.
 
 ### 2026-07-26 — All ten writable schedule fields honoured
 

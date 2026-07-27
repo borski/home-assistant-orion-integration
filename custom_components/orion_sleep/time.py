@@ -14,10 +14,13 @@ from __future__ import annotations
 import logging
 from datetime import time as dt_time
 
+import voluptuous as vol
 from homeassistant.components.time import TimeEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers import entity_platform
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import util
@@ -35,6 +38,34 @@ _SCHEDULE_TIMES: tuple[tuple[str, str, str, str], ...] = (
     ("bedtime", "bedtime", "Bedtime", "mdi:bed-clock"),
     ("wakeup", "wakeup_time", "Wake Up Time", "mdi:alarm"),
 )
+
+SERVICE_OVERRIDE_SCHEDULE = "override_schedule"
+
+# Service field -> schedule field. The four temperatures are exposed on the
+# app's -10..+10 offset scale rather than raw Celsius, so the service reads
+# the same way the sliders do. Conversion happens in the handler.
+_OVERRIDE_OFFSETS: dict[str, str] = {
+    "bedtime_temp_offset": "bedtime_temp",
+    "phase_1_temp_offset": "phase_1_temp",
+    "phase_2_temp_offset": "phase_2_temp",
+    "wakeup_temp_offset": "wakeup_temp",
+}
+_OVERRIDE_FLAGS: tuple[str, ...] = (
+    "bedtime_is_active",
+    "wakeup_is_active",
+    "auto_turn_off",
+    "is_smart_temperature_active",
+)
+
+_OVERRIDE_SCHEMA = {
+    vol.Optional("bedtime"): cv.time,
+    vol.Optional("wakeup"): cv.time,
+    **{
+        vol.Optional(name): vol.All(vol.Coerce(int), vol.Range(min=-10, max=10))
+        for name in _OVERRIDE_OFFSETS
+    },
+    **{vol.Optional(name): cv.boolean for name in _OVERRIDE_FLAGS},
+}
 
 
 async def async_setup_entry(
@@ -59,6 +90,16 @@ async def async_setup_entry(
                 )
 
     async_add_entities(entities)
+
+    # Registered on this platform so the service inherits entity targeting.
+    # Pointing it at somebody's Bedtime entity is how the caller says whose
+    # schedule to override, which beats asking for a raw Orion user id.
+    platform = entity_platform.async_get_current_platform()
+    platform.async_register_entity_service(
+        SERVICE_OVERRIDE_SCHEDULE,
+        _OVERRIDE_SCHEMA,
+        "async_override_schedule",
+    )
 
 
 class OrionScheduleTime(OrionBaseEntity, TimeEntity):
@@ -115,4 +156,51 @@ class OrionScheduleTime(OrionBaseEntity, TimeEntity):
             value=f"{value.hour:02d}:{value.minute:02d}",
             user_id=self._user_id,
         )
+        await self.coordinator.async_request_refresh()
+
+    async def async_override_schedule(self, **kwargs) -> None:
+        """Override this person's schedule for today only.
+
+        A different operation from setting the value on this entity. That
+        edits the stored weekday row permanently. This leaves the stored
+        rows alone and applies a one-day override, which is what "warmer
+        just for tonight" actually means.
+
+        The override route takes a flat multi-field body, unlike the
+        permanent route which takes one field at a time, so every option
+        given here goes out in a single request the way the vendor app
+        sends it.
+        """
+        day = self.coordinator.schedule_day_for_user(self._user_id)
+        if day is None:
+            raise HomeAssistantError(
+                "Orion has not reported a usable schedule for this person yet"
+            )
+
+        fields: dict = {}
+        for name in ("bedtime", "wakeup"):
+            value = kwargs.get(name)
+            if value is not None:
+                fields[name] = f"{value.hour:02d}:{value.minute:02d}"
+        for name, schedule_field in _OVERRIDE_OFFSETS.items():
+            offset = kwargs.get(name)
+            if offset is None:
+                continue
+            celsius = self._offset_to_celsius(float(offset))
+            if celsius is None:
+                raise HomeAssistantError(f"Cannot map offset {offset} to a temperature")
+            fields[schedule_field] = celsius
+        for name in _OVERRIDE_FLAGS:
+            value = kwargs.get(name)
+            if value is not None:
+                fields[name] = value
+
+        if not fields:
+            raise HomeAssistantError("Give at least one value to override")
+
+        await self.coordinator.api_client.override_schedule(
+            day=day, fields=fields, user_id=self._user_id
+        )
+        # The override response echoes pre-change values, so refetch rather
+        # than trusting it. Measured 2026-07-26.
         await self.coordinator.async_request_refresh()

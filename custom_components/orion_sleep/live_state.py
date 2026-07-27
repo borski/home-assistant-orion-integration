@@ -104,6 +104,23 @@ def safety_info(live: dict | None) -> dict | None:
     return value if isinstance(value, dict) else None
 
 
+def device_online(live: dict | None) -> bool | None:
+    """Whether the device reports itself reachable.
+
+    Distinct from the WebSocket connection state, which describes OUR link
+    to the server. This is the server's own view of the topper. Returns
+    None when unreported so an entity stays unavailable instead of
+    claiming the bed is offline.
+    """
+    if not isinstance(live, dict):
+        return None
+    status = live.get("status")
+    if not isinstance(status, dict):
+        return None
+    value = status.get("online")
+    return value if isinstance(value, bool) else None
+
+
 def pending_update_available(live: dict | None) -> bool | None:
     """Return whether the device is advertising a firmware update.
 

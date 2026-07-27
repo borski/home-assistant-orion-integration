@@ -11,6 +11,7 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+from homeassistant.util import dt as dt_util
 
 from . import live_state, util
 from .api import OrionApiClient, OrionApiError, OrionAuthError, OrionConnectionError
@@ -259,6 +260,28 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
         return util.latest_session(
             util.nested_mapping(self.data, "partner_insights", "data")
         )
+
+    def get_latest_completed_session(self) -> dict | None:
+        """Newest FINISHED session for the authenticated account.
+
+        Separate from get_latest_session because a night in progress
+        already carries an end_time. See util.latest_completed_session.
+        """
+        return util.latest_completed_session(
+            util.nested_mapping(self.data, "insights", "data")
+        )
+
+    def get_latest_completed_partner_session(self, device_id: str) -> dict | None:
+        """Newest FINISHED session for the linked partner account."""
+        if not self.has_partner_for_device(device_id):
+            return None
+        return util.latest_completed_session(
+            util.nested_mapping(self.data, "partner_insights", "data")
+        )
+
+    def session_active(self, session: dict | None) -> bool:
+        """Whether the supplied session is currently running."""
+        return util.session_in_progress(session)
 
     def known_users(self) -> list[dict[str, str]]:
         """Every Orion user visible to this entry, for the alias options form.
@@ -711,6 +734,26 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
     def firmware(self, device_id: str) -> dict | None:
         """Return device firmware details from the live snapshot."""
         return live_state.firmware(self.live_devices.get(device_id))
+
+    def device_online(self, device_id: str) -> bool | None:
+        """Server-reported reachability for this device."""
+        return live_state.device_online(self.live_devices.get(device_id))
+
+    def device_timeline(self, device_id: str) -> list:
+        """Today's scheduled actions, as pushed over the WebSocket.
+
+        Only `live_device.update` carries this, never the snapshot, so it
+        is empty until the first update frame arrives after a reconnect.
+        """
+        timelines = util.nested_mapping(self.data, "ws_timelines")
+        entries = timelines.get(device_id)
+        return entries if isinstance(entries, list) else []
+
+    def next_scheduled_action(self, device_id: str, user_id: str) -> dict | None:
+        """The soonest upcoming timeline entry for one person."""
+        return util.next_timeline_entry(
+            self.device_timeline(device_id), user_id, dt_util.utcnow()
+        )
 
     def pending_update_available(self, device_id: str) -> bool | None:
         """Return whether a firmware update is being advertised."""

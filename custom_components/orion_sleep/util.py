@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import re
+from datetime import datetime as _dt_datetime
 from datetime import time as _dt_time
+from datetime import timezone as _dt_timezone
 
 _UUID_RE = re.compile(
     r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
@@ -181,6 +183,40 @@ def latest_session(insights_data: object) -> dict | None:
             continue
         for session in reversed(sessions):
             if isinstance(session, dict):
+                return session
+    return None
+
+
+def session_in_progress(session: object) -> bool:
+    """Whether a session is still running.
+
+    Only an explicit ``True`` counts. A missing or malformed flag is read
+    as finished, because the alternative is hiding a completed night
+    behind a field the vendor forgot to send.
+    """
+    return isinstance(session, dict) and session.get("is_in_progress") is True
+
+
+def latest_completed_session(insights_data: object) -> dict | None:
+    """Return the newest session that has actually finished.
+
+    Deliberately NOT ``latest_session`` plus a filter on ``end_time``.
+    Measured 2026-07-26: the vendor populates ``end_time`` while
+    ``is_in_progress`` is still ``True``, so an end-time check would
+    happily report a night that is currently being slept as complete.
+    ``is_in_progress`` is the only trustworthy discriminator.
+    """
+    if not isinstance(insights_data, dict):
+        return None
+    for date_key in sorted(insights_data, reverse=True):
+        day = insights_data.get(date_key)
+        if not isinstance(day, dict):
+            continue
+        sessions = day.get("sessions")
+        if not isinstance(sessions, list):
+            continue
+        for session in reversed(sessions):
+            if isinstance(session, dict) and not session_in_progress(session):
                 return session
     return None
 
@@ -482,3 +518,93 @@ def auth_session_from_response(value: object, *, allow_top_level: bool = False) 
     if allow_top_level and "access_token" in value:
         return value
     return None
+
+
+# Timeline labels the device emits on `live_device.update`. Measured values
+# only. An unrecognized label is passed through rather than dropped, because
+# a new vendor action is worth surfacing even if we cannot name it nicely.
+TIMELINE_LABELS: dict[str, str] = {
+    "bedtime": "Bedtime",
+    "phase_1": "Asleep Phase 1",
+    "phase_2": "Asleep Phase 2",
+    "wake_up": "Wake Up",
+    "turn_off": "Turn Off",
+}
+
+
+def timeline_label(label: object) -> str | None:
+    """Human name for a timeline entry label."""
+    if not isinstance(label, str) or not label:
+        return None
+    return TIMELINE_LABELS.get(label, label.replace("_", " ").title())
+
+
+def parse_iso_datetime(value: object) -> _dt_datetime | None:
+    """Parse an ISO 8601 timestamp into an aware datetime, or None.
+
+    The vendor sends UTC with a trailing `Z`. A naive result is treated as
+    UTC rather than local time, because assuming local would silently shift
+    every scheduled action by the machine's offset.
+    """
+    if not isinstance(value, str) or not value:
+        return None
+    text = value.strip()
+    if text.endswith(("z", "Z")):
+        text = f"{text[:-1]}+00:00"
+    try:
+        parsed = _dt_datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=_dt_timezone.utc)
+    return parsed
+
+
+def next_timeline_entry(timeline: object, user_id: object, now: object) -> dict | None:
+    """The soonest timeline entry for one user that has not happened yet.
+
+    Returns None when the timeline is absent, malformed, belongs to someone
+    else, or holds nothing in the future. The timeline arrives only on
+    `live_device.update`, never on the snapshot, so an empty result shortly
+    after a reconnect is normal rather than an error.
+    """
+    if not isinstance(timeline, list) or not isinstance(user_id, str) or not user_id:
+        return None
+    if not isinstance(now, _dt_datetime):
+        return None
+
+    upcoming: list[tuple[_dt_datetime, dict]] = []
+    for entry in timeline:
+        if not isinstance(entry, dict) or entry.get("user_id") != user_id:
+            continue
+        scheduled = parse_iso_datetime(entry.get("scheduled_time"))
+        if scheduled is None or scheduled <= now:
+            continue
+        upcoming.append((scheduled, entry))
+
+    if not upcoming:
+        return None
+    return min(upcoming, key=lambda pair: pair[0])[1]
+
+
+def timeline_target_temps(entry: object) -> dict[str, float]:
+    """Per-zone target temperatures carried by a timeline entry's action."""
+    if not isinstance(entry, dict):
+        return {}
+    action = entry.get("action")
+    if not isinstance(action, dict):
+        return {}
+    zones = action.get("zones")
+    if not isinstance(zones, list):
+        return {}
+
+    targets: dict[str, float] = {}
+    for zone in zones:
+        if not isinstance(zone, dict):
+            continue
+        zone_id = zone.get("id")
+        temp = zone.get("temp")
+        if isinstance(zone_id, str) and zone_id and isinstance(temp, (int, float)):
+            if not isinstance(temp, bool):
+                targets[zone_id] = float(temp)
+    return targets

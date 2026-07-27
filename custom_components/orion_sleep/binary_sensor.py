@@ -41,9 +41,12 @@ async def async_setup_entry(
         if not device_id:
             continue
         entities.append(OrionSessionActiveBinarySensor(coordinator, device_id))
+        if coordinator.has_partner_for_device(device_id):
+            entities.append(OrionPartnerSessionActiveBinarySensor(coordinator, device_id))
         for sensor_name in _TOPPER_SENSORS:
             entities.append(OrionSensorOnBedBinarySensor(coordinator, device_id, sensor_name))
         entities.append(OrionFirmwareUpdateBinarySensor(coordinator, device_id))
+        entities.append(OrionDeviceOnlineBinarySensor(coordinator, device_id))
         entities.append(OrionSafetyProblemBinarySensor(coordinator, device_id))
         for user_id in coordinator.schedule_user_ids():
             entities.append(
@@ -65,6 +68,9 @@ class OrionSessionActiveBinarySensor(OrionBaseEntity, BinarySensorEntity):
     to provide "Asleep / Not asleep" state labels.
     """
 
+    # translation_key is retained even though _attr_name overrides the
+    # displayed name: it is still what resolves the "Asleep / Not asleep"
+    # STATE labels. Dropping it would silently fall back to On / Off.
     _attr_translation_key = "sleep_session_active"
     _attr_icon = "mdi:bed"
 
@@ -75,14 +81,41 @@ class OrionSessionActiveBinarySensor(OrionBaseEntity, BinarySensorEntity):
     ) -> None:
         super().__init__(coordinator, device_id)
         self._attr_unique_id = f"{device_id}_session_active"
+        # Named for the account holder, matching the insight sensors.
+        # This tracks one person's session, not the bed as a whole.
+        self._attr_name = f"{coordinator.primary_name()} Sleep Session"
+
+    def _session(self) -> dict | None:
+        return self.coordinator.get_latest_session()
 
     @property
     def is_on(self) -> bool | None:
         """Return True if a sleep session is currently active."""
-        session = self.coordinator.get_latest_session()
-        if not session:
-            return False
-        return session.get("is_in_progress", False)
+        return self.coordinator.session_active(self._session())
+
+
+class OrionPartnerSessionActiveBinarySensor(OrionSessionActiveBinarySensor):
+    """Whether the linked partner account is mid-session."""
+
+    def __init__(
+        self,
+        coordinator: OrionDataUpdateCoordinator,
+        device_id: str,
+    ) -> None:
+        super().__init__(coordinator, device_id)
+        self._attr_unique_id = f"{device_id}_partner_session_active"
+        self._attr_name = f"{coordinator.partner_name()} Sleep Session"
+
+    def _session(self) -> dict | None:
+        return self.coordinator.get_latest_partner_session(self._device_id)
+
+    @property
+    def available(self) -> bool:
+        return (
+            super().available
+            and self.coordinator.has_partner_for_device(self._device_id)
+            and self.coordinator.partner_mapping_valid
+        )
 
 
 class OrionSensorOnBedBinarySensor(OrionBaseEntity, BinarySensorEntity):
@@ -251,3 +284,29 @@ class OrionSafetyProblemBinarySensor(OrionBaseEntity, BinarySensorEntity):
             "error_descriptions": safety.get("error_descriptions"),
         }
         return {key: value for key, value in attrs.items() if value} or None
+
+
+class OrionDeviceOnlineBinarySensor(OrionBaseEntity, BinarySensorEntity):
+    """Whether the server considers the topper reachable.
+
+    Distinct from the Live Connection sensor, which reports OUR WebSocket
+    link to Orion. This is the server's own view of the hardware, so the
+    two can legitimately disagree: our socket can drop while the bed is
+    fine, and the bed can drop while our socket is healthy.
+    """
+
+    _attr_device_class = BinarySensorDeviceClass.CONNECTIVITY
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_translation_key = "device_online"
+
+    def __init__(self, coordinator: OrionDataUpdateCoordinator, device_id: str) -> None:
+        super().__init__(coordinator, device_id)
+        self._attr_unique_id = f"{device_id}_device_online"
+
+    @property
+    def available(self) -> bool:
+        return super().available and self.coordinator.device_online(self._device_id) is not None
+
+    @property
+    def is_on(self) -> bool | None:
+        return self.coordinator.device_online(self._device_id)

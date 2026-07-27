@@ -14,7 +14,7 @@ from homeassistant.components.sensor import (
     SensorStateClass,
 )
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import PERCENTAGE, UnitOfTemperature
+from homeassistant.const import PERCENTAGE, UnitOfTemperature, UnitOfTime
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -41,6 +41,15 @@ _INSIGHT_DISPLAY_NAMES = {
     "hrv": "HRV",
     "body_movement_rate": "Body Movement Rate",
     "restless_time": "Restless Time",
+    # Numeric counterparts to the human-readable duration sensors above.
+    # Those emit strings like "7h 53m" and so can carry no state_class,
+    # which means no long-term statistics and nothing to graph. These do.
+    "total_sleep_minutes": "Total Sleep Minutes",
+    "deep_sleep_minutes": "Deep Sleep Minutes",
+    "rem_sleep_minutes": "REM Sleep Minutes",
+    "light_sleep_minutes": "Light Sleep Minutes",
+    "awake_minutes": "Awake Minutes",
+    "last_session_end": "Last Session End",
 }
 
 
@@ -91,6 +100,28 @@ def _minutes_to_hm(minutes: float | int | None) -> str | None:
     if h > 0:
         return f"{h}h {m}m"
     return f"{m}m"
+
+
+def _minutes_value(minutes: Any) -> float | None:
+    """Return a sleep-stage duration as a plain number of minutes.
+
+    Rejects bool explicitly: it subclasses int, so ``True`` would
+    otherwise be recorded as a one-minute sleep stage.
+    """
+    if isinstance(minutes, bool) or not isinstance(minutes, (int, float)):
+        return None
+    return float(minutes)
+
+
+def _session_end(session: dict | None) -> Any:
+    """Timezone-aware end time of a session, or None.
+
+    Only meaningful on a session already known to be finished. The
+    vendor fills end_time in while a night is still running.
+    """
+    if not isinstance(session, dict):
+        return None
+    return util.parse_iso_datetime(session.get("end_time"))
 
 
 def _seconds_to_ms(seconds: float | int | None) -> str | None:
@@ -151,6 +182,9 @@ class OrionSensorEntityDescription(SensorEntityDescription):
     value_fn: Callable[[dict | None], Any]
     extra_attrs_fn: Callable[[dict | None], dict[str, Any]] | None = None
     icon: str | None = None
+    # Read from the newest FINISHED session rather than the newest one.
+    # Only set this where an in-progress night would give a wrong answer.
+    completed_only: bool = False
 
 
 # Duration sensors: we intentionally do NOT set device_class=DURATION.
@@ -261,6 +295,67 @@ INSIGHT_SENSOR_DESCRIPTIONS: tuple[OrionSensorEntityDescription, ...] = (
         # Format as human-friendly string like the app (3m 36s)
         value_fn=lambda session: _seconds_to_ms(_get_movement(session).get("total_seconds")),
     ),
+    # ── Numeric sleep-stage durations ──────────────────────────────────
+    #
+    # The five string sensors above are the app-facing presentation and
+    # stay for compatibility. These carry the same underlying values as
+    # plain numbers so HA can keep long-term statistics and graph them.
+    #
+    # No device_class. DURATION would add minute/hour conversion nobody
+    # asked for, and this codebase already avoids it on the duration
+    # sensors. state_class=MEASUREMENT is deliberate: these are
+    # independent per-night measurements, NOT accumulations. Using
+    # total_increasing would make HA read every shorter night as a meter
+    # reset and add the whole value again, permanently corrupting the
+    # stored sum.
+    #
+    # Field names measured on the wire 2026-07-26 against a live
+    # in-progress session. They had been asserted upstream since April
+    # with no capture behind them.
+    OrionSensorEntityDescription(
+        key="total_sleep_minutes",
+        native_unit_of_measurement=UnitOfTime.MINUTES,
+        state_class=SensorStateClass.MEASUREMENT,
+        icon="mdi:sleep",
+        value_fn=lambda session: _minutes_value(_get_sleep_summary(session).get("time_asleep")),
+    ),
+    OrionSensorEntityDescription(
+        key="deep_sleep_minutes",
+        native_unit_of_measurement=UnitOfTime.MINUTES,
+        state_class=SensorStateClass.MEASUREMENT,
+        icon="mdi:power-sleep",
+        value_fn=lambda session: _minutes_value(_get_sleep_summary(session).get("deep_sleep")),
+    ),
+    OrionSensorEntityDescription(
+        key="rem_sleep_minutes",
+        native_unit_of_measurement=UnitOfTime.MINUTES,
+        state_class=SensorStateClass.MEASUREMENT,
+        icon="mdi:eye-refresh-outline",
+        value_fn=lambda session: _minutes_value(_get_sleep_summary(session).get("rem_sleep")),
+    ),
+    OrionSensorEntityDescription(
+        key="light_sleep_minutes",
+        native_unit_of_measurement=UnitOfTime.MINUTES,
+        state_class=SensorStateClass.MEASUREMENT,
+        icon="mdi:weather-night",
+        value_fn=lambda session: _minutes_value(_get_sleep_summary(session).get("light_sleep")),
+    ),
+    OrionSensorEntityDescription(
+        key="awake_minutes",
+        native_unit_of_measurement=UnitOfTime.MINUTES,
+        state_class=SensorStateClass.MEASUREMENT,
+        icon="mdi:eye-outline",
+        value_fn=lambda session: _minutes_value(_get_sleep_summary(session).get("awake_time")),
+    ),
+    # When the last finished night actually ended. state_class is left
+    # unset because HA rejects one on a non-numeric sensor.
+    OrionSensorEntityDescription(
+        key="last_session_end",
+        device_class=SensorDeviceClass.TIMESTAMP,
+        icon="mdi:clock-check-outline",
+        completed_only=True,
+        value_fn=_session_end,
+    ),
 )
 
 # Schedule sensors — derived from today_sleep_schedule, not sessions.
@@ -362,6 +457,8 @@ async def async_setup_entry(
                 entities.append(
                     OrionScheduleSensorEntity(coordinator, device_id, description, user_id)
                 )
+        for user_id in coordinator.schedule_user_ids():
+            entities.append(OrionNextScheduledActionSensor(coordinator, device_id, user_id))
         entities.append(OrionCurrentTempOffsetSensor(coordinator, device_id))
         entities.append(OrionWebSocketStateSensor(coordinator, device_id))
         for zone_id in coordinator.device_zone_ids(device_id):
@@ -404,6 +501,8 @@ class OrionSensorEntity(OrionBaseEntity, SensorEntity):
         self._attr_name = f"{coordinator.primary_name()} {_insight_label(description.key)}"
 
     def _session(self) -> dict | None:
+        if self.entity_description.completed_only:
+            return self.coordinator.get_latest_completed_session()
         return self.coordinator.get_latest_session()
 
     def _score(self) -> float | None:
@@ -457,6 +556,8 @@ class OrionPartnerInsightSensor(OrionSensorEntity):
         self._attr_name = f"{coordinator.partner_name()} {_insight_label(description.key)}"
 
     def _session(self) -> dict | None:
+        if self.entity_description.completed_only:
+            return self.coordinator.get_latest_completed_partner_session(self._device_id)
         return self.coordinator.get_latest_partner_session(self._device_id)
 
     def _score(self) -> float | None:
@@ -888,3 +989,69 @@ class OrionWifiSignalSensor(OrionBaseEntity, SensorEntity):
             "last_seen": network.get("last_seen"),
         }
         return {key: value for key, value in attrs.items() if value is not None} or None
+
+
+class OrionNextScheduledActionSensor(OrionBaseEntity, SensorEntity):
+    """When this person's bed next changes temperature on its own.
+
+    Built from the `timeline` array the device pushes on
+    `live_device.update`. That data was already being captured and read by
+    nothing. It is materialized server-side from the sleep schedule, so it
+    reflects overrides and smart-temperature adjustments that the raw
+    schedule rows do not.
+
+    `state_class` is deliberately unset: Home Assistant rejects a state
+    class on a non-numeric sensor, and a timestamp is not a measurement.
+    """
+
+    _attr_device_class = SensorDeviceClass.TIMESTAMP
+    _attr_icon = "mdi:clock-fast"
+
+    def __init__(
+        self,
+        coordinator: OrionDataUpdateCoordinator,
+        device_id: str,
+        user_id: str,
+    ) -> None:
+        super().__init__(coordinator, device_id)
+        self._user_id = user_id
+        self._attr_unique_id = util.schedule_unique_id(
+            device_id, "next_scheduled_action", user_id
+        )
+        self._attr_translation_key = None
+        self._attr_name = (
+            f"{coordinator.display_name_for_user(user_id)} Next Scheduled Action"
+        )
+
+    @property
+    def available(self) -> bool:
+        """Unavailable until an update frame carries a future action.
+
+        The snapshot never includes a timeline, so this stays unavailable
+        for the first couple of seconds after a reconnect, and again after
+        the last scheduled action of the day has passed.
+        """
+        return super().available and self._entry() is not None
+
+    def _entry(self) -> dict | None:
+        return self.coordinator.next_scheduled_action(self._device_id, self._user_id)
+
+    @property
+    def native_value(self):
+        entry = self._entry()
+        if entry is None:
+            return None
+        return util.parse_iso_datetime(entry.get("scheduled_time"))
+
+    @property
+    def extra_state_attributes(self) -> dict | None:
+        entry = self._entry()
+        if entry is None:
+            return None
+        attrs: dict = {}
+        label = util.timeline_label(entry.get("label"))
+        if label:
+            attrs["action"] = label
+        for zone_id, temp in util.timeline_target_temps(entry).items():
+            attrs[f"{self.coordinator.zone_label(self._device_id, zone_id)} target"] = temp
+        return attrs or None
