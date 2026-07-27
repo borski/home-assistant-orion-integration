@@ -235,7 +235,6 @@ Entities read from coordinator:
 
 | Sensor | \<zone\> Measured Temperature | `_{zoneId}_measured_temp` | `status.zones[].temp`. Duplicates the climate entity's `current_temperature` on purpose: climate attributes are not retained as long-term statistics, a `sensor` with a `state_class` is. |
 | Sensor | \<zone\> Target Temperature | `_{zoneId}_target_temp` | `zones[].temp`, the LIVE setpoint. Distinct from `today_sleep_schedule.*_temp`, which is schedule intent and diverges the moment a zone is nudged by hand. |
-| Sensor | \<person\> Next Scheduled Action | `_user_{userId}_next_scheduled_action` | Timestamp of the next temperature change the bed will make on its own, with the action name and per-zone targets as attrs. Built from the WS `timeline`, which is materialized server-side and so reflects overrides and smart temperature. **The server sends `timeline: []` even mid-schedule, measured 2026-07-27 at 01:20 local across five consecutive `update` frames, so this sensor reads unavailable.** Whether the array is ever non-empty is unconfirmed. |
 | Binary Sensor (diag) | Device Online | `_device_online` | `status.online`, the server's view of the topper. Distinct from Live Connection, which is OUR socket to Orion. The two can legitimately disagree in both directions. |
 | Update | Firmware | `_firmware_update` | `installed_version` from `status.firmware.cb`, `latest_version` from `status.pending_update.is_available`. Supports INSTALL and PROGRESS. Replaced the read-only Firmware Update Available binary sensor. See the caveats below. |
 | Number | LED Brightness | `_led_brightness` | 0-100 write via `PUT /v1/devices/{serial_number}/live`. Debounced with an optimistic local write and a post-write lock, mirroring the vendor app. |
@@ -247,10 +246,10 @@ Entities read from coordinator:
 | Button | Swap Bed Sides | `_action_swap_sides` | `POST /v1/sleep-configurations/user-swap`. Enabled by default: pressing it again reverses it, so a misfire is cheap. |
 | Button (disabled) | Split Zones | `_action_split_zones` | `POST /v1/sleep-configurations/user-split`. Disabled by default because **nothing in the live payload reports split state**, so a press has no observable result and no way to confirm what it did. |
 
-**A two-zone device with no partner linked exposes 75 base entities. A linked partner adds 39 more, for 114.**
+**A two-zone device with no partner linked exposes 74 base entities. A linked partner adds 38 more, for 112.**
 
 - 2 climate entities, one per zone.
-- 37 sensors: 11 insights, 4 apnea, 5 schedule temperatures and duration, current offset, live connection, 6 topper sensor readings, 2 measured and 2 target zone temperatures, 2 cooling countdowns, LED brightness, firmware, and Wi-Fi signal.
+- 36 sensors: 11 insights, 4 apnea, 5 schedule temperatures and duration, current offset, live connection, 6 topper sensor readings, 2 measured and 2 target zone temperatures, 2 cooling countdowns, LED brightness, firmware, and Wi-Fi signal.
 - 7 numbers: 4 schedule-phase temperature offsets, LED brightness, and 2 rapid-cool durations.
 - 2 time entities: bedtime and wake up time.
 - 9 switches: runtime power, Away Mode, quiet mode, 2 rapid cool, and 4 schedule flags. Away Mode is omitted for accounts with multiple devices because the API action is account-global.
@@ -592,6 +591,51 @@ foreign ID, but "presumably" is not a good enough basis for the one call that
 cannot be taken back.
 
 ## Verification Log
+
+### 2026-07-27 — Session edit is real, and reversible
+
+`PATCH /v1/sleep-sessions/{id}` is MEASURED, including a full
+save-and-restore.
+
+The body shape came from the server rather than from bytecode. A PATCH
+with an empty body returns 400 carrying a Zod error naming both required
+fields, `fallasleep_timestamp` and `wakeup_timestamp`. That is an exact
+contract, obtained without writing anything. A wrong key is a harmless
+no-op: an attempt with `end_time` returned 400 and changed nothing.
+
+Editing is not relabelling. The server reanalyses the night and rewrites
+twelve fields: apnea, breath_rate, heart_rate, hrv, movement,
+sleep_summary, temperature, temperature_control, temperature_setpoint,
+start_time, last_updated_at, user_fallasleep_timestamp. `start_time`
+tracks the fall-asleep value with a measured twenty-minute lead.
+
+Restoring the original pair restored every derived metric byte for byte,
+checked field by field: time_asleep 233, stages 18.5/77.5/135.5/0,
+confidence 0.8, apnea 0.3/60/0/60. The earlier assumption that
+recomputation would be irreversible was wrong, and is now disproven
+rather than merely doubted.
+
+Reanalysis takes longer than a default read timeout. The client carries
+its own 180 second timeout for this call.
+
+### 2026-07-27 — `timeline` is empty even mid-schedule, sensors deleted
+
+Two live tests. Bedtime moved to 19 minutes out, then to 7 minutes out,
+waiting 75 and 105 seconds. `sensor.sleepy_*_next_scheduled_action` stayed
+unavailable both times.
+
+The control is what makes this decisive: `sensor.sleepy_live_connection`
+reported `seconds_since_last_message: 0.0` throughout, so frames were
+arriving and the socket was healthy. The server simply never sends a
+timeline. Schedule restored afterwards, setpoints untouched, nothing
+fired.
+
+Both sensors have been removed. A permanently unavailable entity teaches
+the user that unavailable is normal, which is worse than not shipping it.
+The raw `ws_timelines` capture is kept, because an empty array is itself
+the finding and diagnostics should show it.
+
+
 
 Live-request confirmations, newest first. A claim only earns "measured" by appearing here.
 

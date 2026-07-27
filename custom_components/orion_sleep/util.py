@@ -520,25 +520,6 @@ def auth_session_from_response(value: object, *, allow_top_level: bool = False) 
     return None
 
 
-# Timeline labels the device emits on `live_device.update`. Measured values
-# only. An unrecognized label is passed through rather than dropped, because
-# a new vendor action is worth surfacing even if we cannot name it nicely.
-TIMELINE_LABELS: dict[str, str] = {
-    "bedtime": "Bedtime",
-    "phase_1": "Asleep Phase 1",
-    "phase_2": "Asleep Phase 2",
-    "wake_up": "Wake Up",
-    "turn_off": "Turn Off",
-}
-
-
-def timeline_label(label: object) -> str | None:
-    """Human name for a timeline entry label."""
-    if not isinstance(label, str) or not label:
-        return None
-    return TIMELINE_LABELS.get(label, label.replace("_", " ").title())
-
-
 def parse_iso_datetime(value: object) -> _dt_datetime | None:
     """Parse an ISO 8601 timestamp into an aware datetime, or None.
 
@@ -558,56 +539,6 @@ def parse_iso_datetime(value: object) -> _dt_datetime | None:
     if parsed.tzinfo is None:
         return parsed.replace(tzinfo=_dt_timezone.utc)
     return parsed
-
-
-def next_timeline_entry(timeline: object, user_id: object, now: object) -> dict | None:
-    """The soonest timeline entry for one user that has not happened yet.
-
-    Returns None when the timeline is absent, malformed, belongs to someone
-    else, or holds nothing in the future. The timeline arrives only on
-    `live_device.update`, never on the snapshot, so an empty result shortly
-    after a reconnect is normal rather than an error.
-    """
-    if not isinstance(timeline, list) or not isinstance(user_id, str) or not user_id:
-        return None
-    if not isinstance(now, _dt_datetime):
-        return None
-
-    upcoming: list[tuple[_dt_datetime, dict]] = []
-    for entry in timeline:
-        if not isinstance(entry, dict) or entry.get("user_id") != user_id:
-            continue
-        scheduled = parse_iso_datetime(entry.get("scheduled_time"))
-        if scheduled is None or scheduled <= now:
-            continue
-        upcoming.append((scheduled, entry))
-
-    if not upcoming:
-        return None
-    return min(upcoming, key=lambda pair: pair[0])[1]
-
-
-def timeline_target_temps(entry: object) -> dict[str, float]:
-    """Per-zone target temperatures carried by a timeline entry's action."""
-    if not isinstance(entry, dict):
-        return {}
-    action = entry.get("action")
-    if not isinstance(action, dict):
-        return {}
-    zones = action.get("zones")
-    if not isinstance(zones, list):
-        return {}
-
-    targets: dict[str, float] = {}
-    for zone in zones:
-        if not isinstance(zone, dict):
-            continue
-        zone_id = zone.get("id")
-        temp = zone.get("temp")
-        if isinstance(zone_id, str) and zone_id and isinstance(temp, (int, float)):
-            if not isinstance(temp, bool):
-                targets[zone_id] = float(temp)
-    return targets
 
 
 def clamp_cooling_minutes(value: object, default: int, low: int, high: int) -> int:
@@ -788,3 +719,40 @@ def confidence_percent(value: object) -> float | None:
     if value < 0 or value > 1:
         return None
     return value * 100
+
+
+# ── Session edits ─────────────────────────────────────────────────────
+#
+# PATCH /v1/sleep-sessions/{id} takes exactly two fields and requires
+# both. The server told us so itself: a PATCH with an empty body returns
+# 400 with a Zod error naming `fallasleep_timestamp` and
+# `wakeup_timestamp` as required. A wrong key is a harmless no-op, but an
+# incomplete pair is a rejection, so both always travel together.
+
+SESSION_EDIT_WIRE_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
+
+
+def session_edit_window(fell_asleep: object, woke_up: object) -> tuple[str, str]:
+    """Validate and format the two timestamps a session edit requires.
+
+    Both must be timezone-aware. A naive datetime is refused rather than
+    assumed to be local, because guessing wrong silently moves a night by
+    hours and the server recomputes every derived metric from it. The
+    caller knows the user's timezone. This function does not.
+
+    A window that ends before it starts is refused too. The server might
+    well accept it, but nothing good comes of asking.
+    """
+    for label, value in (("fell_asleep", fell_asleep), ("woke_up", woke_up)):
+        if not isinstance(value, _dt_datetime):
+            raise ValueError(f"session_edit_window: {label} must be a datetime")
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError(f"session_edit_window: {label} must carry a timezone")
+    start = fell_asleep.astimezone(_dt_timezone.utc)
+    end = woke_up.astimezone(_dt_timezone.utc)
+    if end <= start:
+        raise ValueError("session_edit_window: woke_up must be after fell_asleep")
+    return (
+        start.strftime(SESSION_EDIT_WIRE_FORMAT),
+        end.strftime(SESSION_EDIT_WIRE_FORMAT),
+    )

@@ -26,6 +26,10 @@ from .util import (
 # APP-DERIVED from Orion Android v2.4.1 bytecode. `water_fill` is a real
 # fifth key (values `pour_water` and `unknown`) but drives a physical
 # water-fill workflow, so it is deliberately not exposed as an entity.
+# Editing a session makes the server reanalyse the whole night. Measured
+# above thirty seconds, so the default read timeout is not enough.
+SESSION_EDIT_TIMEOUT_SECONDS = 180
+
 _LIVE_SETTING_FIELDS = frozenset({"led_brightness", "quiet_mode"})
 
 _LOGGER = logging.getLogger(__name__)
@@ -94,14 +98,31 @@ class OrionApiClient:
         with_auth: bool = True,
         json_data: dict | None = None,
         params: dict | None = None,
+        timeout_seconds: float | None = None,
     ) -> Any:
-        """Make an HTTP request and return parsed JSON."""
+        """Make an HTTP request and return parsed JSON.
+
+        `timeout_seconds` exists for the one route that does real work
+        before answering. Editing a session makes the server recompute a
+        whole night, which has been measured taking longer than the
+        default read timeout allows.
+        """
         url = self._url(path)
         headers = self._headers(with_auth=with_auth)
+        timeout = (
+            aiohttp.ClientTimeout(total=timeout_seconds)
+            if timeout_seconds is not None
+            else None
+        )
 
         try:
             async with self._session.request(
-                method, url, headers=headers, json=json_data, params=params
+                method,
+                url,
+                headers=headers,
+                json=json_data,
+                params=params,
+                timeout=timeout,
             ) as resp:
                 if resp.status == 401:
                     raise OrionAuthError(
@@ -698,6 +719,56 @@ class OrionApiClient:
             "PUT",
             f"/v1/sleep-sessions/{session_id}/confirm",
             json_data={"user_ids": list(user_ids)},
+        )
+
+    async def edit_sleep_session(
+        self,
+        session_id: str,
+        fallasleep_timestamp: str,
+        wakeup_timestamp: str,
+    ) -> dict:
+        """PATCH /v1/sleep-sessions/{id} — move a session's boundaries.
+
+        Confidence: MEASURED 2026-07-27, including a full save-and-restore.
+
+        The body shape came from the server rather than from bytecode.
+        A PATCH with an empty body returns 400 carrying a Zod error that
+        names both required fields, so the contract is exact rather than
+        inferred. A wrong key is a harmless no-op: an attempt with
+        `end_time` returned 400 and changed nothing.
+
+        **This is not a relabelling.** The server reanalyses the night
+        and rewrites twelve fields: apnea, breath_rate, heart_rate, hrv,
+        movement, sleep_summary, temperature, temperature_control,
+        temperature_setpoint, start_time, last_updated_at, and
+        user_fallasleep_timestamp. `start_time` tracks the fall-asleep
+        value with a measured twenty-minute lead.
+
+        It is reversible. Restoring the original pair restored every
+        derived metric byte for byte, verified field by field. That is
+        measured, not assumed.
+
+        The reanalysis takes longer than a default read timeout, so this
+        call carries its own.
+        """
+        if not isinstance(session_id, str) or not session_id.strip():
+            raise ValueError("edit_sleep_session requires a session_id")
+        for label, value in (
+            ("fallasleep_timestamp", fallasleep_timestamp),
+            ("wakeup_timestamp", wakeup_timestamp),
+        ):
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"edit_sleep_session requires {label}")
+
+        await self.ensure_valid_token()
+        return await self._request(
+            "PATCH",
+            f"/v1/sleep-sessions/{session_id}",
+            json_data={
+                "fallasleep_timestamp": fallasleep_timestamp,
+                "wakeup_timestamp": wakeup_timestamp,
+            },
+            timeout_seconds=SESSION_EDIT_TIMEOUT_SECONDS,
         )
 
     async def delete_sleep_session(self, session_id: str, reason: str) -> dict:

@@ -151,3 +151,35 @@ confirm_sleep_session:
               label: This person
             - value: both
               label: Both sleepers
+
+edit_sleep_session:
+  name: Edit sleep session
+  description: >-
+    Move a recorded session's start and end. The bed reanalyses the whole
+    night afterwards, so sleep stages, heart rate, breathing and apnea are
+    recomputed rather than simply relabelled. Reversible: run it again with
+    the original times to restore the previous numbers exactly. Target one
+    of the sleeper's insight sensors to say whose session this is.
+  target:
+    entity:
+      integration: orion_sleep
+      domain: sensor
+  fields:
+    session_id:
+      name: Session ID
+      description: From orion_sleep.list_sleep_sessions.
+      required: true
+      selector:
+        text:
+    fell_asleep:
+      name: Fell asleep
+      description: When sleep actually started. Local time.
+      required: true
+      selector:
+        datetime:
+    woke_up:
+      name: Woke up
+      description: When sleep actually ended. Local time.
+      required: true
+      selector:
+        datetime:

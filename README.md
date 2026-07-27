@@ -101,6 +101,8 @@ This changes friendly names only. Entity IDs, unique IDs, history, statistics, a
 | `orion_sleep.stop_cooling` | a `climate` entity | Cancel cooling early. The bed restores the setpoint it interrupted. |
 | `orion_sleep.list_sleep_sessions` | any of that person's insight sensors | List recent sessions with their IDs, newest first. Read-only. Returns response data. |
 | `orion_sleep.delete_sleep_session` | the same person's sensor | Permanently delete one session. **No undo.** Requires an explicit ID, a reason, and `confirm: true`. |
+| `orion_sleep.confirm_sleep_session` | the same person's sensor | Tell the bed whose night it was. `claim: me` or `claim: both`. |
+| `orion_sleep.edit_sleep_session` | the same person's sensor | Correct when sleep actually started and ended. The bed reanalyses the night. Reversible. |
 
 Point the override service at someone's Bedtime or Wake Up Time entity and it figures out whose schedule to write. You never handle a raw Orion user ID.
 
@@ -112,6 +114,29 @@ data:
   bedtime: "23:45:00"
   bedtime_temp_offset: -4
 ```
+
+### Correcting a night the bed got wrong
+
+Deleting is the blunt answer. If the sleep was real but the boundaries
+are not, move them instead:
+
+```yaml
+action: orion_sleep.edit_sleep_session
+data:
+  entity_id: sensor.sleepy_borski_sleep_score
+  session_id: 0584dd36-e364-477b-a3f3-20964e26c700
+  fell_asleep: "2026-07-27 03:30:00"
+  woke_up: "2026-07-27 07:23:00"
+```
+
+Times are local. Both are required, because the API rejects a partial
+pair.
+
+This recomputes rather than relabels. Sleep stages, heart rate,
+breathing and apnea are all derived again from the new window, so the
+numbers afterwards are genuinely different numbers. It is reversible:
+run it again with the original times and every metric returns exactly.
+Expect the call to take up to a minute while the server works.
 
 ### Removing a session the bed invented
 
@@ -159,7 +184,7 @@ There is no option to disable it.
 
 ## Entities
 
-One Home Assistant device per paired topper. A two-zone bed with no partner linked exposes **75 entities**. Linking a partner adds 35 more.
+One Home Assistant device per paired topper. A two-zone bed with no partner linked exposes **74 entities**. Linking a partner adds 35 more.
 
 Names below use `<person>` where the display alias is substituted, and `<zone>` for a bed side.
 

@@ -838,15 +838,13 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
         Only `live_device.update` carries this, never the snapshot, so it
         is empty until the first update frame arrives after a reconnect.
         """
+        # Measured 2026-07-27: the server sends `timeline: []` even minutes
+        # before a scheduled transition, with the socket confirmed live.
+        # Nothing consumes this any more. It is kept because an empty
+        # array is itself the finding, and diagnostics should show it.
         timelines = util.nested_mapping(self.data, "ws_timelines")
         entries = timelines.get(device_id)
         return entries if isinstance(entries, list) else []
-
-    def next_scheduled_action(self, device_id: str, user_id: str) -> dict | None:
-        """The soonest upcoming timeline entry for one person."""
-        return util.next_timeline_entry(
-            self.device_timeline(device_id), user_id, dt_util.utcnow()
-        )
 
     def pending_update_available(self, device_id: str) -> bool | None:
         """Return whether a firmware update is being advertised."""

@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 import voluptuous as vol
@@ -24,8 +25,10 @@ from homeassistant.helpers.entity_platform import (
     AddEntitiesCallback,
     async_get_current_platform,
 )
+from homeassistant.util import dt as dt_util
 
 from . import util
+from .api import OrionApiError
 from .coordinator import OrionDataUpdateCoordinator
 from .entity import OrionBaseEntity
 
@@ -38,6 +41,7 @@ _LOGGER = logging.getLogger(__name__)
 SERVICE_LIST_SLEEP_SESSIONS = "list_sleep_sessions"
 SERVICE_DELETE_SLEEP_SESSION = "delete_sleep_session"
 SERVICE_CONFIRM_SLEEP_SESSION = "confirm_sleep_session"
+SERVICE_EDIT_SLEEP_SESSION = "edit_sleep_session"
 
 _INSIGHT_DISPLAY_NAMES = {
     "sleep_score": "Sleep Score",
@@ -220,6 +224,8 @@ class OrionSensorEntityDescription(SensorEntityDescription):
     # Read this field off the day summary instead of a session. Day
     # values (score, quality, colour) are not session-scoped.
     day_field: str | None = None
+    # Further day-level fields to hang off the entity as attributes.
+    day_attrs: tuple[str, ...] = ()
 
 
 # Duration sensors: we intentionally do NOT set device_class=DURATION.
@@ -232,6 +238,7 @@ INSIGHT_SENSOR_DESCRIPTIONS: tuple[OrionSensorEntityDescription, ...] = (
         key="sleep_score",
         translation_key="sleep_score",
         day_field="score",
+        day_attrs=("quality", "color"),
         native_unit_of_measurement="points",
         state_class=SensorStateClass.MEASUREMENT,
         icon="mdi:medal-outline",
@@ -387,6 +394,7 @@ INSIGHT_SENSOR_DESCRIPTIONS: tuple[OrionSensorEntityDescription, ...] = (
     OrionSensorEntityDescription(
         key="sleep_quality",
         day_field="quality",
+        day_attrs=("color", "score"),
         icon="mdi:star-outline",
         value_fn=lambda session: None,  # day-level, see day_field
     ),
@@ -589,8 +597,6 @@ async def async_setup_entry(
                 entities.append(
                     OrionScheduleSensorEntity(coordinator, device_id, description, user_id)
                 )
-        for user_id in coordinator.schedule_user_ids():
-            entities.append(OrionNextScheduledActionSensor(coordinator, device_id, user_id))
         entities.append(OrionCurrentTempOffsetSensor(coordinator, device_id))
         entities.append(OrionWebSocketStateSensor(coordinator, device_id))
         for zone_id in coordinator.device_zone_ids(device_id):
@@ -630,6 +636,15 @@ async def async_setup_entry(
             vol.Required("confirm"): vol.All(cv.boolean, vol.Equal(True)),
         },
         "async_delete_sleep_session",
+    )
+    platform.async_register_entity_service(
+        SERVICE_EDIT_SLEEP_SESSION,
+        {
+            vol.Required("session_id"): cv.string,
+            vol.Required("fell_asleep"): cv.datetime,
+            vol.Required("woke_up"): cv.datetime,
+        },
+        "async_edit_sleep_session",
     )
     platform.async_register_entity_service(
         SERVICE_CONFIRM_SLEEP_SESSION,
@@ -702,6 +717,62 @@ class OrionSensorEntity(OrionBaseEntity, SensorEntity):
             "count": len(sessions),
             "sessions": sessions,
         }
+
+    async def async_edit_sleep_session(
+        self, session_id: str, fell_asleep: datetime, woke_up: datetime
+    ) -> None:
+        """Move a session's boundaries and let the bed reanalyse it.
+
+        This does not relabel a night. The server recomputes sleep
+        stages, heart rate, breathing, apnea, movement, and temperature
+        from the new window, so the numbers afterwards are genuinely
+        different numbers rather than the same ones shifted.
+
+        It is reversible: calling this again with the original pair
+        restores every derived metric exactly. That is measured, not
+        hoped for.
+
+        A naive datetime is refused. Home Assistant hands one over in the
+        user's local time when a UI datetime selector is used, so it is
+        attached here where the timezone is actually known, rather than
+        guessed at deeper down.
+        """
+        known = {
+            row["session_id"]
+            for row in util.summarize_sessions(self._sessions_insights(), 200)
+        }
+        if session_id not in known:
+            raise HomeAssistantError(
+                f"No session {session_id} belongs to {self._sessions_owner()}. "
+                "Run orion_sleep.list_sleep_sessions against this entity first."
+            )
+
+        local = dt_util.DEFAULT_TIME_ZONE
+        aware = []
+        for value in (fell_asleep, woke_up):
+            aware.append(value.replace(tzinfo=local) if value.tzinfo is None else value)
+
+        try:
+            asleep_at, awake_at = util.session_edit_window(aware[0], aware[1])
+        except ValueError as err:
+            raise HomeAssistantError(str(err)) from err
+
+        client = self._sessions_client()
+        if client is None:
+            raise HomeAssistantError(
+                f"No Orion client available for {self._sessions_owner()}"
+            )
+
+        _LOGGER.warning(
+            "Editing an Orion sleep session for %s. The bed will reanalyse "
+            "the night, so stages and vitals will change.",
+            self._sessions_owner(),
+        )
+        try:
+            await client.edit_sleep_session(session_id, asleep_at, awake_at)
+        except OrionApiError as err:
+            raise HomeAssistantError(f"Orion refused the session edit: {err}") from err
+        await self.coordinator.async_request_refresh()
 
     async def async_confirm_sleep_session(
         self, session_id: str, claim: str = "me"
@@ -823,7 +894,11 @@ class OrionSensorEntity(OrionBaseEntity, SensorEntity):
             return None
 
         if self.entity_description.day_field:
-            return None
+            attrs = {
+                name: self._day_value(name)
+                for name in self.entity_description.day_attrs
+            }
+            return {k: v for k, v in attrs.items() if v is not None} or None
 
         if self.entity_description.extra_attrs_fn is None:
             return None
@@ -1347,69 +1422,3 @@ class OrionWifiSignalSensor(OrionBaseEntity, SensorEntity):
             "last_seen": network.get("last_seen"),
         }
         return {key: value for key, value in attrs.items() if value is not None} or None
-
-
-class OrionNextScheduledActionSensor(OrionBaseEntity, SensorEntity):
-    """When this person's bed next changes temperature on its own.
-
-    Built from the `timeline` array the device pushes on
-    `live_device.update`. That data was already being captured and read by
-    nothing. It is materialized server-side from the sleep schedule, so it
-    reflects overrides and smart-temperature adjustments that the raw
-    schedule rows do not.
-
-    `state_class` is deliberately unset: Home Assistant rejects a state
-    class on a non-numeric sensor, and a timestamp is not a measurement.
-    """
-
-    _attr_device_class = SensorDeviceClass.TIMESTAMP
-    _attr_icon = "mdi:clock-fast"
-
-    def __init__(
-        self,
-        coordinator: OrionDataUpdateCoordinator,
-        device_id: str,
-        user_id: str,
-    ) -> None:
-        super().__init__(coordinator, device_id)
-        self._user_id = user_id
-        self._attr_unique_id = util.schedule_unique_id(
-            device_id, "next_scheduled_action", user_id
-        )
-        self._attr_translation_key = None
-        self._attr_name = (
-            f"{coordinator.display_name_for_user(user_id)} Next Scheduled Action"
-        )
-
-    @property
-    def available(self) -> bool:
-        """Unavailable until an update frame carries a future action.
-
-        The snapshot never includes a timeline, so this stays unavailable
-        for the first couple of seconds after a reconnect, and again after
-        the last scheduled action of the day has passed.
-        """
-        return super().available and self._entry() is not None
-
-    def _entry(self) -> dict | None:
-        return self.coordinator.next_scheduled_action(self._device_id, self._user_id)
-
-    @property
-    def native_value(self):
-        entry = self._entry()
-        if entry is None:
-            return None
-        return util.parse_iso_datetime(entry.get("scheduled_time"))
-
-    @property
-    def extra_state_attributes(self) -> dict | None:
-        entry = self._entry()
-        if entry is None:
-            return None
-        attrs: dict = {}
-        label = util.timeline_label(entry.get("label"))
-        if label:
-            attrs["action"] = label
-        for zone_id, temp in util.timeline_target_temps(entry).items():
-            attrs[f"{self.coordinator.zone_label(self._device_id, zone_id)} target"] = temp
-        return attrs or None

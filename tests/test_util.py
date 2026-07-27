@@ -621,77 +621,6 @@ def _entry(user, when, label="bedtime", zones=None):
     }
 
 
-def test_timeline_label_maps_known_and_passes_through_unknown():
-    assert util.timeline_label("wake_up") == "Wake Up"
-    assert util.timeline_label("phase_1") == "Asleep Phase 1"
-    assert util.timeline_label("turn_off") == "Turn Off"
-    # An unrecognized vendor label is surfaced, not dropped.
-    assert util.timeline_label("brand_new_thing") == "Brand New Thing"
-    for bad in (None, "", 5, [], {}):
-        assert util.timeline_label(bad) is None
-
-
-def test_parse_iso_datetime_handles_z_and_offsets():
-    assert util.parse_iso_datetime("2026-07-26T23:00:00Z") == datetime.datetime(
-        2026, 7, 26, 23, 0, tzinfo=_UTC
-    )
-    assert util.parse_iso_datetime("2026-07-26T23:00:00+00:00") == datetime.datetime(
-        2026, 7, 26, 23, 0, tzinfo=_UTC
-    )
-    # A naive timestamp is treated as UTC, never as local time.
-    assert util.parse_iso_datetime("2026-07-26T23:00:00").tzinfo == _UTC
-
-
-def test_parse_iso_datetime_rejects_malformed():
-    for bad in (None, "", "not a date", "2026-13-01T00:00:00Z", 5, [], {}, True):
-        assert util.parse_iso_datetime(bad) is None
-
-
-def test_next_timeline_entry_picks_the_soonest_future_entry():
-    timeline = [
-        _entry("u1", "2026-07-26T23:30:00Z", "phase_1"),
-        _entry("u1", "2026-07-26T23:00:00Z", "bedtime"),
-        _entry("u1", "2026-07-27T07:00:00Z", "wake_up"),
-    ]
-    found = util.next_timeline_entry(timeline, "u1", NOW)
-    assert found is not None and found["label"] == "bedtime"
-
-
-def test_next_timeline_entry_ignores_the_past_and_other_people():
-    timeline = [
-        _entry("u1", "2026-07-26T21:00:00Z"),          # already happened
-        _entry("u2", "2026-07-26T22:30:00Z"),          # somebody else
-        _entry("u1", "2026-07-26T23:00:00Z", "wake_up"),
-    ]
-    found = util.next_timeline_entry(timeline, "u1", NOW)
-    assert found is not None and found["label"] == "wake_up"
-    # An entry exactly at `now` counts as already fired.
-    assert util.next_timeline_entry([_entry("u1", "2026-07-26T22:00:00Z")], "u1", NOW) is None
-
-
-def test_next_timeline_entry_returns_none_on_empty_or_malformed():
-    assert util.next_timeline_entry([], "u1", NOW) is None
-    assert util.next_timeline_entry(None, "u1", NOW) is None
-    assert util.next_timeline_entry("nope", "u1", NOW) is None
-    assert util.next_timeline_entry([None, "bad", {}], "u1", NOW) is None
-    assert util.next_timeline_entry([_entry("u1", "garbage")], "u1", NOW) is None
-    assert util.next_timeline_entry([_entry("u1", "2026-07-26T23:00:00Z")], "", NOW) is None
-    assert util.next_timeline_entry([_entry("u1", "2026-07-26T23:00:00Z")], "u1", None) is None
-
-
-def test_timeline_target_temps_reads_zones_and_rejects_junk():
-    entry = _entry(
-        "u1",
-        "2026-07-26T23:00:00Z",
-        zones=[{"id": "zone_a", "temp": 23.5}, {"id": "zone_b", "temp": 19}],
-    )
-    assert util.timeline_target_temps(entry) == {"zone_a": 23.5, "zone_b": 19.0}
-    # bool is a subclass of int and must not read as a temperature.
-    assert util.timeline_target_temps(_entry("u1", "x", zones=[{"id": "z", "temp": True}])) == {}
-    for bad in (None, {}, {"action": None}, {"action": {"zones": "no"}}, "str"):
-        assert util.timeline_target_temps(bad) == {}
-
-
 # ── Rapid cool duration ───────────────────────────────────────────────
 #
 # This number is sent to a route that changes the physical bed, so the
@@ -996,3 +925,76 @@ def test_confidence_percent_refuses_out_of_contract_values():
 def test_confidence_percent_rejects_bool_and_junk():
     for bad in (True, False, None, "0.8", [], {}):
         assert util.confidence_percent(bad) is None
+
+
+# ── Session edit window ───────────────────────────────────────────────
+#
+# The server recomputes an entire night from these two values, so a
+# timezone mistake here is not cosmetic. A naive datetime is refused
+# rather than assumed local: the caller knows the zone, util does not.
+
+_UTC = datetime.timezone.utc
+
+
+def test_session_edit_window_formats_to_the_wire_shape():
+    start = datetime.datetime(2026, 7, 27, 10, 30, 36, tzinfo=_UTC)
+    end = datetime.datetime(2026, 7, 27, 14, 23, 36, tzinfo=_UTC)
+    assert util.session_edit_window(start, end) == (
+        "2026-07-27T10:30:36Z",
+        "2026-07-27T14:23:36Z",
+    )
+
+
+def test_session_edit_window_converts_other_zones_to_utc():
+    offset = datetime.timezone(datetime.timedelta(hours=-7))
+    start = datetime.datetime(2026, 7, 27, 3, 30, 36, tzinfo=offset)
+    end = datetime.datetime(2026, 7, 27, 7, 23, 36, tzinfo=offset)
+    assert util.session_edit_window(start, end) == (
+        "2026-07-27T10:30:36Z",
+        "2026-07-27T14:23:36Z",
+    )
+
+
+def test_session_edit_window_drops_sub_second_precision():
+    start = datetime.datetime(2026, 7, 27, 10, 30, 36, 830000, tzinfo=_UTC)
+    end = datetime.datetime(2026, 7, 27, 14, 23, 36, 5000, tzinfo=_UTC)
+    assert util.session_edit_window(start, end) == (
+        "2026-07-27T10:30:36Z",
+        "2026-07-27T14:23:36Z",
+    )
+
+
+def test_session_edit_window_refuses_naive_datetimes():
+    naive = datetime.datetime(2026, 7, 27, 10, 30, 36)
+    aware = datetime.datetime(2026, 7, 27, 14, 23, 36, tzinfo=_UTC)
+    for pair in ((naive, aware), (aware, naive), (naive, naive)):
+        try:
+            util.session_edit_window(*pair)
+        except ValueError as err:
+            assert "timezone" in str(err)
+        else:
+            raise AssertionError("naive datetime must be refused")
+
+
+def test_session_edit_window_refuses_a_backwards_window():
+    start = datetime.datetime(2026, 7, 27, 14, 0, 0, tzinfo=_UTC)
+    end = datetime.datetime(2026, 7, 27, 10, 0, 0, tzinfo=_UTC)
+    for pair in ((start, end), (start, start)):
+        try:
+            util.session_edit_window(*pair)
+        except ValueError as err:
+            assert "after" in str(err)
+        else:
+            raise AssertionError("a backwards window must be refused")
+
+
+def test_session_edit_window_refuses_non_datetimes():
+    aware = datetime.datetime(2026, 7, 27, 14, 23, 36, tzinfo=_UTC)
+    for bad in (None, "2026-07-27T10:30:36Z", 0, [], {}, True, datetime.date(2026, 7, 27)):
+        for pair in ((bad, aware), (aware, bad)):
+            try:
+                util.session_edit_window(*pair)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError(f"{bad!r} must be refused")
