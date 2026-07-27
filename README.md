@@ -53,6 +53,16 @@ No control ships against a speculative route. Writes that change the bed are tes
 1. Copy `custom_components/orion_sleep` into your Home Assistant `config/custom_components/` directory.
 2. Restart Home Assistant.
 
+### Home Assistant version
+
+The declared minimum is **2025.1.0**, derived from the newest Home Assistant
+APIs this integration actually calls: `ConfigEntry.runtime_data` and the
+`update` entity's `update_percentage`.
+
+That floor is inferred from API usage, not tested. The only version this has
+ever run on is 2026.4. If it works on something older, or does not, open an
+issue and the floor will be corrected to match reality.
+
 ## Configuration
 
 [![Open your Home Assistant instance and start setting up a new integration.](https://my.home-assistant.io/badges/config_flow_start.svg)](https://my.home-assistant.io/redirect/config_flow_start/?domain=orion_sleep)
