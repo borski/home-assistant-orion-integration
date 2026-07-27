@@ -594,6 +594,59 @@ cannot be taken back.
 
 Live-request confirmations, newest first. A claim only earns "measured" by appearing here.
 
+### 2026-07-27 — Completed-session shape, session delete, and a WAF trap
+
+**`DELETE /v1/sleep-sessions/{id}` is MEASURED.** Deleted one fabricated session
+with `{"reason": "not_real_session"}`. The listing dropped from two sessions to
+one and the real session was untouched. No undo exists, so this remains the only
+irreversible call here.
+
+**Diagnostic scripts must send a User-Agent.** A direct probe returned 403 from
+`/v1/auth/me`, `/v2/insights`, everything. The token was fine: its `exp` claim
+was still an hour out, and Home Assistant was polling happily on the same
+credentials the whole time. The cause was the default `Python-urllib/3.x`
+user-agent, which Orion's edge rejects outright. `okhttp/4.12.0` and a
+Home Assistant style UA both return 200 on the identical request.
+
+Worth stating plainly because the first two explanations were both wrong and
+both plausible: expired token, then a bad date range. A 403 from this API does
+not mean auth. It is overloaded across at least three unrelated causes now:
+wrong identifier type on device routes, blocked user-agent, and genuine
+permission failures. **Do not map 403 to an auth failure in the client.**
+
+**Full completed-session shape**, read off a real finished night. Nineteen
+fields that had only ever been seen as `null` mid-session:
+
+| field | shape |
+|---|---|
+| `apnea` | `{ahi, central_total_seconds, obstructive_total_seconds, longest_event_seconds, values}` |
+| `sleep_summary.hypnogram` | stage timeline, alongside the five stage totals |
+| `in_bed_start_time` / `in_bed_end_time` | distinct from `start_time`/`end_time` |
+| `user_fallasleep_timestamp` / `user_wakeup_timestamp` | the sleeper's own boundaries |
+| `confidence` | float, `0.8` observed |
+| `has_been_edited` / `has_been_rated` | bool |
+| `manual_confirmation` | `{needs_confirmation, status, users}` |
+| `temperature_control`, `temperature_setpoint` | `{values}` series |
+| `is_combined`, `combined_zone_ids` | bool / null |
+| `device`, `user`, `timezone`, `last_updated_at` | metadata |
+
+Top level also carries `has_subscription`.
+
+**`session.user` contains email, first and last name, and a profile image URL.**
+Diagnostics already strips the whole `insights` branch, so nothing leaks today,
+but any future code that surfaces session data has to keep that in mind.
+
+**Sessions do not rewrite themselves.** An earlier note in this log claimed the
+server revised a session's boundaries on its own. It did not. `has_been_edited`
+is `True` on that session: a human corrected it in the vendor app. The claim was
+inferred from two reads at different times and never checked against the field
+that answers it directly.
+
+**The occupancy bug is visible in the session record.** `in_bed_start_time` on
+that night is nearly two hours before the corrected `start_time`, and matches
+the window when the pads were reporting an occupant who was demonstrably
+downstairs. The bed's own stored record carries the false positive.
+
 ### 2026-07-27 — Session listing works, and it found two phantom nights
 
 Built `orion_sleep.list_sleep_sessions` and `orion_sleep.delete_sleep_session`.
