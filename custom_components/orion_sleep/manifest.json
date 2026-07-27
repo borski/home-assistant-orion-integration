@@ -1,7 +1,7 @@
 {
   "domain": "orion_sleep",
   "name": "Orion Sleep",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "documentation": "https://github.com/borski/home-assistant-orion-integration",
   "issue_tracker": "https://github.com/borski/home-assistant-orion-integration/issues",
   "codeowners": [
