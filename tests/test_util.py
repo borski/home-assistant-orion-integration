@@ -1,15 +1,11 @@
 """Tests for dependency-free utility helpers."""
 
 import datetime
-import importlib.util
 from datetime import time as _dt_time
-from pathlib import Path
 
-MODULE_PATH = Path(__file__).parent.parent / "custom_components" / "orion_sleep" / "util.py"
-SPEC = importlib.util.spec_from_file_location("orion_util", MODULE_PATH)
-assert SPEC and SPEC.loader
-util = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(util)
+import _orion
+
+util = _orion.load("util")
 
 
 def test_dedupe_devices_keeps_first_and_preserves_order():

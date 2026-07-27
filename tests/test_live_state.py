@@ -1,13 +1,8 @@
 """Tests for dependency-free live-state helpers."""
 
-import importlib.util
-from pathlib import Path
+import _orion
 
-MODULE_PATH = Path(__file__).parent.parent / "custom_components" / "orion_sleep" / "live_state.py"
-SPEC = importlib.util.spec_from_file_location("orion_live_state", MODULE_PATH)
-assert SPEC and SPEC.loader
-live_state = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(live_state)
+live_state = _orion.load("live_state")
 
 SAMPLE = {
     "zones": [

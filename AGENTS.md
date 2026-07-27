@@ -312,6 +312,69 @@ a Number (write) and a Sensor (history).
 
 ## Testing
 
+### Unit suite
+
+```bash
+mise exec pipx:pytest -- pytest -q          # 95 tests
+mise exec pipx:ruff -- ruff check custom_components tests orion_info.py
+mise exec -- python -m compileall -q custom_components tests
+```
+
+**Home Assistant and aiohttp are deliberately not installed**, and CI runs
+without them. That constraint shapes the whole suite. Tests reach the
+integration two ways, both via `tests/_orion.py`:
+
+| Helper | Use |
+|--------|-----|
+| `_orion.load("util")` | Imports a dependency-free module off disk and exercises it normally. Covers `util.py` and `live_state.py`. |
+| `_orion.tree("api")` | Parses a module as source with stdlib `ast`, never importing it. Covers `api.py` and `coordinator.py`. |
+
+| File | Tests | Covers |
+|------|-------|--------|
+| `tests/test_util.py` | 58 | Pure helpers: unique ids, aliases, schedule validation, session selection, timeline parsing |
+| `tests/test_api_errors.py` | 18 | Structural leak guards on `api.py`, malformed vendor payloads, auth response shapes |
+| `tests/test_coordinator_safety.py` | 12 | Exception handler ordering, account isolation, poll carry-forward, hostile data |
+| `tests/test_live_state.py` | 7 | Live payload extraction |
+
+### The structural guards, and why they exist
+
+Three bugs in this integration failed **silently**. A unit test that imports
+and calls cannot catch them, because the code runs fine and simply does the
+wrong thing. So they are enforced by parsing the source instead.
+
+**1. Exception messages must not leak identifiers.** Messages once carried
+the full request path, and `/live` and `/action` paths contain the device
+serial. `test_exception_messages_interpolate_only_allowlisted_expressions`
+holds an **allowlist** of four permitted interpolations (`method`,
+`resp.status`, `type(err).__name__`, `keys`). A new substitution fails the
+build until a human reviews it. An allowlist, not a blocklist, because a
+blocklist passes anything nobody thought to ban.
+
+**2. `OrionAuthError` subclasses `OrionApiError`.** Python matches handlers
+top to bottom, so listing the parent first swallows every auth failure into
+the generic branch. The integration then logs a warning and continues with a
+dead token. The only symptom is that data quietly stops updating.
+`test_auth_handler_always_precedes_the_general_handler` enforces the order.
+
+**3. A partner auth failure must not reauth the primary account.**
+`ConfigEntryAuthFailed` launches Home Assistant's reauth flow, which
+re-verifies `CONF_AUTH_VALUE`, the **primary** account's email or phone.
+Raising it because the partner token expired prompts the wrong person, and
+completing the flow cannot fix the partner token anyway.
+`test_partner_client_calls_never_raise_config_entry_auth_failed` proves no
+`try` block touching `partner_api_client` raises it.
+
+Also guarded: `_async_update_data` must carry `schedules`, `insights`, and
+`partner_insights` forward across a failed poll rather than re-initialising
+them empty. Blanking meant one transient 502 turned every dependent entity
+`unknown` for the full poll interval.
+
+**All of these were mutation tested.** Each bug was reintroduced, the
+corresponding test was confirmed to fail, and the file was restored. A guard
+that has never been seen to fail is not a guard.
+
+### Live API verification
+
 Run `orion_info.py` to verify API connectivity and response shapes:
 ```bash
 python orion_info.py --email user@example.com
