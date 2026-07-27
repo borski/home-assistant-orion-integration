@@ -203,3 +203,91 @@ end_sleep_session:
       required: true
       selector:
         boolean:
+
+list_invites:
+  target:
+    entity:
+      integration: orion_sleep
+      domain: sensor
+  fields: {}
+
+invite_user:
+  target:
+    entity:
+      integration: orion_sleep
+      domain: sensor
+  fields:
+    phone_number:
+      required: true
+      example: "+1 415 555 1234"
+      selector:
+        text:
+    role:
+      required: true
+      default: guest
+      selector:
+        select:
+          options:
+            - guest
+            - member
+
+cancel_invite:
+  target:
+    entity:
+      integration: orion_sleep
+      domain: sensor
+  fields:
+    invite_id:
+      required: true
+      selector:
+        text:
+
+accept_invite:
+  target:
+    entity:
+      integration: orion_sleep
+      domain: sensor
+  fields:
+    code:
+      required: true
+      selector:
+        text:
+
+remove_user_access:
+  target:
+    entity:
+      integration: orion_sleep
+      domain: sensor
+  fields:
+    user_id:
+      required: true
+      selector:
+        text:
+    confirm:
+      required: true
+      default: false
+      selector:
+        boolean:
+
+create_guest:
+  target:
+    entity:
+      integration: orion_sleep
+      domain: sensor
+  fields: {}
+
+update_user_phone:
+  target:
+    entity:
+      integration: orion_sleep
+      domain: sensor
+  fields:
+    user_id:
+      required: true
+      selector:
+        text:
+    phone:
+      required: true
+      example: "+1 415 555 1234"
+      selector:
+        text:

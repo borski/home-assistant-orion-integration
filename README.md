@@ -103,6 +103,14 @@ This changes friendly names only. Entity IDs, unique IDs, history, statistics, a
 | `orion_sleep.delete_sleep_session` | the same person's sensor | Permanently delete one session. **No undo.** Requires an explicit ID, a reason, and `confirm: true`. |
 | `orion_sleep.confirm_sleep_session` | the same person's sensor | Tell the bed whose night it was. `claim: me` or `claim: both`. |
 | `orion_sleep.edit_sleep_session` | the same person's sensor | Correct when sleep actually started and ended. The bed reanalyses the night. Reversible. |
+| `orion_sleep.end_sleep_session` | any of that person's insight sensors | End the session that is running right now. Requires `confirm: true`. |
+| `orion_sleep.list_invites` | the Bed Access sensor | Invitations sent but not yet accepted. Read-only. Returns response data. |
+| `orion_sleep.invite_user` | the Bed Access sensor | Invite somebody by phone number as `member` or `guest`. |
+| `orion_sleep.cancel_invite` | the Bed Access sensor | Withdraw an invitation before it is accepted. |
+| `orion_sleep.accept_invite` | the Bed Access sensor | Redeem a code so this account is added to somebody else's bed. |
+| `orion_sleep.remove_user_access` | the Bed Access sensor | Revoke access. Requires `confirm: true`. Not reversible without a fresh invite. |
+| `orion_sleep.create_guest` | the Bed Access sensor | Add an unattached guest slot, then give it a number with the next service. |
+| `orion_sleep.update_user_phone` | the Bed Access sensor | Attach or change a phone number for somebody on the bed. |
 
 Point the override service at someone's Bedtime or Wake Up Time entity and it figures out whose schedule to write. You never handle a raw Orion user ID.
 
@@ -182,9 +190,47 @@ The integration opens one WebSocket per device to `wss://live.api1.orionbed.com/
 
 There is no option to disable it.
 
+
+## Sharing a bed
+
+An Orion bed can carry more than one person. One account owns it, a
+member can control it, and a guest receives their own sleep insights
+without the run of the device. The `Bed Access` sensor shows who is on
+the bed and in what capacity, and every access service targets it.
+
+```yaml
+action: orion_sleep.invite_user
+target:
+  entity_id: sensor.orion_bed_access
+data:
+  phone_number: "+1 415 555 1234"
+  role: guest
+```
+
+The role you pick here is the word the Orion app uses. A member is sent
+to the API as `admin`; the integration handles that translation.
+
+Guest access can carry an expiry, which shows up as `expires` in the
+`people` attribute. The Orion app does not surface it.
+
+To take somebody off the bed, read their `user_id` out of that same
+attribute:
+
+```yaml
+action: orion_sleep.remove_user_access
+target:
+  entity_id: sensor.orion_bed_access
+data:
+  user_id: "the id from the people attribute"
+  confirm: true
+```
+
+There is no undo. Getting somebody back means sending a fresh invite
+that they have to accept.
+
 ## Entities
 
-One Home Assistant device per paired topper. A two-zone bed with no partner linked exposes **71 entities**. Linking a partner adds 35 more.
+One Home Assistant device per paired topper. A two-zone bed with no partner linked exposes **72 entities**. Linking a partner adds 55 more.
 
 Names below use `<person>` where the display alias is substituted, and `<zone>` for a bed side.
 

@@ -16,6 +16,8 @@ from .util import (
     auth_session_from_response,
     auth_tokens_from_session,
     describe_api_error,
+    invite_role_wire,
+    normalize_phone,
     safe_api_error_code,
     should_refresh_token,
     validate_device_orientation,
@@ -808,6 +810,149 @@ class OrionApiClient:
         """
         await self.ensure_valid_token()
         return await self._request("POST", "/v1/sleep-sessions/end")
+
+    # ── User access management ────────────────────────────────────
+    #
+    # Orion beds are shared. Someone owns the account, a partner is a
+    # member, and a guest gets their own insights without the run of the
+    # device. All of that is invisible from Home Assistant today.
+    #
+    # Confidence on the invite route is MEASURED: an empty-body POST
+    # returns a validation error naming every required field and its
+    # type, which costs nothing and creates nothing. The rest are
+    # APP-DERIVED from the decompile with line numbers recorded per
+    # method.
+
+    async def list_device_invites(self) -> dict:
+        """GET /v1/user-device-invites — pending invitations.
+
+        Confidence: MEASURED 2026-07-27. Returns
+        `{"success": true, "response": {"invites": [...]}}`. Observed
+        only with an empty list, so the shape of a populated invite is
+        still unknown and callers should not assume field names.
+        """
+        await self.ensure_valid_token()
+        return await self._request("GET", "/v1/user-device-invites")
+
+    async def invite_user(
+        self, device_ids: list[str], phone_number: str, role: str
+    ) -> dict:
+        """POST /v1/user-device-invites — invite someone to a device.
+
+        Confidence: MEASURED 2026-07-27 for the request contract. An
+        empty-body probe returned a validation error enumerating exactly
+        three required fields: `device_ids` (array), `phone_number`
+        (string), `role` (string). No invite was created, so the response
+        to a valid call has not been seen.
+
+        `role` here is the user-facing word. The app labels the two
+        choices "Member" and "Guest", but a member is sent as `admin` on
+        the wire. That mapping lives in `invite_role_wire` so the gap
+        cannot quietly become a 400.
+        """
+        if not isinstance(device_ids, list) or not device_ids:
+            raise ValueError("invite_user requires at least one device id")
+        for device_id in device_ids:
+            if not isinstance(device_id, str) or not device_id.strip():
+                raise ValueError("invite_user device ids must be non-empty strings")
+
+        await self.ensure_valid_token()
+        return await self._request(
+            "POST",
+            "/v1/user-device-invites",
+            json_data={
+                "device_ids": list(device_ids),
+                "phone_number": normalize_phone(phone_number),
+                "role": invite_role_wire(role),
+            },
+        )
+
+    async def cancel_device_invite(self, invite_id: str) -> dict:
+        """DELETE /v1/user-device-invites/{id} — withdraw an invitation.
+
+        Confidence: APP-DERIVED. Path built at decompiled line 535993.
+        Never executed, because no invite has ever been outstanding on
+        this account.
+        """
+        if not isinstance(invite_id, str) or not invite_id.strip():
+            raise ValueError("cancel_device_invite requires an invite_id")
+        await self.ensure_valid_token()
+        return await self._request("DELETE", f"/v1/user-device-invites/{invite_id}")
+
+    async def accept_device_invite(self, code: str) -> dict:
+        """POST /v1/user-device-invites/accept — redeem an invite code.
+
+        Confidence: APP-DERIVED. Body `{code}` at decompiled line 536002.
+        The app screen is "Enter Invite Code".
+
+        This is the one call here that acts on the *receiving* side. It
+        adds the authenticated account to somebody else's device, so the
+        integration will not see a new bed until the next poll.
+        """
+        if not isinstance(code, str) or not code.strip():
+            raise ValueError("accept_device_invite requires a code")
+        await self.ensure_valid_token()
+        return await self._request(
+            "POST", "/v1/user-device-invites/accept", json_data={"code": code.strip()}
+        )
+
+    async def remove_user_access(self, user_id: str) -> dict:
+        """DELETE /v1/sleep-configurations/user-remove — revoke access.
+
+        Confidence: APP-DERIVED. Path at decompiled line 675603, issued
+        as a DELETE with the body in axios' `{data: ...}` slot at 675611.
+        The caller at 1393197 supplies `{user_id}`.
+
+        Not reversible from here. Getting the person back means sending
+        them a fresh invite, which they have to accept.
+        """
+        if not isinstance(user_id, str) or not user_id.strip():
+            raise ValueError("remove_user_access requires a user_id")
+        await self.ensure_valid_token()
+        return await self._request(
+            "DELETE",
+            "/v1/sleep-configurations/user-remove",
+            json_data={"user_id": user_id},
+        )
+
+    async def create_guest(self, device_id: str) -> dict:
+        """POST /v1/sleep-configurations/user-new-guest — add a guest slot.
+
+        Confidence: APP-DERIVED. Body `{device_id}` at decompiled line
+        675887.
+
+        Distinct from inviting a guest by phone. This creates an
+        anonymous guest on the device with nobody attached to it yet,
+        which is what the app's "Add New Guest" flow does before it knows
+        who is coming. Takes the device UUID, not the serial.
+        """
+        if not isinstance(device_id, str) or not device_id.strip():
+            raise ValueError("create_guest requires a device_id")
+        await self.ensure_valid_token()
+        return await self._request(
+            "POST",
+            "/v1/sleep-configurations/user-new-guest",
+            json_data={"device_id": device_id},
+        )
+
+    async def update_user_phone(self, user_id: str, phone: str) -> dict:
+        """PUT /v1/sleep-configurations/user-update — set someone's number.
+
+        Confidence: APP-DERIVED. Body keys `user_id` and `phone` at
+        decompiled lines 675786 and 675788.
+
+        The app uses this to attach a real phone number to an anonymous
+        guest so their insights can be delivered. It is the second half
+        of the `create_guest` flow.
+        """
+        if not isinstance(user_id, str) or not user_id.strip():
+            raise ValueError("update_user_phone requires a user_id")
+        await self.ensure_valid_token()
+        return await self._request(
+            "PUT",
+            "/v1/sleep-configurations/user-update",
+            json_data={"user_id": user_id, "phone": normalize_phone(phone)},
+        )
 
     async def delete_sleep_session(self, session_id: str, reason: str) -> dict:
         """DELETE /v1/sleep-sessions/{id} — permanently remove a session.

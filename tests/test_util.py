@@ -1046,3 +1046,180 @@ def test_validate_device_orientation_rejects_anything_else():
         except ValueError:
             continue
         raise AssertionError(f"{bad!r} should have been rejected")
+
+
+# ── User access management ────────────────────────────────────────────
+#
+# The app shows "Member" and sends `admin`. That gap is exactly the sort
+# of thing that produced a 404 earlier in this project, so it gets a test
+# rather than a comment.
+
+
+def test_invite_role_member_is_sent_as_admin():
+    assert util.invite_role_wire("member") == "admin"
+
+
+def test_invite_role_guest_passes_through():
+    assert util.invite_role_wire("guest") == "guest"
+
+
+def test_invite_role_is_case_and_space_tolerant():
+    assert util.invite_role_wire("  Member ") == "admin"
+    assert util.invite_role_wire("GUEST") == "guest"
+
+
+def test_invite_role_rejects_the_labels_that_are_not_wire_values():
+    for bad in ("owner", "admin", "other", "", "  ", None, 1, True, [], {}):
+        try:
+            util.invite_role_wire(bad)
+        except ValueError:
+            continue
+        raise AssertionError(f"{bad!r} should not be accepted as a role")
+
+
+def test_normalize_phone_strips_formatting():
+    assert util.normalize_phone("+1 (415) 555-1234") == "14155551234"
+    assert util.normalize_phone("415.555.1234") == "4155551234"
+
+
+def test_normalize_phone_rejects_lengths_outside_the_plausible_range():
+    for bad in ("", "123", "555-1234", "1" * 16):
+        try:
+            util.normalize_phone(bad)
+        except ValueError:
+            continue
+        raise AssertionError(f"{bad!r} should not pass as a phone number")
+
+
+def test_normalize_phone_rejects_non_strings():
+    for bad in (None, 14155551234, [], {}, True):
+        try:
+            util.normalize_phone(bad)
+        except ValueError:
+            continue
+        raise AssertionError(f"{bad!r} should not pass as a phone number")
+
+
+# The measured shape: `access` is an object carrying role, expiry, and a
+# capability list. It is not the role string the key name implies.
+_DEVICES = [
+    {
+        "id": "dev-1",
+        "shared_with": [
+            {
+                "access": {"role": "guest", "expiry": "2026-08-01", "allowed_actions": []},
+                "is_away": False,
+                "user": {"id": "u-2", "first_name": "Grace"},
+            },
+            {
+                "access": {"role": "admin", "expiry": None, "allowed_actions": ["split"]},
+                "is_away": True,
+                "user": {"id": "u-1", "first_name": "Ada"},
+            },
+        ],
+    },
+    {"id": "dev-2", "shared_with": [{"access": {"role": "guest"}, "user": {"id": "u-9"}}]},
+]
+
+
+def test_access_role_reads_the_nested_object():
+    entry = {"access": {"role": "admin", "expiry": None}}
+    assert util.access_role(entry) == ("admin", None)
+
+
+def test_access_role_carries_an_expiry_when_one_is_set():
+    entry = {"access": {"role": "guest", "expiry": "2026-08-01"}}
+    assert util.access_role(entry) == ("guest", "2026-08-01")
+
+
+def test_access_role_still_accepts_a_plain_string():
+    assert util.access_role({"access": "guest"}) == ("guest", None)
+
+
+def test_access_role_never_returns_an_unhashable_role():
+    for bad in ({"access": {"role": {"nested": 1}}}, {"access": {}}, {"access": []},
+                {"access": None}, {}, None, "x", 0):
+        role, expiry = util.access_role(bad)
+        assert isinstance(role, str)
+        assert expiry is None or isinstance(expiry, str)
+
+
+def test_summarize_access_reads_the_role_from_shared_with():
+    people = util.summarize_access(_DEVICES, "dev-1")
+    assert [p["role"] for p in people] == ["admin", "guest"]
+    assert [p["name"] for p in people] == ["Ada", "Grace"]
+    assert [p["user_id"] for p in people] == ["u-1", "u-2"]
+    assert people[0]["away"] is True
+
+
+def test_summarize_access_never_leaks_a_profile_image():
+    devices = [
+        {
+            "id": "dev-1",
+            "shared_with": [
+                {
+                    "access": {"role": "guest"},
+                    "user": {
+                        "id": "u-2",
+                        "first_name": "Grace",
+                        "profile_image_url": "https://example.invalid/grace.jpg",
+                    },
+                }
+            ],
+        }
+    ]
+    for person in util.summarize_access(devices, "dev-1"):
+        assert set(person) == {"name", "role", "user_id", "away", "expires"}
+
+
+def test_summarize_access_scopes_to_one_device():
+    assert [p["user_id"] for p in util.summarize_access(_DEVICES, "dev-2")] == ["u-9"]
+
+
+def test_summarize_access_dedupes_across_devices_when_unscoped():
+    duplicated = _DEVICES + [
+        {"id": "dev-3", "shared_with": [{"access": {"role": "guest"}, "user": {"id": "u-1"}}]}
+    ]
+    ids = [p["user_id"] for p in util.summarize_access(duplicated)]
+    assert sorted(ids) == ["u-1", "u-2", "u-9"]
+
+
+def test_summarize_access_survives_malformed_input():
+    for bad in (None, "x", 0, {}, [None], ["x"], [{"shared_with": "x"}],
+                [{"shared_with": [None]}], [{"shared_with": [{"user": None}]}],
+                [{"shared_with": [{"user": {}}]}]):
+        assert util.summarize_access(bad) == []
+
+
+def test_summarize_access_falls_back_when_a_person_has_no_name():
+    devices = [{"id": "d", "shared_with": [{"access": {"role": "guest"}, "user": {"id": "abcdefghijkl"}}]}]
+    assert util.summarize_access(devices, "d")[0]["name"] == "User abcdefgh"
+
+
+def test_summarize_access_labels_a_missing_role_rather_than_dropping_the_person():
+    devices = [{"id": "d", "shared_with": [{"user": {"id": "u-1", "first_name": "Ada"}}]}]
+    assert util.summarize_access(devices, "d")[0]["role"] == "unknown"
+
+
+def test_summarize_access_surfaces_an_access_expiry():
+    people = util.summarize_access(_DEVICES, "dev-1")
+    by_name = {p["name"]: p for p in people}
+    assert by_name["Grace"]["expires"] == "2026-08-01"
+    assert by_name["Ada"]["expires"] is None
+
+
+def test_summarize_access_roles_are_always_hashable_strings():
+    """The crash this file exists to prevent.
+
+    `access` was assumed to be a role string and is an object. The sensor
+    builds a set of roles, and a dict cannot go in a set, so the entity
+    failed to add at all.
+    """
+    devices = [
+        {"id": "d", "shared_with": [
+            {"access": {"role": {"oops": True}}, "user": {"id": "u-1"}},
+            {"access": ["also-wrong"], "user": {"id": "u-2"}},
+        ]}
+    ]
+    roles = {p["role"] for p in util.summarize_access(devices, "d")}
+    assert roles == {"unknown"}

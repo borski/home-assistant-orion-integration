@@ -205,6 +205,7 @@ Entities read from coordinator:
 | Sensor | Light Sleep Minutes | `_light_sleep_minutes` | `session.sleep_summary.light_sleep`, numeric |
 | Sensor | Awake Minutes | `_awake_minutes` | `session.sleep_summary.awake_time`, numeric |
 | Sensor | \<person\> Apnea Index / Obstructive Time / Central Time / Longest Event | `_apnea_ahi`, `_apnea_obstructive_time`, `_apnea_central_time`, `_apnea_longest_event` | From `session.apnea`, null until a night finishes. AHI is events per hour of sleep. Zero is a real answer most nights, so the coercion rejects bool rather than falsy values: `False` must not read as a clean night. Deliberately no severity banding on the entity, because a consumer topper's estimate should not wear clinical labels. |
+| Sensor | Bed Access | `_access` | Count of people with access. The `people` attribute carries name, role, user id, away flag, and access expiry for each. Role comes from `shared_with[].access.role`, **not** from `zones[].user.user_type`, which is null on every zone. Names route through the alias layer. Profile image URLs are dropped. Diagnostic. Also the target for all seven access-management services. |
 | Select | Bed Orientation | `_orientation` | `devices[].orientation`, one device-level value. Writes via `PUT /v1/devices/{deviceId}`, the one device route that genuinely takes the UUID. The vendor app captions its own version of this screen "Update your side to fix your insight", so it is how the bed decides which physical side a zone sits on. Write is APP-DERIVED and unobserved, hence `EntityCategory.CONFIG` and a warning log on change. |
 | Sensor | \<person\> Average Target / Average Bed Temperature | `_avg_target_temperature`, `_avg_bed_temperature` | Mean of `session.temperature_setpoint.values` and `session.temperature.values`, 500+ samples each. A series cannot be a state, so it is reduced to a scalar with min/max as attributes. **Attributes are named `min_celsius` / `max_celsius` on purpose:** HA converts a state to the user's unit but leaves attributes untouched, and a bare `min: 17.5` beside a state of `69.9 °F` reads as a fault. |
 | Sensor | Last Session End | `_last_session_end` | `session.end_time` of the newest FINISHED session. Timestamp. Selected via `is_in_progress`, never via a missing `end_time`. |
@@ -248,7 +249,7 @@ Entities read from coordinator:
 | Button | Swap Bed Sides | `_action_swap_sides` | `POST /v1/sleep-configurations/user-swap`. Enabled by default: pressing it again reverses it, so a misfire is cheap. |
 | Button (disabled) | Split Zones | `_action_split_zones` | `POST /v1/sleep-configurations/user-split`. Disabled by default because **nothing in the live payload reports split state**, so a press has no observable result and no way to confirm what it did. |
 
-**A two-zone device with no partner linked exposes 71 base entities. A linked partner adds 55 more, for 126.** Counted from `core.entity_registry`, not derived: 16 device-level entities plus 55 per person.
+**A two-zone device with no partner linked exposes 72 base entities. A linked partner adds 55 more, for 127.** Counted from `core.entity_registry`, not derived: 17 device-level entities plus 55 per person.
 
 - 2 climate entities, one per zone.
 - 36 sensors: 11 insights, 4 apnea, 5 schedule temperatures and duration, current offset, live connection, 6 topper sensor readings, 2 measured and 2 target zone temperatures, 2 cooling countdowns, LED brightness, firmware, and Wi-Fi signal.
@@ -593,6 +594,46 @@ foreign ID, but "presumably" is not a good enough basis for the one call that
 cannot be taken back.
 
 ## Verification Log
+
+### 2026-07-27 — User access: `access` is an object, and the invite contract
+
+**`shared_with[].access` is not a role string.** It is
+`{role, expiry, allowed_actions}`. The key name reads like a role and it
+is not one. I assumed otherwise from the name alone, built a set
+comprehension over it, and the Bed Access sensor failed to add on its
+first run with `TypeError: cannot use 'dict' as a set element`. The
+WebSocket handler then raised on every update, because each live frame
+tries to write the entity's state.
+
+Two lessons, both already written in this file and both ignored:
+read the value, not the key name; and never build a set from data whose
+shape has not been measured.
+
+Measured shape on the live account: `access.role` = `'admin'` for the
+linked partner, `access.expiry` = null for permanent access, and
+`access.allowed_actions` mirrors the device capability list. `expiry`
+being present means guest access can be time limited, which the app
+never surfaces.
+
+`user_type` on `zones[].user` reads null on both zones, so it is not a
+usable source for role.
+
+**The invite contract was measured for free.** `POST
+/v1/user-device-invites` with an empty body returns a validation error
+enumerating all three required fields and their types: `device_ids`
+(array), `phone_number` (string), `role` (string). No invite is created.
+This is the same empty-body probe that produced the session PATCH
+schema, and it is now the standard way to extract a request contract
+from this API without a side effect.
+
+**The app's "Invite as Member" sends `admin` on the wire.** Five role
+labels exist in the app's translations (owner, admin, member, guest,
+other) and the invite route accepts two. That mapping lives in
+`util.invite_role_wire` with a test, because the same class of gap
+(`device_led_brightness` versus `led_brightness`) already cost this
+project a round of 404s.
+
+
 
 ### 2026-07-27 — `POST /v1/sleep-sessions/end` takes no body
 

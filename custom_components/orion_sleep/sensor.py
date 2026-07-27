@@ -43,6 +43,13 @@ SERVICE_DELETE_SLEEP_SESSION = "delete_sleep_session"
 SERVICE_CONFIRM_SLEEP_SESSION = "confirm_sleep_session"
 SERVICE_EDIT_SLEEP_SESSION = "edit_sleep_session"
 SERVICE_END_SLEEP_SESSION = "end_sleep_session"
+SERVICE_LIST_INVITES = "list_invites"
+SERVICE_INVITE_USER = "invite_user"
+SERVICE_CANCEL_INVITE = "cancel_invite"
+SERVICE_ACCEPT_INVITE = "accept_invite"
+SERVICE_REMOVE_USER_ACCESS = "remove_user_access"
+SERVICE_CREATE_GUEST = "create_guest"
+SERVICE_UPDATE_USER_PHONE = "update_user_phone"
 
 _INSIGHT_DISPLAY_NAMES = {
     "sleep_score": "Sleep Score",
@@ -676,6 +683,7 @@ async def async_setup_entry(
         entities.append(OrionLedBrightnessSensor(coordinator, device_id))
         entities.append(OrionFirmwareSensor(coordinator, device_id))
         entities.append(OrionWifiSignalSensor(coordinator, device_id))
+        entities.append(OrionAccessSensor(coordinator, device_id))
         if coordinator.has_partner_for_device(device_id):
             for description in INSIGHT_SENSOR_DESCRIPTIONS:
                 entities.append(OrionPartnerInsightSensor(coordinator, device_id, description))
@@ -724,6 +732,56 @@ async def async_setup_entry(
         SERVICE_END_SLEEP_SESSION,
         {vol.Required("confirm"): cv.boolean},
         "async_end_sleep_session",
+    )
+
+    # Access management is device-scoped rather than person-scoped, so it
+    # targets the Bed Access sensor. The device owns the guest list; a
+    # person's insight sensor has nothing to say about who else can use
+    # the bed.
+    platform.async_register_entity_service(
+        SERVICE_LIST_INVITES,
+        {},
+        "async_list_invites",
+        supports_response=SupportsResponse.ONLY,
+    )
+    platform.async_register_entity_service(
+        SERVICE_INVITE_USER,
+        {
+            vol.Required("phone_number"): cv.string,
+            vol.Required("role"): vol.In(sorted(util.INVITE_ROLES)),
+        },
+        "async_invite_user",
+    )
+    platform.async_register_entity_service(
+        SERVICE_CANCEL_INVITE,
+        {vol.Required("invite_id"): cv.string},
+        "async_cancel_invite",
+    )
+    platform.async_register_entity_service(
+        SERVICE_ACCEPT_INVITE,
+        {vol.Required("code"): cv.string},
+        "async_accept_invite",
+    )
+    platform.async_register_entity_service(
+        SERVICE_REMOVE_USER_ACCESS,
+        {
+            vol.Required("user_id"): cv.string,
+            vol.Required("confirm"): vol.All(cv.boolean, vol.Equal(True)),
+        },
+        "async_remove_user_access",
+    )
+    platform.async_register_entity_service(
+        SERVICE_CREATE_GUEST,
+        {},
+        "async_create_guest",
+    )
+    platform.async_register_entity_service(
+        SERVICE_UPDATE_USER_PHONE,
+        {
+            vol.Required("user_id"): cv.string,
+            vol.Required("phone"): cv.string,
+        },
+        "async_update_user_phone",
     )
 
 
@@ -1525,3 +1583,164 @@ class OrionWifiSignalSensor(OrionBaseEntity, SensorEntity):
             "last_seen": network.get("last_seen"),
         }
         return {key: value for key, value in attrs.items() if value is not None} or None
+
+
+class OrionAccessSensor(OrionBaseEntity, SensorEntity):
+    """Who can use this bed, and in what capacity.
+
+    An Orion bed is shared. One account owns it, a partner is a member,
+    and a guest gets their own sleep insights without control of the
+    device. None of that was visible from Home Assistant before.
+
+    The state is the number of people with access. The useful part is the
+    `people` attribute, which carries a name, a role, and the Orion user
+    id for each. The id is there because revoking access needs it and
+    there is no other way to obtain one without going back to the API.
+
+    Profile image URLs are dropped on the way through. They add nothing
+    here and they are the sort of thing that ends up in a screenshot.
+    """
+
+    _attr_icon = "mdi:account-group"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(self, coordinator, device_id: str) -> None:
+        super().__init__(coordinator, device_id)
+        self._attr_unique_id = f"{device_id}_access"
+        self._attr_name = "Bed Access"
+
+    def _people(self) -> list[dict]:
+        """Access records, with names routed through the alias layer.
+
+        `summarize_access` returns the vendor's own name because util has
+        no idea what the user renamed anybody to. Every other entity in
+        this integration shows the alias, so this one does too, and a
+        a household that renamed the vendor's name to something they
+        actually use does not get one sensor still using the old one.
+        """
+        people = util.summarize_access(self.coordinator.devices, self._device_id)
+        for person in people:
+            alias = self.coordinator.display_name_for_user(person["user_id"])
+            if alias:
+                person["name"] = alias
+        return people
+
+    @property
+    def native_value(self) -> int:
+        return len(self._people())
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        people = self._people()
+        return {
+            "people": people,
+            # Built from the normalised records rather than raw API
+            # values. A set comprehension over unvalidated data is how
+            # this sensor crashed on its first run: `access` turned out
+            # to be an object, and a dict cannot go in a set.
+            "roles": sorted({str(p["role"]) for p in people}),
+        }
+
+    # ── Services ──────────────────────────────────────────────────────
+    #
+    # Every one of these acts on the account that owns the device, so
+    # they all go through the primary client. A partner's token cannot
+    # manage access it was granted.
+
+    async def async_list_invites(self) -> dict:
+        """Pending invitations, as a service response."""
+        try:
+            body = await self.coordinator.api_client.list_device_invites()
+        except OrionApiError as err:
+            raise HomeAssistantError(f"Orion could not list invites: {err}") from err
+        response = body.get("response") if isinstance(body, dict) else None
+        invites = response.get("invites") if isinstance(response, dict) else None
+        return {"invites": invites if isinstance(invites, list) else []}
+
+    async def async_invite_user(self, phone_number: str, role: str) -> None:
+        """Invite somebody to this bed by phone number."""
+        try:
+            await self.coordinator.api_client.invite_user(
+                [self._device_id], phone_number, role
+            )
+        except ValueError as err:
+            raise HomeAssistantError(str(err)) from err
+        except OrionApiError as err:
+            raise HomeAssistantError(f"Orion rejected the invite: {err}") from err
+        _LOGGER.info("Sent an Orion %s invite for device %s", role, self._device_id)
+        await self.coordinator.async_request_refresh()
+
+    async def async_cancel_invite(self, invite_id: str) -> None:
+        """Withdraw an invitation that has not been accepted."""
+        try:
+            await self.coordinator.api_client.cancel_device_invite(invite_id)
+        except ValueError as err:
+            raise HomeAssistantError(str(err)) from err
+        except OrionApiError as err:
+            raise HomeAssistantError(f"Orion could not cancel the invite: {err}") from err
+
+    async def async_accept_invite(self, code: str) -> None:
+        """Redeem an invite code for the account this integration uses.
+
+        This is the only call here that acts on the receiving side. It
+        adds *this* account to somebody else's bed, so nothing local
+        changes until the next poll picks the new device up.
+        """
+        try:
+            await self.coordinator.api_client.accept_device_invite(code)
+        except ValueError as err:
+            raise HomeAssistantError(str(err)) from err
+        except OrionApiError as err:
+            raise HomeAssistantError(f"Orion rejected the invite code: {err}") from err
+        await self.coordinator.async_request_refresh()
+
+    async def async_remove_user_access(self, user_id: str, confirm: bool) -> None:
+        """Revoke somebody's access to this bed.
+
+        Not reversible from here. Getting them back means a fresh invite
+        that they have to accept, which is why this asks for confirmation
+        and refuses an id that is not currently on the bed.
+        """
+        if not confirm:
+            raise HomeAssistantError("Set confirm to true to revoke access")
+        known = {p["user_id"] for p in self._people()}
+        if user_id not in known:
+            raise HomeAssistantError(
+                f"{user_id} does not currently have access to this bed. "
+                "Check the people attribute on this sensor."
+            )
+        try:
+            await self.coordinator.api_client.remove_user_access(user_id)
+        except ValueError as err:
+            raise HomeAssistantError(str(err)) from err
+        except OrionApiError as err:
+            raise HomeAssistantError(f"Orion could not revoke access: {err}") from err
+        _LOGGER.warning("Revoked Orion access for user %s", user_id)
+        await self.coordinator.async_request_refresh()
+
+    async def async_create_guest(self) -> None:
+        """Add an unattached guest slot to this bed.
+
+        Different from inviting a guest by phone. This is what the app
+        does before it knows who is coming: it creates the guest, and a
+        number gets attached afterwards with update_user_phone.
+        """
+        try:
+            await self.coordinator.api_client.create_guest(self._device_id)
+        except ValueError as err:
+            raise HomeAssistantError(str(err)) from err
+        except OrionApiError as err:
+            raise HomeAssistantError(f"Orion could not add a guest: {err}") from err
+        await self.coordinator.async_request_refresh()
+
+    async def async_update_user_phone(self, user_id: str, phone: str) -> None:
+        """Attach or change a phone number for someone on this bed."""
+        try:
+            await self.coordinator.api_client.update_user_phone(user_id, phone)
+        except ValueError as err:
+            raise HomeAssistantError(str(err)) from err
+        except OrionApiError as err:
+            raise HomeAssistantError(
+                f"Orion could not update that phone number: {err}"
+            ) from err
+        await self.coordinator.async_request_refresh()

@@ -808,3 +808,114 @@ def validate_device_orientation(value: object) -> str:
             f"orientation must be one of {sorted(DEVICE_ORIENTATIONS)}, got {value!r}"
         )
     return value
+
+
+# ── User access management ────────────────────────────────────────────
+#
+# The app shows five role labels (owner, admin, member, guest, other) but
+# the invite route accepts only two. "Invite as Member" sends `admin` on
+# the wire. Keeping the user-facing word and the wire value in one table
+# stops that gap turning into a silent 400, the same way
+# `device_led_brightness` versus `led_brightness` did.
+
+INVITE_ROLES = ("member", "guest")
+
+_INVITE_ROLE_WIRE = {"member": "admin", "guest": "guest"}
+
+
+def invite_role_wire(role: object) -> str:
+    """Map a user-facing role to the value the invite route accepts."""
+    if not isinstance(role, str) or role.strip().lower() not in _INVITE_ROLE_WIRE:
+        raise ValueError(
+            f"role must be one of {', '.join(INVITE_ROLES)}, got {role!r}"
+        )
+    return _INVITE_ROLE_WIRE[role.strip().lower()]
+
+
+def normalize_phone(value: object) -> str:
+    """Strip formatting from a phone number and sanity-check the length.
+
+    Deliberately permissive about country. Orion is US-only today but the
+    invite screen carries a country picker, so rejecting anything that is
+    not eleven digits would break the moment that changes. Punctuation and
+    a leading plus are dropped because the auth route was measured to want
+    bare digits.
+    """
+    if not isinstance(value, str):
+        raise ValueError("phone number must be a string")
+    digits = "".join(ch for ch in value if ch.isdigit())
+    if not 10 <= len(digits) <= 15:
+        raise ValueError(
+            "phone number must contain between 10 and 15 digits, "
+            f"got {len(digits)}"
+        )
+    return digits
+
+
+def access_role(entry: object) -> tuple[str, object]:
+    """Pull the role and expiry out of one `shared_with` entry.
+
+    MEASURED 2026-07-27: `access` is an object, not a string. It carries
+    `role`, `expiry` (null for permanent access), and `allowed_actions`.
+    The key name reads like a role and it is not one, which is worth a
+    named function rather than an inline `.get`.
+
+    A plain string is still accepted, because guessing the shape wrong
+    once already cost a crash and the cheap defence is to handle both.
+    """
+    if not isinstance(entry, dict):
+        return "unknown", None
+    access = entry.get("access")
+    if isinstance(access, str) and access.strip():
+        return access, None
+    if not isinstance(access, dict):
+        return "unknown", None
+    role = access.get("role")
+    expiry = access.get("expiry")
+    return (
+        role if isinstance(role, str) and role.strip() else "unknown",
+        expiry if isinstance(expiry, str) else None,
+    )
+
+
+def summarize_access(devices: object, device_id: object = None) -> list[dict]:
+    """Who has access to a device, as name/role/id records.
+
+    Reads the role from `shared_with[].access.role` rather than from
+    `zones[].user.user_type`, which was measured to be null on every
+    zone.
+
+    Profile image URLs are deliberately dropped. The user id is kept
+    because revoking access needs it and there is no other way to get one
+    without going back to the API.
+    """
+    if not isinstance(devices, list):
+        return []
+    people: list[dict] = []
+    seen: set[str] = set()
+    for device in devices:
+        if not isinstance(device, dict):
+            continue
+        if device_id is not None and device.get("id") != device_id:
+            continue
+        for entry in device.get("shared_with") or []:
+            if not isinstance(entry, dict):
+                continue
+            user = entry.get("user")
+            if not isinstance(user, dict):
+                continue
+            uid = user.get("id")
+            if not isinstance(uid, str) or not uid or uid in seen:
+                continue
+            seen.add(uid)
+            role, expiry = access_role(entry)
+            people.append(
+                {
+                    "name": orion_user_label(user) or f"User {uid[:8]}",
+                    "role": role,
+                    "user_id": uid,
+                    "away": bool(entry.get("is_away")),
+                    "expires": expiry,
+                }
+            )
+    return sorted(people, key=lambda p: (p["role"], p["name"]))

@@ -379,6 +379,76 @@
           "description": "Must be true. Ends whichever session is currently open."
         }
       }
+    },
+    "list_invites": {
+      "name": "List invites",
+      "description": "Show invitations that have been sent but not yet accepted. Target the Bed Access sensor."
+    },
+    "invite_user": {
+      "name": "Invite user",
+      "description": "Invite somebody to this bed by phone number. Target the Bed Access sensor.",
+      "fields": {
+        "phone_number": {
+          "name": "Phone number",
+          "description": "Where the invite is sent. Punctuation and a leading plus are fine."
+        },
+        "role": {
+          "name": "Role",
+          "description": "A member can control the bed. A guest only receives their own sleep insights."
+        }
+      }
+    },
+    "cancel_invite": {
+      "name": "Cancel invite",
+      "description": "Withdraw an invitation that has not been accepted. Get the ID from List invites.",
+      "fields": {
+        "invite_id": {
+          "name": "Invite ID",
+          "description": "From the List invites response."
+        }
+      }
+    },
+    "accept_invite": {
+      "name": "Accept invite",
+      "description": "Redeem an invite code so this account is added to somebody else's bed. The new bed appears at the next poll.",
+      "fields": {
+        "code": {
+          "name": "Code",
+          "description": "The code the bed owner sent you."
+        }
+      }
+    },
+    "remove_user_access": {
+      "name": "Remove user access",
+      "description": "Revoke somebody's access to this bed. Not reversible: getting them back means a fresh invite they have to accept.",
+      "fields": {
+        "user_id": {
+          "name": "User ID",
+          "description": "From the people attribute on the Bed Access sensor."
+        },
+        "confirm": {
+          "name": "Confirm",
+          "description": "Must be on. Guards against revoking the wrong person."
+        }
+      }
+    },
+    "create_guest": {
+      "name": "Create guest",
+      "description": "Add an unattached guest slot to this bed, then give it a number with Update user phone. Target the Bed Access sensor."
+    },
+    "update_user_phone": {
+      "name": "Update user phone",
+      "description": "Attach or change a phone number for somebody on this bed.",
+      "fields": {
+        "user_id": {
+          "name": "User ID",
+          "description": "From the people attribute on the Bed Access sensor."
+        },
+        "phone": {
+          "name": "Phone number",
+          "description": "Punctuation and a leading plus are fine."
+        }
+      }
     }
   }
 }
