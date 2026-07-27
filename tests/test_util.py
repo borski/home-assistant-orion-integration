@@ -748,3 +748,149 @@ def test_clamp_cooling_minutes_always_returns_a_real_int():
     for value in (45, 45.7, None, True, 99999, -1):
         got = util.clamp_cooling_minutes(value, _D, _LO, _HI)
         assert isinstance(got, int) and not isinstance(got, bool)
+
+
+# ── Session deletion ──────────────────────────────────────────────────
+#
+# This is the only irreversible call in the integration. The tests below
+# are deliberately paranoid about what gets through, because the failure
+# mode is a permanently destroyed night rather than an error message.
+
+
+def test_delete_reasons_are_exactly_the_two_the_app_sends():
+    assert util.SESSION_DELETE_REASONS == {"not_real_session", "no_longer_needed"}
+
+
+def test_validate_session_delete_reason_accepts_only_those_two():
+    for good in ("not_real_session", "no_longer_needed"):
+        assert util.validate_session_delete_reason(good) == good
+
+
+def test_validate_session_delete_reason_rejects_everything_else():
+    bad = [
+        "", " ", "NOT_REAL_SESSION", "not real session", "phantom",
+        "delete", None, 0, 1, True, [], {}, ["not_real_session"],
+        " not_real_session", "not_real_session ",
+    ]
+    for value in bad:
+        try:
+            util.validate_session_delete_reason(value)
+        except ValueError:
+            continue
+        raise AssertionError(f"{value!r} was accepted and should not have been")
+
+
+def test_validate_session_delete_reason_error_names_the_allowed_values():
+    """A rejection has to say what would work, or it just blocks the user."""
+    try:
+        util.validate_session_delete_reason("nope")
+    except ValueError as err:
+        assert "not_real_session" in str(err)
+        assert "no_longer_needed" in str(err)
+    else:
+        raise AssertionError("expected ValueError")
+
+
+_INSIGHTS = {
+    "2026-07-26": {
+        "score": 71,
+        "sessions": [
+            {
+                "session_id": "sess-old",
+                "zone_id": "zone_a",
+                "start_time": "2026-07-26T23:10:00Z",
+                "end_time": "2026-07-27T06:50:00Z",
+                "is_in_progress": False,
+                "sleep_summary": {"time_asleep": 412.4},
+            }
+        ],
+    },
+    "2026-07-27": {
+        "score": 68,
+        "sessions": [
+            {
+                "session_id": "sess-phantom",
+                "zone_id": "zone_a",
+                "start_time": "2026-07-27T01:00:00Z",
+                "end_time": "2026-07-27T02:00:00Z",
+                "is_in_progress": False,
+                "sleep_summary": {"time_asleep": 60},
+            },
+            {
+                "session_id": "sess-running",
+                "zone_id": "zone_b",
+                "start_time": "2026-07-27T03:00:00Z",
+                "end_time": None,
+                "is_in_progress": True,
+                "sleep_summary": {},
+            },
+        ],
+    },
+}
+
+
+def test_summarize_sessions_is_newest_first():
+    rows = util.summarize_sessions(_INSIGHTS)
+    assert [r["session_id"] for r in rows] == [
+        "sess-phantom",
+        "sess-running",
+        "sess-old",
+    ]
+
+
+def test_summarize_sessions_carries_what_is_needed_to_pick_one():
+    rows = util.summarize_sessions(_INSIGHTS)
+    phantom = rows[0]
+    assert phantom["session_id"] == "sess-phantom"
+    assert phantom["date"] == "2026-07-27"
+    assert phantom["zone_id"] == "zone_a"
+    assert phantom["in_progress"] is False
+    assert phantom["minutes_asleep"] == 60
+    assert phantom["day_score"] == 68
+
+
+def test_summarize_sessions_flags_a_running_session_rather_than_hiding_it():
+    """A running session is exactly the kind someone may want deleted."""
+    rows = util.summarize_sessions(_INSIGHTS)
+    running = [r for r in rows if r["session_id"] == "sess-running"][0]
+    assert running["in_progress"] is True
+    assert "end_time" not in running
+
+
+def test_summarize_sessions_rounds_minutes_and_rejects_bool():
+    rows = util.summarize_sessions(_INSIGHTS)
+    assert rows[2]["minutes_asleep"] == 412
+    weird = {"d": {"sessions": [{"session_id": "s", "sleep_summary": {"time_asleep": True}}]}}
+    assert "minutes_asleep" not in util.summarize_sessions(weird)[0]
+
+
+def test_summarize_sessions_skips_rows_with_no_usable_id():
+    """No id means nothing can be deleted with it, so it is noise."""
+    payload = {
+        "2026-07-27": {
+            "sessions": [
+                {"session_id": ""},
+                {"session_id": None},
+                {"session_id": 123},
+                {"no_id": True},
+                None,
+                "junk",
+                {"session_id": "keep-me"},
+            ]
+        }
+    }
+    rows = util.summarize_sessions(payload)
+    assert [r["session_id"] for r in rows] == ["keep-me"]
+
+
+def test_summarize_sessions_honours_the_limit():
+    payload = {
+        f"2026-07-{d:02d}": {"sessions": [{"session_id": f"s{d}"}]} for d in range(1, 21)
+    }
+    assert len(util.summarize_sessions(payload, limit=5)) == 5
+    assert len(util.summarize_sessions(payload)) == 20
+
+
+def test_summarize_sessions_never_raises_on_hostile_input():
+    for bad in (None, [], "x", 0, True, {"d": None}, {"d": {"sessions": "no"}}, {}):
+        assert util.summarize_sessions(bad) == []

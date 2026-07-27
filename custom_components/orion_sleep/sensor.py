@@ -7,6 +7,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+import voluptuous as vol
 from homeassistant.components.sensor import (
     SensorDeviceClass,
     SensorEntity,
@@ -15,9 +16,14 @@ from homeassistant.components.sensor import (
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import PERCENTAGE, UnitOfTemperature, UnitOfTime
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, SupportsResponse
+from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.entity import EntityCategory
-from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.entity_platform import (
+    AddEntitiesCallback,
+    async_get_current_platform,
+)
 
 from . import util
 from .coordinator import OrionDataUpdateCoordinator
@@ -28,6 +34,9 @@ from .entity import OrionBaseEntity
 _TOPPER_SENSORS: tuple[str, ...] = ("sensor1", "sensor2")
 
 _LOGGER = logging.getLogger(__name__)
+
+SERVICE_LIST_SLEEP_SESSIONS = "list_sleep_sessions"
+SERVICE_DELETE_SLEEP_SESSION = "delete_sleep_session"
 
 _INSIGHT_DISPLAY_NAMES = {
     "sleep_score": "Sleep Score",
@@ -478,6 +487,28 @@ async def async_setup_entry(
 
     async_add_entities(entities)
 
+    # Both services are registered on this platform because sleep sessions
+    # belong to an account, and the insight sensors are the only entities
+    # that know which account they speak for. Targeting one of a person's
+    # insight sensors is how the caller says whose session they mean,
+    # without ever handling a raw Orion user id.
+    platform = async_get_current_platform()
+    platform.async_register_entity_service(
+        SERVICE_LIST_SLEEP_SESSIONS,
+        {vol.Optional("limit", default=30): vol.All(int, vol.Range(min=1, max=200))},
+        "async_list_sleep_sessions",
+        supports_response=SupportsResponse.ONLY,
+    )
+    platform.async_register_entity_service(
+        SERVICE_DELETE_SLEEP_SESSION,
+        {
+            vol.Required("session_id"): cv.string,
+            vol.Required("reason"): vol.In(sorted(util.SESSION_DELETE_REASONS)),
+            vol.Required("confirm"): vol.All(cv.boolean, vol.Equal(True)),
+        },
+        "async_delete_sleep_session",
+    )
+
 
 # ── Entities ──────────────────────────────────────────────────────────────
 
@@ -508,6 +539,82 @@ class OrionSensorEntity(OrionBaseEntity, SensorEntity):
 
     def _score(self) -> float | None:
         return _get_score(self.coordinator.data or {})
+
+    # ── Session management ────────────────────────────────────────
+    #
+    # Sessions belong to the account that recorded them, so both of
+    # these resolve their own client rather than reaching for the
+    # primary one. The partner subclass overrides both.
+
+    def _sessions_insights(self) -> dict:
+        return util.nested_mapping(self.coordinator.data, "insights", "data")
+
+    def _sessions_client(self):
+        return self.coordinator.api_client
+
+    def _sessions_owner(self) -> str:
+        return self.coordinator.primary_name()
+
+    async def async_list_sleep_sessions(self, limit: int = 30) -> dict:
+        """Return this person's recent sessions, newest first.
+
+        Read-only. Exists so a session id can be found without ever
+        putting one into entity state, where it would be recorded
+        forever for the sake of a lookup done once.
+        """
+        sessions = util.summarize_sessions(self._sessions_insights(), limit)
+        return {
+            "owner": self._sessions_owner(),
+            "count": len(sessions),
+            "sessions": sessions,
+        }
+
+    async def async_delete_sleep_session(
+        self, session_id: str, reason: str, confirm: bool
+    ) -> None:
+        """Permanently delete one sleep session. There is no undo.
+
+        `confirm` is required and must be true. It buys nothing against
+        a deliberate mistake, but it does stop a half-finished service
+        call in the UI from destroying a night, which is the realistic
+        failure here.
+
+        The id is checked against this person's own sessions first. The
+        server would presumably reject someone else's id, but "presumably"
+        is not good enough for the one call that cannot be taken back,
+        and a typo'd id that happens to be real is exactly the case worth
+        catching locally.
+        """
+        if not confirm:
+            raise HomeAssistantError("Refusing to delete: confirm was not set")
+
+        known = {
+            row["session_id"] for row in util.summarize_sessions(self._sessions_insights(), 200)
+        }
+        if session_id not in known:
+            raise HomeAssistantError(
+                f"No session {session_id} belongs to {self._sessions_owner()}. "
+                "Run orion_sleep.list_sleep_sessions against this entity to see "
+                "which sessions exist and who owns them."
+            )
+
+        client = self._sessions_client()
+        if client is None:
+            raise HomeAssistantError(
+                f"No API client available for {self._sessions_owner()}"
+            )
+
+        _LOGGER.warning(
+            "Deleting sleep session for %s, reason %s. This cannot be undone",
+            self._sessions_owner(),
+            reason,
+        )
+        try:
+            await client.delete_sleep_session(session_id, reason)
+        except ValueError as err:
+            raise HomeAssistantError(str(err)) from err
+        await self.coordinator.async_request_refresh()
+
 
     @property
     def native_value(self) -> Any:
@@ -563,6 +670,16 @@ class OrionPartnerInsightSensor(OrionSensorEntity):
 
     def _score(self) -> float | None:
         return _get_partner_score(self.coordinator.data or {})
+
+    def _sessions_insights(self) -> dict:
+        return util.nested_mapping(self.coordinator.data, "partner_insights", "data")
+
+    def _sessions_client(self):
+        return self.coordinator.partner_api_client
+
+    def _sessions_owner(self) -> str:
+        return self.coordinator.partner_name()
+
 
     @property
     def available(self) -> bool:

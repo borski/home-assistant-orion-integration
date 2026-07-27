@@ -274,6 +274,34 @@
     "stop_cooling": {
       "name": "Stop cooling",
       "description": "End hot flash relief early on one side of the bed. The device restores the temperature and power state it saved when relief began."
+    },
+    "list_sleep_sessions": {
+      "name": "List sleep sessions",
+      "description": "List recent sleep sessions for one person, newest first, so a session ID can be found. Read-only. Target any of that person's sleep insight sensors.",
+      "fields": {
+        "limit": {
+          "name": "Limit",
+          "description": "How many sessions to return. Defaults to 30."
+        }
+      }
+    },
+    "delete_sleep_session": {
+      "name": "Delete sleep session",
+      "description": "Permanently delete one sleep session. There is no undo. Use List sleep sessions first to find the ID, and target the same person's sensor.",
+      "fields": {
+        "session_id": {
+          "name": "Session ID",
+          "description": "The session to delete. Get this from List sleep sessions."
+        },
+        "reason": {
+          "name": "Reason",
+          "description": "Why it is being removed. 'not_real_session' is for a night the bed logged that never happened."
+        },
+        "confirm": {
+          "name": "Confirm",
+          "description": "Must be on. Deleting a session cannot be undone."
+        }
+      }
     }
   }
 }

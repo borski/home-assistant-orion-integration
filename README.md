@@ -99,6 +99,8 @@ This changes friendly names only. Entity IDs, unique IDs, history, statistics, a
 | `orion_sleep.override_schedule` | a `time` entity | Change tonight only. Accepts any mix of bedtime, wake time, four temperature offsets, and four flags. Leaves the stored weekday schedule alone. |
 | `orion_sleep.start_cooling` | a `climate` entity | Start rapid cooling on that side. `duration_minutes` defaults to 30. |
 | `orion_sleep.stop_cooling` | a `climate` entity | Cancel cooling early. The bed restores the setpoint it interrupted. |
+| `orion_sleep.list_sleep_sessions` | any of that person's insight sensors | List recent sessions with their IDs, newest first. Read-only. Returns response data. |
+| `orion_sleep.delete_sleep_session` | the same person's sensor | Permanently delete one session. **No undo.** Requires an explicit ID, a reason, and `confirm: true`. |
 
 Point the override service at someone's Bedtime or Wake Up Time entity and it figures out whose schedule to write. You never handle a raw Orion user ID.
 
@@ -110,6 +112,40 @@ data:
   bedtime: "23:45:00"
   bedtime_temp_offset: -4
 ```
+
+### Removing a session the bed invented
+
+The topper sometimes records a night that did not happen. See the occupancy
+defect below. Those fabricated sessions carry a sleep score and stage
+durations, so they drag down every average and sit permanently in long-term
+statistics.
+
+Find the culprit first. This is read-only and returns the data to you rather
+than putting session IDs into entity state:
+
+```yaml
+action: orion_sleep.list_sleep_sessions
+target:
+  entity_id: sensor.sleepy_alex_sleep_score
+```
+
+Then delete it by ID, targeting the same person:
+
+```yaml
+action: orion_sleep.delete_sleep_session
+target:
+  entity_id: sensor.sleepy_alex_sleep_score
+data:
+  session_id: 3fa85f64-5717-4562-b3fc-2c963f66afa6
+  reason: not_real_session
+  confirm: true
+```
+
+**This cannot be undone.** There is no restore route and no way to list deleted
+sessions. Three things have to line up before anything is sent: `confirm` must
+be true, the reason must be one the vendor recognises, and the ID must belong
+to the person whose entity you targeted. Sessions belong to the account that
+recorded them, so a partner's session must be deleted through a partner sensor.
 
 ## Real-time updates
 

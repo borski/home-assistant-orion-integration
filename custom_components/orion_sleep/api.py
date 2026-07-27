@@ -19,6 +19,7 @@ from .util import (
     safe_api_error_code,
     should_refresh_token,
     validate_schedule_write,
+    validate_session_delete_reason,
 )
 
 # Body keys accepted by PUT /v1/devices/{serial}/live besides `zones`.
@@ -664,6 +665,41 @@ class OrionApiClient:
         """
         await self.ensure_valid_token()
         return await self._request("POST", f"/v1/devices/{device_serial}/update")
+
+    async def delete_sleep_session(self, session_id: str, reason: str) -> dict:
+        """DELETE /v1/sleep-sessions/{id} — permanently remove a session.
+
+        **This is the only irreversible call in the integration.** There
+        is no undo, no restore, and no route that lists deleted sessions.
+        Everything else that writes to the bed can be put back; this
+        cannot. Treat a wrong `session_id` as data loss.
+
+        Confidence: APP-DERIVED. `_deleteSleepSession` builds the path at
+        decompiled line 1106381 and issues a DELETE carrying the body in
+        axios' `{data: ...}` config slot. The caller at 1423492 assembles
+        that body as `{"reason": ...}`, and the two reasons its sheet
+        offers are `not_real_session` (1423857) and `no_longer_needed`
+        (1423877).
+
+        The reason is validated against those two rather than passed
+        through. A rejected reason should stop the call, not travel to a
+        destructive endpoint to see what happens.
+
+        Sessions belong to whichever account recorded them, so this must
+        be called on the client that owns the session. Deleting a
+        partner's session through the primary client has not been tested
+        and should not be assumed to work or to fail safely.
+        """
+        if not isinstance(session_id, str) or not session_id.strip():
+            raise ValueError("delete_sleep_session requires a session_id")
+        validated = validate_session_delete_reason(reason)
+
+        await self.ensure_valid_token()
+        return await self._request(
+            "DELETE",
+            f"/v1/sleep-sessions/{session_id}",
+            json_data={"reason": validated},
+        )
 
     async def update_schedule_temperature(
         self,

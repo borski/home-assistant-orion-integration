@@ -633,3 +633,87 @@ def clamp_cooling_minutes(value: object, default: int, low: int, high: int) -> i
     except (TypeError, ValueError, OverflowError):
         return default
     return max(low, min(high, minutes))
+
+
+# ── Sleep session deletion ────────────────────────────────────────────
+#
+# Wire values read from Orion Android v2.4.1. The delete sheet offers
+# exactly two reasons, at decompiled lines 1423857 and 1423877, and the
+# caller at 1423492 sends them as `{"reason": ...}` in the DELETE body.
+#
+# `not_real_session` is the one that matters here: it is what the vendor
+# sends when the bed logged a night that never happened, which is the
+# case this integration exists to clean up.
+SESSION_DELETE_REASONS: frozenset[str] = frozenset(
+    {"not_real_session", "no_longer_needed"}
+)
+
+
+def validate_session_delete_reason(reason: object) -> str:
+    """Return an accepted deletion reason or raise.
+
+    Deliberately an allowlist. This is the only irreversible call in the
+    integration, and a reason the server does not recognise is a reason
+    to stop rather than to send anything and find out.
+    """
+    if not isinstance(reason, str) or reason not in SESSION_DELETE_REASONS:
+        allowed = ", ".join(sorted(SESSION_DELETE_REASONS))
+        raise ValueError(f"reason must be one of: {allowed}")
+    return reason
+
+
+def summarize_sessions(insights_data: object, limit: int = 30) -> list[dict]:
+    """Flatten insights into a list a human can pick a session out of.
+
+    Exists because deleting a session needs its id, and an id is the one
+    thing this integration has always deliberately kept out of entity
+    state. Rather than leak identifiers into attributes that get recorded
+    forever, they are produced on demand by a service call.
+
+    Newest first, because the session someone wants to delete is almost
+    always the one that just appeared. Sessions still in progress are
+    included and flagged rather than hidden: a running session is exactly
+    the kind a sleeper might want gone, and silently omitting it would
+    look like the service was broken.
+    """
+    if not isinstance(insights_data, dict):
+        return []
+
+    rows: list[dict] = []
+    for date_key in sorted(insights_data, reverse=True):
+        day = insights_data.get(date_key)
+        if not isinstance(day, dict):
+            continue
+        sessions = day.get("sessions")
+        if not isinstance(sessions, list):
+            continue
+        for session in sessions:
+            if not isinstance(session, dict):
+                continue
+            session_id = session.get("session_id")
+            if not isinstance(session_id, str) or not session_id:
+                continue
+            row: dict = {
+                "session_id": session_id,
+                "date": date_key,
+                "in_progress": session_in_progress(session),
+            }
+            for src, dest in (
+                ("start_time", "start_time"),
+                ("end_time", "end_time"),
+                ("zone_id", "zone_id"),
+            ):
+                value = session.get(src)
+                if value is not None:
+                    row[dest] = value
+            summary = session_subsection(session, "sleep_summary")
+            asleep = summary.get("time_asleep")
+            if isinstance(asleep, (int, float)) and not isinstance(asleep, bool):
+                row["minutes_asleep"] = int(round(float(asleep)))
+            score = day.get("score")
+            if isinstance(score, (int, float)) and not isinstance(score, bool):
+                row["day_score"] = score
+            rows.append(row)
+            if len(rows) >= limit:
+                return rows
+    return rows

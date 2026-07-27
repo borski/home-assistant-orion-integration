@@ -559,9 +559,86 @@ strictly one key per request.
 module and was not resolved to literals. 30 appears as the clamp seed.
 The service accepts 1 to 240 and lets the server reject what it dislikes.
 
+### `orion_sleep.list_sleep_sessions` and `orion_sleep.delete_sleep_session`
+
+Target any of a person's sleep insight sensors. That is how the caller says
+whose sessions they mean, without handling a raw Orion user id, and it is why
+these live on the sensor platform rather than being domain-level services:
+the insight sensors are the only entities that know which account they speak
+for.
+
+`list_sleep_sessions` is read-only and uses `SupportsResponse.ONLY`, so the
+IDs come back to the caller instead of being written into entity state.
+That is deliberate. A session ID is needed once, to delete something, and
+putting one in an attribute would record it forever for the sake of a lookup
+done once. It also keeps identifiers out of the recorder, which is the same
+reasoning that already keeps them out of diagnostics.
+
+`delete_sleep_session` is **the only irreversible call in the integration.**
+No restore route exists and no route lists deleted sessions. Three guards sit
+in front of it, all verified live:
+
+1. `confirm` must be `true`. Schema-enforced, so a half-finished service call
+   in the UI cannot fire.
+2. `reason` must be `not_real_session` or `no_longer_needed`, the only two the
+   vendor's own sheet sends. Schema-enforced.
+3. The ID must appear in that person's own sessions. Checked locally before
+   anything is sent, because a typo that happens to be a real ID belonging to
+   someone else is exactly the case worth catching before the network.
+
+The third guard is the load-bearing one. The server would presumably reject a
+foreign ID, but "presumably" is not a good enough basis for the one call that
+cannot be taken back.
+
 ## Verification Log
 
 Live-request confirmations, newest first. A claim only earns "measured" by appearing here.
+
+### 2026-07-27 — Session listing works, and it found two phantom nights
+
+Built `orion_sleep.list_sleep_sessions` and `orion_sleep.delete_sleep_session`.
+The listing service is **MEASURED**. The delete route is **APP-DERIVED** and has
+deliberately never been executed against a real session.
+
+The listing immediately paid for itself. Run against the primary account at
+roughly 03:15 local, with the account holder demonstrably not in the bed at any
+point that night:
+
+| session | local window | asleep | in progress |
+|---|---|---|---|
+| session A | 00:55 to 03:02 | 128 min | **true** |
+| session B | 23:10 to 00:21 | 60 min | false |
+
+Both on `zone_a`. Both fabricated. The bed invented **188 minutes of sleep for
+someone who was downstairs**, and attached a score of 68 to it.
+
+This is the occupancy bug's downstream cost, and it is worse than a wrong
+binary sensor. Bad occupancy produces bad sessions, bad sessions poison every
+average and every long-term statistic, and nothing in the integration could
+remove them until now.
+
+Note the first row also re-confirms the documented trap: `end_time` is populated
+while `is_in_progress` is still true.
+
+**Delete route, and why it stays app-derived.** Body is `{"reason": ...}`,
+carried in axios' `{data: ...}` config slot on a DELETE
+(`_deleteSleepSession`, decompiled 1106381; caller assembles the body at
+1423492). The sheet offers exactly two reasons, `not_real_session` (1423857)
+and `no_longer_needed` (1423877).
+
+Three guards were tested live, all against real ids where possible, none of
+which reached the API:
+
+1. An id that belongs to nobody is refused locally, naming the owner and
+   pointing at the listing service.
+2. `confirm: false` fails schema validation.
+3. A reason outside the two-value allowlist fails schema validation.
+
+The deletion itself was **not** run. It is the only irreversible call in the
+integration, the account holder was asleep and could not verify the outcome,
+and those two phantom sessions are currently the best evidence available for
+the occupancy bug. Destroying evidence to prove a delete button works is a bad
+trade.
 
 ### 2026-07-27 — `duration_minutes` is honoured, and occupancy lies again
 

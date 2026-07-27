@@ -90,3 +90,44 @@ stop_cooling:
     entity:
       integration: orion_sleep
       domain: climate
+
+list_sleep_sessions:
+  target:
+    entity:
+      integration: orion_sleep
+      domain: sensor
+  fields:
+    limit:
+      required: false
+      default: 30
+      selector:
+        number:
+          min: 1
+          max: 200
+          step: 1
+          mode: box
+
+delete_sleep_session:
+  target:
+    entity:
+      integration: orion_sleep
+      domain: sensor
+  fields:
+    session_id:
+      required: true
+      example: "0199f3c1-0000-0000-0000-000000000000"
+      selector:
+        text:
+    reason:
+      required: true
+      default: not_real_session
+      selector:
+        select:
+          options:
+            - not_real_session
+            - no_longer_needed
+    confirm:
+      required: true
+      default: false
+      selector:
+        boolean:
