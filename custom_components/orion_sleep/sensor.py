@@ -14,7 +14,7 @@ from homeassistant.components.sensor import (
     SensorStateClass,
 )
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import PERCENTAGE
+from homeassistant.const import PERCENTAGE, UnitOfTemperature
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -284,10 +284,14 @@ SCHEDULE_SENSOR_DESCRIPTIONS: tuple[OrionSensorEntityDescription, ...] = (
         icon="mdi:timer-sand",
         value_fn=lambda schedule: _calc_schedule_duration(schedule),
     ),
+    # device_class=TEMPERATURE added 2026-07-26. Without it HA treats "°C"
+    # as a custom unit and will NOT convert for a Fahrenheit household, so
+    # these rendered as "23 °C" beside a climate card reading "78 °F".
     OrionSensorEntityDescription(
         key="bedtime_temp",
         translation_key="bedtime_temp",
-        native_unit_of_measurement="°C",
+        device_class=SensorDeviceClass.TEMPERATURE,
+        native_unit_of_measurement=UnitOfTemperature.CELSIUS,
         state_class=SensorStateClass.MEASUREMENT,
         icon="mdi:thermometer-lines",
         value_fn=lambda schedule: schedule.get("bedtime_temp") if schedule else None,
@@ -296,7 +300,8 @@ SCHEDULE_SENSOR_DESCRIPTIONS: tuple[OrionSensorEntityDescription, ...] = (
     OrionSensorEntityDescription(
         key="wakeup_temp",
         translation_key="wakeup_temp",
-        native_unit_of_measurement="°C",
+        device_class=SensorDeviceClass.TEMPERATURE,
+        native_unit_of_measurement=UnitOfTemperature.CELSIUS,
         state_class=SensorStateClass.MEASUREMENT,
         icon="mdi:thermometer-alert",
         value_fn=lambda schedule: schedule.get("wakeup_temp") if schedule else None,
@@ -363,6 +368,9 @@ async def async_setup_entry(
             entities.append(OrionScheduleSensorEntity(coordinator, device_id, description))
         entities.append(OrionCurrentTempOffsetSensor(coordinator, device_id))
         entities.append(OrionWebSocketStateSensor(coordinator, device_id))
+        for zone_id in coordinator.device_zone_ids(device_id):
+            entities.append(OrionZoneMeasuredTempSensor(coordinator, device_id, zone_id))
+            entities.append(OrionZoneTargetTempSensor(coordinator, device_id, zone_id))
         for sensor_name in _TOPPER_SENSORS:
             entities.append(OrionLiveHeartRateSensor(coordinator, device_id, sensor_name))
             entities.append(OrionLiveBreathRateSensor(coordinator, device_id, sensor_name))
@@ -699,21 +707,90 @@ class OrionSensorStatusTextSensor(_OrionLiveSensorBase):
         return self.coordinator.sensor_status_text(self._device_id, self._sensor_name)
 
 
+class _OrionZoneTempSensor(OrionBaseEntity, SensorEntity):
+    """Shared plumbing for the per-zone temperature sensors.
+
+    These duplicate values already carried on the climate entity, and that
+    is the point. A climate entity's `current_temperature` and
+    `target_temperature` are attributes, so they are graphable from the
+    recorder but are not retained as long-term statistics past the purge
+    window. A `sensor` with a `state_class` is.
+    """
+
+    _attr_device_class = SensorDeviceClass.TEMPERATURE
+    _attr_native_unit_of_measurement = UnitOfTemperature.CELSIUS
+    _attr_state_class = SensorStateClass.MEASUREMENT
+
+    _suffix = ""
+    _label = ""
+
+    def __init__(
+        self,
+        coordinator: OrionDataUpdateCoordinator,
+        device_id: str,
+        zone_id: str,
+    ) -> None:
+        super().__init__(coordinator, device_id)
+        self._zone_id = zone_id
+        self._attr_unique_id = f"{device_id}_{zone_id}_{self._suffix}"
+        self._attr_name = f"{coordinator.zone_label(device_id, zone_id)} {self._label}"
+
+    def _read(self) -> float | None:
+        raise NotImplementedError
+
+    @property
+    def available(self) -> bool:
+        return super().available and self._read() is not None
+
+    @property
+    def native_value(self) -> float | None:
+        return self._read()
+
+
+class OrionZoneMeasuredTempSensor(_OrionZoneTempSensor):
+    """Measured temperature at one zone, from `status.zones[].temp`."""
+
+    _suffix = "measured_temp"
+    _label = "Measured Temperature"
+    _attr_icon = "mdi:thermometer"
+
+    def _read(self) -> float | None:
+        return self.coordinator.zone_measured_temp(self._device_id, self._zone_id)
+
+
+class OrionZoneTargetTempSensor(_OrionZoneTempSensor):
+    """Target temperature for one zone, from `zones[].temp`.
+
+    This is the LIVE setpoint, not the scheduled one. The
+    `today_sleep_schedule.*_temp` sensors report schedule intent, which
+    diverges from this the moment anyone nudges a zone by hand.
+    """
+
+    _suffix = "target_temp"
+    _label = "Target Temperature"
+    _attr_icon = "mdi:thermometer-check"
+
+    def _read(self) -> float | None:
+        return self.coordinator.zone_setpoint(self._device_id, self._zone_id)
+
+
 class OrionLedBrightnessSensor(OrionBaseEntity, SensorEntity):
-    """Control Tower LED brightness (0-100) — READ ONLY.
+    """Control Tower LED brightness (0-100), read side.
 
-    Briefly modelled as a `number`. Not writable: readable in the live
-    snapshot, but no write path exists anywhere we can find.
-    `POST /v1/devices/{id}/action` takes only `reboot` / `forget_wifi`
-    (measured 2026-07-26) and `PUT .../live` requires `zones`.
+    The WRITE side lives on `number.<device>_led_brightness`
+    (`PUT /v1/devices/{serial}/live` with `{"led_brightness": int}`,
+    measured 2026-07-26). This sensor is kept alongside it deliberately:
+    a `number` entity produces no long-term statistics, so without this
+    the history would be lost.
 
-    `led_color` {r,g,b} is likewise read-only — `DeviceAllowedAction` has
-    no colour member — which is why no `light` entity is modelled.
+    `led_color` {r,g,b} is referenced in the app but absent from the
+    documented live payload, so no `light` entity is modelled.
     """
 
     _attr_name = "LED Brightness"
     _attr_icon = "mdi:brightness-6"
     _attr_native_unit_of_measurement = PERCENTAGE
+    _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_entity_category = EntityCategory.DIAGNOSTIC
 
     def __init__(

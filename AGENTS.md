@@ -208,14 +208,25 @@ Entities read from coordinator:
 | Number | Asleep Phase 2 Offset | `_phase_2_temp_offset` | As above, `phase_2_temp` field. |
 | Number | Wake Up Temperature Offset | `_wakeup_temp_offset` | As above, `wakeup_temp` field. |
 
-**A two-zone device exposes 41 base entities. A linked partner adds 11 partner insight sensors.**
+| Sensor | \<zone\> Measured Temperature | `_{zoneId}_measured_temp` | `status.zones[].temp`. Duplicates the climate entity's `current_temperature` on purpose: climate attributes are not retained as long-term statistics, a `sensor` with a `state_class` is. |
+| Sensor | \<zone\> Target Temperature | `_{zoneId}_target_temp` | `zones[].temp`, the LIVE setpoint. Distinct from `today_sleep_schedule.*_temp`, which is schedule intent and diverges the moment a zone is nudged by hand. |
+| Binary Sensor (diag) | Firmware Update Available | `_firmware_update_available` | `status.pending_update.is_available`. Deliberately not an `update` entity: nothing in the payload carries the available version string. |
+| Number | LED Brightness | `_led_brightness` | 0-100 write via `PUT /v1/devices/{serial_number}/live`. Debounced with an optimistic local write and a post-write lock, mirroring the vendor app. |
+| Switch | Quiet Mode | `_quiet_mode` | Write via the same live route. Replaced the old read-only binary sensor once the write was measured. |
+
+**A two-zone device exposes 47 base entities. A linked partner adds 11 partner insight sensors.**
 
 - 2 climate entities, one per zone.
-- 27 sensors: 11 insights, 5 schedule, current offset, live connection, 6 topper sensor readings, LED brightness, firmware, and Wi-Fi signal.
-- 4 number sliders, one per schedule-phase temperature offset.
-- 5 binary sensors: sleep session, 2 occupancy sensors, quiet mode, and safety problem.
-- 2 switches: runtime power and Away Mode. Away Mode is omitted for accounts with multiple devices because the API action is account-global.
+- 31 sensors: 11 insights, 5 schedule, current offset, live connection, 6 topper sensor readings, 2 measured and 2 target zone temperatures, LED brightness, firmware, and Wi-Fi signal.
+- 5 numbers: 4 schedule-phase temperature offsets plus LED brightness.
+- 5 binary sensors: sleep session, 2 occupancy sensors, firmware update available, and safety problem.
+- 3 switches: runtime power, Away Mode, and quiet mode. Away Mode is omitted for accounts with multiple devices because the API action is account-global.
 - 1 button: reboot. Forget Wi-Fi is intentionally not exposed.
+
+Both zone temperature sensors and the LED brightness sensor carry
+`state_class=MEASUREMENT` so they generate long-term statistics. The
+`number` entities do not and never will, which is why the LED keeps both
+a Number (write) and a Sensor (history).
 
 ### Sensor Implementation Notes
 
@@ -338,6 +349,51 @@ Notable:
 ## Verification Log
 
 Live-request confirmations, newest first. A claim only earns "measured" by appearing here.
+
+### 2026-07-26 — Exhaustive APK route enumeration (app-derived, not measured)
+
+Static analysis of the decompiled Orion Sleep v2.4.1 Hermes bundle (51 MB,
+1,468,946 lines) resolved every one of the 20 endpoints previously carried
+as `speculative`. All 85 `networkInstance` call sites were accounted for.
+This is **app-derived**, not measured: nothing was executed.
+
+Nine were fabricated and have been deleted: `verifyBeforeUpdateEmail`,
+`registerDevice`, `isScheduleV2Enabled`, `cancelPatchInvite`,
+`acceptDeviceInvite`, `isScheduleRecommendationsEnabled`, `getSurvey`,
+`healthCheck`, `getSchedulesProModeTest`.
+
+**The fabrication mechanism, worth understanding so it is not repeated.**
+Every fabricated path exists verbatim in the extracted string table because
+the Hermes string pool packs strings with shared substrings and no
+delimiters. Grepping it manufactures paths that never existed. The
+originals were LaunchDarkly flag keys, SWR cache-key prefixes, and Firebase
+SDK method names. For example `/v1/onboarding/wake-update` is
+`/v1/onboarding/wake-up` adjoining `dateCallCount`.
+
+**Treat a raw string table as inadmissible for route discovery.** A path
+claim needs a decompiled line where the literal is passed to an HTTP verb.
+
+Four operations were real but wrong, and were corrected rather than
+deleted: `removeUser` is `DELETE` not `POST`; `updateNotificationPreferences`
+is `POST` not `PUT`; `submitSurvey` is `PUT` not `POST`;
+`setOnboardingWakeTime` is `/v1/onboarding/wake-up` not `/wake-update`.
+
+Three device routes were repointed from `{deviceId}` to `{serial_number}`
+(`activate`, `deactivate`, `update`). Only `PUT /v1/devices/{deviceId}`
+genuinely takes the UUID. This is the same identifier-confusion class that
+already produced live 403s and 404s.
+
+`GET /v1/devices/{serial_number}/live` was added. It is the most-exercised
+endpoint in the integration, called on every poll, and it was **entirely
+absent** from this spec.
+
+Routes present in the app and still undocumented here, ranked by relevance:
+`PUT /v1/devices/{serial}/live/thermal-relief` (hot-flash mode, the only
+multi-key live payload the app ever sends), `PUT /v1/sleep-schedules?action=override`
+(writes `bedtime`, `wakeup`, the activation flags, all four phase temps,
+and `is_smart_temperature_active`), `PUT /v1/sleep-configurations/temperature`,
+`PUT /v1/sleep-configurations/devices`, and a second HTTP host serving
+`GET /v1/device/{serial}/online`.
 
 ### 2026-07-26 — `user_id` on `PUT /v1/sleep-schedules`
 

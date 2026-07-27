@@ -41,6 +41,7 @@ async def async_setup_entry(
         entities.append(OrionSessionActiveBinarySensor(coordinator, device_id))
         for sensor_name in _TOPPER_SENSORS:
             entities.append(OrionSensorOnBedBinarySensor(coordinator, device_id, sensor_name))
+        entities.append(OrionFirmwareUpdateBinarySensor(coordinator, device_id))
         entities.append(OrionSafetyProblemBinarySensor(coordinator, device_id))
 
     async_add_entities(entities)
@@ -120,6 +121,49 @@ class OrionSensorOnBedBinarySensor(OrionBaseEntity, BinarySensorEntity):
         # Report available whenever we have a live payload at all,
         # even if the individual sensor hasn't reported yet.
         return self.coordinator.sensor_status_text(self._device_id, self._sensor_name) is not None
+
+
+class OrionFirmwareUpdateBinarySensor(OrionBaseEntity, BinarySensorEntity):
+    """Whether the Control Tower is advertising a firmware update.
+
+    Deliberately a binary_sensor and NOT an `update` entity. An `update`
+    entity wants both `installed_version` and `latest_version`. Installed
+    is available at `status.firmware.cb`, but nothing in the live payload
+    carries the AVAILABLE version, so `latest_version` would have to be
+    fabricated. Triggering the update is also unmodelled:
+    `POST /v1/devices/{serial}/update` exists in the vendor app but has
+    never been executed from here.
+    """
+
+    _attr_translation_key = "firmware_update_available"
+    _attr_device_class = BinarySensorDeviceClass.UPDATE
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(self, coordinator: OrionDataUpdateCoordinator, device_id: str) -> None:
+        super().__init__(coordinator, device_id)
+        self._attr_unique_id = f"{device_id}_firmware_update_available"
+
+    @property
+    def available(self) -> bool:
+        return (
+            super().available
+            and self.coordinator.pending_update_available(self._device_id) is not None
+        )
+
+    @property
+    def is_on(self) -> bool | None:
+        return self.coordinator.pending_update_available(self._device_id)
+
+    @property
+    def extra_state_attributes(self) -> dict | None:
+        pending = self.coordinator.pending_update_info(self._device_id)
+        if not pending:
+            return None
+        return {
+            key: value
+            for key, value in pending.items()
+            if key != "is_available" and value is not None
+        } or None
 
 
 class OrionSafetyProblemBinarySensor(OrionBaseEntity, BinarySensorEntity):

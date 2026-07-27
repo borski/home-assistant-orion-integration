@@ -33,7 +33,6 @@ from homeassistant.const import ATTR_TEMPERATURE, UnitOfTemperature
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from . import util
 from .coordinator import OrionDataUpdateCoordinator
 from .entity import OrionBaseEntity
 
@@ -117,30 +116,8 @@ class OrionZoneClimateEntity(OrionBaseEntity, ClimateEntity):
         self._attr_max_temp = float(temp_range.get("max", 45))
 
     def _zone_label(self) -> str:
-        """Human label for this zone.
-
-        Prefers the assigned user's display name, because that is how the
-        bed is actually discussed ("my side"). Routes through the
-        coordinator so a configured alias wins over the vendor's own
-        first name. Falls back to the zone id.
-
-        Deliberately NOT left/right: the device does carry an
-        `orientation` field, but the zone -> side mapping has never been
-        verified against a split-occupancy capture, and a confidently
-        mislabelled side is worse than a neutral one.
-        """
-        for zone in self._get_device().get("zones", []) or []:
-            if zone.get("id") == self._zone_id:
-                user = zone.get("user")
-                if isinstance(user, dict):
-                    user_id = user.get("id")
-                    if isinstance(user_id, str) and user_id:
-                        return self.coordinator.display_name_for_user(user_id)
-                    label = util.orion_user_label(user)
-                    if label:
-                        return label
-                break
-        return self._zone_id.replace("_", " ").title()
+        """Human label for this zone. See `coordinator.zone_label`."""
+        return self.coordinator.zone_label(self._device_id, self._zone_id)
 
     @property
     def available(self) -> bool:

@@ -64,3 +64,37 @@ def test_safety_error_detects_flag_or_codes():
         live_state.safety_error({"status": {"safety": {"error": False, "error_codes": ["E1"]}}})
         is True
     )
+
+
+def test_pending_update_available_reads_the_flag():
+    live = {"status": {"pending_update": {"is_available": True, "version": "2.7.0"}}}
+    assert live_state.pending_update_available(live) is True
+    assert (
+        live_state.pending_update_available({"status": {"pending_update": {"is_available": False}}})
+        is False
+    )
+
+
+def test_pending_update_available_is_none_when_unreported():
+    """A device that never sends the block must not claim "no update"."""
+    for missing in (
+        None,
+        {},
+        {"status": None},
+        {"status": {}},
+        {"status": {"pending_update": None}},
+        {"status": {"pending_update": []}},
+        {"status": {"pending_update": {}}},
+        {"status": {"pending_update": {"is_available": "yes"}}},
+        {"status": {"pending_update": {"is_available": 1}}},
+        [],
+        "nope",
+    ):
+        assert live_state.pending_update_available(missing) is None
+
+
+def test_pending_update_info_returns_the_block_or_none():
+    block = {"is_available": True, "version": "2.7.0"}
+    assert live_state.pending_update_info({"status": {"pending_update": block}}) == block
+    for missing in (None, {}, {"status": {}}, {"status": {"pending_update": []}}, "x"):
+        assert live_state.pending_update_info(missing) is None

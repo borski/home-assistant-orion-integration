@@ -602,6 +602,36 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
                 return [z.get("id") for z in device.get("zones", []) or [] if z.get("id")]
         return []
 
+    def zone_label(self, device_id: str, zone_id: str) -> str:
+        """Human label for one zone, preferring the assigned user's name.
+
+        Routes through `display_name_for_user` so a configured alias wins
+        over the vendor's own first name. Falls back to the raw user
+        object, then to a title-cased zone id.
+
+        Deliberately NOT left/right. The device carries an `orientation`
+        field, but the zone -> physical side mapping has never been
+        verified against a split-occupancy capture, and a confidently
+        mislabelled side is worse than a neutral one.
+        """
+        for device in self.devices:
+            if device.get("id") != device_id:
+                continue
+            for zone in device.get("zones") or []:
+                if not isinstance(zone, dict) or zone.get("id") != zone_id:
+                    continue
+                user = zone.get("user")
+                if isinstance(user, dict):
+                    user_id = user.get("id")
+                    if isinstance(user_id, str) and user_id:
+                        return self.display_name_for_user(user_id)
+                    label = util.orion_user_label(user)
+                    if label:
+                        return label
+                break
+            break
+        return zone_id.replace("_", " ").title()
+
     # ── Device-level capabilities and diagnostics ─────────────────────
 
     def device_allowed_actions(self, device_id: str) -> set[str]:
@@ -631,6 +661,14 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
     def firmware(self, device_id: str) -> dict | None:
         """Return device firmware details from the live snapshot."""
         return live_state.firmware(self.live_devices.get(device_id))
+
+    def pending_update_available(self, device_id: str) -> bool | None:
+        """Return whether a firmware update is being advertised."""
+        return live_state.pending_update_available(self.live_devices.get(device_id))
+
+    def pending_update_info(self, device_id: str) -> dict | None:
+        """Return the full pending-update block from the live snapshot."""
+        return live_state.pending_update_info(self.live_devices.get(device_id))
 
     def network_info(self, device_id: str) -> dict | None:
         """Return device network details from the live snapshot."""

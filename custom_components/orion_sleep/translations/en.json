@@ -124,6 +124,9 @@
       "sensor2_on_bed": {
         "name": "Sensor 2 On Bed"
       },
+      "firmware_update_available": {
+        "name": "Firmware Update Available"
+      },
       "safety_problem": {
         "name": "Safety Problem"
       }

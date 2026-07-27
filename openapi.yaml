@@ -43,24 +43,14 @@ tags:
     description: Sleep configuration and temperature control
   - name: Sleep Schedules
     description: Sleep schedule management
-  - name: Sleep Sessions
-    description: Sleep session lifecycle
   - name: Insights
     description: Sleep insights and analytics
   - name: Onboarding
     description: User and device onboarding
-  - name: Patches
-    description: Temperature patch management (SteadyTemp NFC)
-  - name: Invites
-    description: Device sharing and invite management
-  - name: Meetings
-    description: Sleep advisor consultation scheduling
   - name: Notifications
     description: Notification and text message preferences
   - name: Surveys
     description: User surveys
-  - name: System
-    description: Health checks and feature flags
   - name: WebSocket
     description: |
       Real-time device data via WebSocket at wss://live.api1.orionbed.com.
@@ -278,33 +268,6 @@ paths:
         "400":
           $ref: "#/components/responses/BadRequest"
 
-  /v1/auth/verifyBeforeUpdateEmail:
-    post:
-      operationId: verifyBeforeUpdateEmail
-      summary: Verify identity before changing email
-      description: Initiates verification flow before allowing the user to change their email address.
-      tags: [Auth]
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [email]
-              properties:
-                email:
-                  type: string
-                  format: email
-                  description: New email address
-      responses:
-        "200":
-          description: Verification initiated
-        "400":
-          $ref: "#/components/responses/BadRequest"
-
-  # ──────────────────────────────────────────────
-  #  Devices
-  # ──────────────────────────────────────────────
   /v1/devices:
     get:
       operationId: listDevices
@@ -320,42 +283,6 @@ paths:
                 type: array
                 items:
                   $ref: "#/components/schemas/Device"
-
-  /v1/device:
-    post:
-      operationId: registerDevice
-      summary: Register a new device
-      description: |
-        Registers a new Orion device to the user's account.
-        Typically called during device onboarding after BLE pairing.
-      tags: [Devices]
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [deviceId]
-              properties:
-                deviceId:
-                  type: string
-                  description: Hardware device identifier
-                name:
-                  type: string
-                  description: User-assigned device name
-                orientation:
-                  type: string
-                  description: Bed side orientation
-                  enum: [left, right]
-      responses:
-        "201":
-          description: Device registered
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Device"
-        "400":
-          $ref: "#/components/responses/BadRequest"
 
   /v1/devices/{deviceId}:
     put:
@@ -400,26 +327,99 @@ paths:
           $ref: "#/components/responses/Unauthorized"
 
   /v1/devices/{serial_number}/live:
-    put:
-      operationId: updateLiveDeviceZones
-      summary: Bulk update all zones (power / temperature)
+    get:
+      x-verification-status: measured-live
+      operationId: getLiveDevice
+      summary: Get the live runtime snapshot for a device
       description: |
-        Updates the live runtime state of one or more zones on a device in a
-        single call. This is the canonical **power control** endpoint used by
-        the app's "all zones" toggle and is the preferred way to turn the
-        mattress topper on or off.
+        Returns the device's full live runtime state: per-zone setpoints
+        (`on` / `temp`), measured per-zone temperatures, LED brightness,
+        quiet mode, firmware, network, safety, and the two in-topper
+        biometric sensors.
 
-        The `user-away` flag on `POST /v1/sleep-configurations/user-away` also
-        causes the mattress to power down, but it is a presence / schedule
-        override rather than a power primitive — prefer this endpoint for
-        direct control.
+        **This is the most-exercised endpoint in the integration.** The
+        Home Assistant coordinator calls it once per device on every poll,
+        and it backs every climate entity, live sensor, and binary sensor.
 
-        Decompiled bytecode reference: `updateLiveDeviceZones` at line 881425;
-        URL `'/v1/devices/' + id + '/live'`; body built at line 1027574.
+        **Path identifier:** the path segment is the device's
+        `serial_number`, NOT its UUID `id`. Sibling routes on the same
+        scheme were measured rejecting the UUID:
+        `PUT /v1/devices/{serial_number}/live` returns 403 and
+        `POST /v1/devices/{serial_number}/action` returns 404. The exact
+        status this GET returns for a UUID has not been recorded, so both
+        are declared below.
 
-        **Note:** `temp` values are in the device's native unit (celsius for
-        the OSCT001-1). Use `GET /v1/devices` → `temperature_scale` to convert
-        from fahrenheit or relative scales.
+        The payload is the HTTP-polled equivalent of the
+        `live_device.snapshot` WebSocket frame and shares the
+        `WsLiveDevicePayload` schema. The one shape difference is
+        `timeline`, which is pushed only on `live_device.update` over the
+        WebSocket and is not expected in this REST body.
+      tags: [Devices]
+      parameters:
+        - $ref: "#/components/parameters/SerialNumberPath"
+      responses:
+        "200":
+          description: |
+            Current live device state, wrapped in the standard
+            `{"response": ..., "success": true}` envelope used by every
+            endpoint except `GET /v2/insights`.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, response]
+                properties:
+                  success:
+                    type: boolean
+                  response:
+                    $ref: "#/components/schemas/WsLiveDevicePayload"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: |
+            Device not found. Returned when the path segment is the device
+            UUID instead of its `serial_number`.
+        "404":
+          description: |
+            Device not found. Also returned for an unknown or malformed
+            `serial_number`.
+
+    put:
+      x-verification-status: measured-live
+      operationId: updateLiveDevice
+      summary: Update live device settings (zones, LED, quiet mode, water fill)
+      description: |
+        The device settings primitive. Despite the historical name, this
+        route is not zones-only. It accepts **four** independent body keys,
+        and the vendor app sends **exactly one per request**.
+
+        | Key | Type | Confidence |
+        |---|---|---|
+        | `zones` | array of `{id, on?, temp?}` | measured |
+        | `led_brightness` | integer 0-100 | measured 2026-07-26 |
+        | `quiet_mode` | boolean | measured 2026-07-26 |
+        | `water_fill` | `pour_water` \| `unknown` | app-derived |
+
+        **Never batch keys.** Every call site in the decompiled app builds a
+        fresh object, assigns exactly one property, and sends it. Multi-key
+        bodies are untested by the vendor's own client.
+
+        `zones` is the canonical **power control** path, used by the app's
+        "all zones" toggle. The `user-away` flag on
+        `POST /v1/sleep-configurations/user-away` also powers the mattress
+        down, but it is a presence override rather than a power primitive.
+
+        The response carries the **full live device object**, so a caller
+        can feed it straight back into local state instead of re-polling.
+
+        Decompiled references: `_updateLiveDevice` at 938407, path built as
+        `'/v1/devices/' + id + '/live'` at 938426; `led_brightness` caller
+        at 1083548 applying `Math.round()`; `quiet_mode` caller at 1083704;
+        `water_fill` callers at 938514 and 938551.
+
+        **Note:** `temp` values are in the device's native unit (Celsius for
+        the OSCT001-1). Use `GET /v1/devices` → `temperature_scale` to
+        convert from Fahrenheit or relative scales.
       tags: [Devices]
       parameters:
         - $ref: "#/components/parameters/SerialNumberPath"
@@ -429,13 +429,30 @@ paths:
           application/json:
             schema:
               type: object
-              required: [zones]
+              minProperties: 1
+              maxProperties: 1
+              additionalProperties: false
               properties:
                 zones:
                   type: array
                   minItems: 1
                   items:
                     $ref: "#/components/schemas/LiveZoneUpdate"
+                led_brightness:
+                  type: integer
+                  minimum: 0
+                  maximum: 100
+                  description: |
+                    Front-panel LED brightness. The app rounds to an integer
+                    before sending.
+                quiet_mode:
+                  type: boolean
+                water_fill:
+                  type: string
+                  enum: [pour_water, unknown]
+                  description: |
+                    App-derived. Read from the decompiled client, never
+                    executed from here.
             examples:
               turnAllOn:
                 summary: Turn both zones on at 20.5°C
@@ -562,7 +579,7 @@ paths:
         "404":
           description: Device not found. A JSON response indicates a real route with the wrong serial.
 
-  /v1/devices/{deviceId}/activate:
+  /v1/devices/{serial_number}/activate:
     post:
       operationId: activateDevice
       summary: Activate (pair) a device
@@ -575,7 +592,7 @@ paths:
         failure string `'Failed to activate device'` at line 489378.
       tags: [Devices]
       parameters:
-        - $ref: "#/components/parameters/DeviceIdPath"
+        - $ref: "#/components/parameters/SerialNumberPath"
       requestBody:
         required: true
         content:
@@ -593,7 +610,7 @@ paths:
         "400":
           $ref: "#/components/responses/BadRequest"
 
-  /v1/devices/{deviceId}/deactivate:
+  /v1/devices/{serial_number}/deactivate:
     post:
       operationId: deactivateDevice
       summary: Deactivate (unpair) a device
@@ -605,14 +622,14 @@ paths:
         failure string `'Failed to deactivate device'` at line 489572.
       tags: [Devices]
       parameters:
-        - $ref: "#/components/parameters/DeviceIdPath"
+        - $ref: "#/components/parameters/SerialNumberPath"
       responses:
         "200":
           description: Device deactivated
         "400":
           $ref: "#/components/responses/BadRequest"
 
-  /v1/devices/{deviceId}/update:
+  /v1/devices/{serial_number}/update:
     post:
       operationId: triggerDeviceFirmwareUpdate
       summary: Trigger a device firmware update
@@ -622,7 +639,7 @@ paths:
         Decompiled bytecode reference: line 489645.
       tags: [Devices]
       parameters:
-        - $ref: "#/components/parameters/DeviceIdPath"
+        - $ref: "#/components/parameters/SerialNumberPath"
       responses:
         "200":
           description: Update triggered
@@ -687,10 +704,17 @@ paths:
                 $ref: "#/components/schemas/SleepConfiguration"
 
   /v1/sleep-configurations/user-remove:
-    post:
+    delete:
+      x-verification-status: app-derived
       operationId: removeUser
       summary: Remove a user from device configuration
-      description: Removes a user (or guest) from a device's sleep configuration.
+      description: |
+        Removes a user (or guest) from a device's sleep configuration.
+
+        **Method corrected 2026-07-26.** This was documented as `POST`. The
+        vendor app calls it with `DELETE`, passing the payload through the
+        axios `{data: ...}` config rather than as a normal request body
+        (`_removeUserAccess`, decompiled lines 675603 and 675611).
       tags: [Sleep Configurations]
       requestBody:
         required: true
@@ -755,7 +779,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/SleepSchedule"
     put:
-      x-verification-status: measured-live-partial-updates
+      x-verification-status: measured-live
       operationId: updateSleepSchedule
       summary: Update a sleep schedule
       description: |
@@ -863,7 +887,7 @@ paths:
         "200":
           description: Bedtime set
 
-  /v1/onboarding/wake-update:
+  /v1/onboarding/wake-up:
     post:
       operationId: setOnboardingWakeTime
       summary: Set wake-up time during onboarding
@@ -886,108 +910,6 @@ paths:
         "200":
           description: Wake-up time set
 
-  /v1/onboarding/schedule-v2-enabled:
-    get:
-      operationId: isScheduleV2Enabled
-      summary: Check if schedule v2 is enabled
-      description: Returns whether the v2 scheduling feature is enabled for this user.
-      tags: [Onboarding]
-      responses:
-        "200":
-          description: Feature flag status
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  enabled:
-                    type: boolean
-
-  # ──────────────────────────────────────────────
-  #  Patches
-  # ──────────────────────────────────────────────
-  /v1/patches/cancel-invite:
-    post:
-      operationId: cancelPatchInvite
-      summary: Cancel a patch invite
-      description: Cancels a pending temperature patch invite.
-      tags: [Patches]
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              properties:
-                patchId:
-                  type: string
-      responses:
-        "200":
-          description: Invite cancelled
-
-  # ──────────────────────────────────────────────
-  #  Invites
-  # ──────────────────────────────────────────────
-  /v1/user-device-invites/accept-invite:
-    post:
-      operationId: acceptDeviceInvite
-      summary: Accept a device invite
-      description: |
-        Accepts an invitation to share access to an Orion device.
-        Invite codes can be shared via deep link (app.orionsleep.com/invite).
-      tags: [Invites]
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [code]
-              properties:
-                code:
-                  type: string
-                  description: Invite code
-                deviceId:
-                  type: string
-                accessType:
-                  type: string
-                  description: Access level granted
-                  enum: [member, guest]
-      responses:
-        "200":
-          description: Invite accepted
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Device"
-        "400":
-          $ref: "#/components/responses/BadRequest"
-
-  # ──────────────────────────────────────────────
-  #  Meetings
-  # ──────────────────────────────────────────────
-  /v1/meetings/schedule-recommendations-enabled:
-    get:
-      operationId: isScheduleRecommendationsEnabled
-      summary: Check if meeting recommendations are enabled
-      description: |
-        Returns whether the sleep advisor consultation scheduling
-        feature is enabled for this user.
-      tags: [Meetings]
-      responses:
-        "200":
-          description: Feature status
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  enabled:
-                    type: boolean
-
-  # ──────────────────────────────────────────────
-  #  Notifications
-  # ──────────────────────────────────────────────
   /v1/notification-preferences:
     get:
       operationId: getNotificationPreferences
@@ -1001,10 +923,17 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/NotificationPreferences"
-    put:
+    post:
+      x-verification-status: app-derived
       operationId: updateNotificationPreferences
       summary: Update notification preferences
-      description: Updates the user's notification preference settings.
+      description: |
+        Updates the user's notification preference settings.
+
+        **Method corrected 2026-07-26.** This was documented as `PUT`. The
+        vendor app calls it with `POST` (`_updateNotificationPreference`,
+        decompiled line 1129525). Note the singular function name: the app
+        appears to update one preference per call.
       tags: [Notifications]
       requestBody:
         required: true
@@ -1045,22 +974,21 @@ paths:
   #  Surveys
   # ──────────────────────────────────────────────
   /v1/survey:
-    get:
-      operationId: getSurvey
-      summary: Get survey questions
-      description: Returns the current survey for the user (e.g. sleep test survey).
-      tags: [Surveys]
-      responses:
-        "200":
-          description: Survey data
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Survey"
-    post:
+    put:
+      x-verification-status: app-derived
       operationId: submitSurvey
       summary: Submit survey responses
-      description: Submits the user's answers to a survey.
+      description: |
+        Submits the user's answers to a survey.
+
+        **Method corrected 2026-07-26.** This was documented as `POST`. The
+        decompiled vendor app calls it with `PUT` (`updateSurvey`, decompiled
+        line 1120094). There is no `GET` on this path: the module exports
+        only `updateSurvey`, and every other `/v1/survey` string in the
+        bundle is an SWR mutation cache key, not a route.
+
+        Body shape below is inferred from the two keys visible at the call
+        site (1120086, 1120088). The full payload was not resolvable.
       tags: [Surveys]
       requestBody:
         required: true
@@ -1068,18 +996,12 @@ paths:
           application/json:
             schema:
               type: object
+              additionalProperties: true
               properties:
-                surveyId:
+                version:
                   type: string
-                responses:
-                  type: array
-                  items:
-                    type: object
-                    properties:
-                      questionId:
-                        type: string
-                      answer:
-                        type: string
+                is_complete:
+                  type: boolean
       responses:
         "200":
           description: Survey submitted
@@ -1087,47 +1009,6 @@ paths:
   # ──────────────────────────────────────────────
   #  System
   # ──────────────────────────────────────────────
-  /v1/health:
-    get:
-      operationId: healthCheck
-      summary: API health check
-      description: Returns the health status of the API.
-      tags: [System]
-      security: []
-      responses:
-        "200":
-          description: API is healthy
-
-  /v1/schedules-pro-mode-test:
-    get:
-      operationId: getSchedulesProModeTest
-      summary: Get schedules pro mode test status
-      description: Returns whether the pro mode schedule testing feature is enabled.
-      tags: [System]
-      responses:
-        "200":
-          description: Pro mode test status
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  enabled:
-                    type: boolean
-
-  # ──────────────────────────────────────────────
-  #  WebSocket — Live Device Data
-  # ──────────────────────────────────────────────
-  #
-  # OpenAPI 3.1 does not natively describe WebSocket protocols.
-  # The specification below is documented under x-websocket and
-  # as a placeholder path for tooling compatibility.
-  #
-  # This section was validated against the live server by opening a
-  # /device/<serial_number> WebSocket and driving REST mutations while
-  # logging every frame (see orion_info.py --ws-scenario).  Field shapes
-  # below reflect what is actually pushed on the wire.
-
   /device/{serial_number}:
     get:
       operationId: connectLiveWebSocket
@@ -1864,25 +1745,6 @@ components:
           type: boolean
           description: Receive sleep optimization tips
 
-    Survey:
-      type: object
-      properties:
-        surveyId:
-          type: string
-        version:
-          type: string
-        questions:
-          type: array
-          items:
-            type: object
-            properties:
-              questionId:
-                type: string
-              text:
-                type: string
-              type:
-                type: string
-                enum: [text, multiple_choice, rating]
 
     # ──────────────────────────────────────────────
     #  WebSocket Schemas
@@ -1940,11 +1802,19 @@ components:
         water_fill:
           type: string
           description: |
-            Water reservoir state. Observed values: `unknown`. Other values
-            such as `low`/`ok` are speculative — not captured on a device
-            with a healthy reservoir.
+            Water reservoir state. Observed values: `unknown`. The vendor
+            app writes `pour_water` and `unknown` to this key via
+            `PUT /v1/devices/{serial_number}/live` (app-derived). Values
+            such as `low`/`ok` are speculative and have never been read
+            from a device with a healthy reservoir.
         is_in_water_fill_mode:
           type: boolean
+        quiet_mode:
+          type: boolean
+          description: |
+            Quiet mode. Read at the TOP level of this payload, not inside
+            `status`. Writable via `PUT /v1/devices/{serial_number}/live`
+            with `{"quiet_mode": bool}` (measured 2026-07-26).
         status:
           $ref: "#/components/schemas/WsDeviceStatus"
         timeline:

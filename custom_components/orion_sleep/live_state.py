@@ -104,6 +104,32 @@ def safety_info(live: dict | None) -> dict | None:
     return value if isinstance(value, dict) else None
 
 
+def pending_update_available(live: dict | None) -> bool | None:
+    """Return whether the device is advertising a firmware update.
+
+    Reads `status.pending_update.is_available`. Returns None when the
+    block is missing or wrongly typed, so a device that has never
+    reported the field stays unavailable instead of claiming "no update".
+
+    Deliberately NOT modelled as an `update` entity: nothing in the live
+    payload carries the available version string, so `latest_version`
+    would have to be invented.
+    """
+    status = live.get("status") if isinstance(live, dict) else None
+    pending = status.get("pending_update") if isinstance(status, dict) else None
+    if not isinstance(pending, dict):
+        return None
+    value = pending.get("is_available")
+    return value if isinstance(value, bool) else None
+
+
+def pending_update_info(live: dict | None) -> dict | None:
+    """Return the full pending-update block for entity attributes."""
+    status = live.get("status") if isinstance(live, dict) else None
+    value = status.get("pending_update") if isinstance(status, dict) else None
+    return value if isinstance(value, dict) else None
+
+
 def led_brightness(live: dict | None) -> int | None:
     """Return front-panel LED brightness from zero to one hundred."""
     value = live.get("led_brightness") if isinstance(live, dict) else None
