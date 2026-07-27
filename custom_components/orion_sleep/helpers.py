@@ -1,0 +1,206 @@
+"""Helpers that belong to this integration, not to the API client.
+
+These came back from `orion_sleep_api` because none of them describe the
+vendor's API. They describe how Home Assistant presents it: entity
+registry identifiers, display strings, options-flow schema keys, and the
+redaction policy for a diagnostics download.
+
+A client library has no business choosing an entity's unique_id or
+formatting a duration as "7h 30m".
+"""
+
+from __future__ import annotations
+
+import re
+
+# Matches the vendor's HH:mm schedule times. The library keeps its own
+# copy for write validation; this one is only used to render a duration.
+_SCHEDULE_TIME_RE = re.compile(r"^(?:[01][0-9]|2[0-3]):[0-5][0-9]$")
+
+
+_SENSITIVE_DIAGNOSTIC_BRANCHES = frozenset(
+    {
+        "insights",
+        "partner_insights",
+        "recommendations",
+        "schedules",
+        "sensors",
+        "timeline",
+        "today_sleep_schedule",
+    }
+)
+
+
+_UUID_RE = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
+
+
+def nested_mapping(container: object, *keys: str) -> dict:
+    """Walk nested mappings, returning ``{}`` at the first non-mapping level.
+
+    Guards the coordinator accessors. ``(self.data or {}).get("insights", {})``
+    happily returns a list if the vendor ever sends one, and the very next
+    ``.get`` then raises AttributeError from inside a property, where
+    nothing catches it and the entity goes permanently broken.
+    """
+    current = container
+    for key in keys:
+        if not isinstance(current, dict):
+            return {}
+        current = current.get(key)
+    return current if isinstance(current, dict) else {}
+
+
+def schedule_unique_id(device_id: str, key: str, user_id: str) -> str:
+    """Stable unique_id for one person's schedule entity.
+
+    Keyed on the immutable Orion user id. Never on a role like "partner",
+    which would silently swap owners if the integration were ever
+    re-authenticated as the other account, grafting one person's history
+    onto the other. Never on a display name, which is user-editable.
+
+    Deliberately uniform. An earlier draft kept nine un-namespaced ids for
+    the authenticated user so pre-existing history would survive, but
+    nothing had been built on those entities yet, so the only thing that
+    exception bought was a permanent special case in the code and an
+    asymmetry between the two people on the bed.
+    """
+    return f"{device_id}_user_{user_id}_{key}"
+
+
+def schedule_duration_text(schedule: object) -> str | None:
+    """Human "Xh Ym" between a schedule's bedtime and wakeup.
+
+    Handles the overnight rollover. Returns None unless both times are
+    present and well formed.
+    """
+    if not isinstance(schedule, dict):
+        return None
+    bedtime = schedule.get("bedtime")
+    wakeup = schedule.get("wakeup")
+    if not isinstance(bedtime, str) or not isinstance(wakeup, str):
+        return None
+    if not _SCHEDULE_TIME_RE.match(bedtime) or not _SCHEDULE_TIME_RE.match(wakeup):
+        return None
+
+    start_h, start_m = (int(part) for part in bedtime.split(":"))
+    end_h, end_m = (int(part) for part in wakeup.split(":"))
+    minutes = (end_h * 60 + end_m) - (start_h * 60 + start_m)
+    if minutes <= 0:
+        minutes += 24 * 60
+    return f"{minutes // 60}h {minutes % 60}m"
+
+
+def unique_alias_labels(users: object) -> dict[str, str]:
+    """Map each user id to a unique, human-readable form-field label.
+
+    Options-flow schema keys must be unique, and two people can share a
+    first name. Duplicates get a numeric suffix. Users with no readable
+    name fall back to a shortened id so the field is still addressable.
+    """
+    labels: dict[str, str] = {}
+    if not isinstance(users, list):
+        return labels
+
+    used: set[str] = set()
+    for user in users:
+        if not isinstance(user, dict):
+            continue
+        user_id = user.get("id")
+        if not isinstance(user_id, str) or not user_id:
+            continue
+        base = (user.get("name") or "").strip() or f"User {user_id[:8]}"
+        label = base
+        suffix = 2
+        while label in used:
+            label = f"{base} ({suffix})"
+            suffix += 1
+        used.add(label)
+        labels[user_id] = label
+    return labels
+
+
+def clean_alias_map(value: object, known_ids: object = None) -> dict[str, str]:
+    """Normalize a stored alias mapping into ``{user_id: alias}``.
+
+    Blank aliases are dropped so clearing a field removes the override.
+    When ``known_ids`` is supplied, ids outside it are discarded, which
+    keeps stale entries from a previous account out of the options.
+    """
+    if not isinstance(value, dict):
+        return {}
+    allowed = set(known_ids) if isinstance(known_ids, (set, list, tuple)) else None
+
+    cleaned: dict[str, str] = {}
+    for user_id, alias in value.items():
+        if not isinstance(user_id, str) or not user_id:
+            continue
+        if allowed is not None and user_id not in allowed:
+            continue
+        if not isinstance(alias, str):
+            continue
+        stripped = alias.strip()
+        if stripped:
+            cleaned[user_id] = stripped
+    return cleaned
+
+
+def clamp_cooling_minutes(value: object, default: int, low: int, high: int) -> int:
+    """Coerce a rapid-cool duration to a usable whole number of minutes.
+
+    The duration is chosen locally and then sent to a route that changes
+    the physical bed, so this refuses to guess. A missing, malformed, or
+    non-numeric value falls back to ``default`` rather than to zero,
+    because a zero-minute window is a request the server has never been
+    asked to honour.
+
+    ``bool`` is rejected explicitly: it subclasses ``int``, so ``True``
+    would otherwise be accepted as a one-minute window.
+
+    Out-of-range values are clamped rather than rejected. A slider that
+    silently refuses is worse than one that saturates, and both bounds
+    are ours rather than the vendor's.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return default
+    try:
+        minutes = int(round(float(value)))
+    except (TypeError, ValueError, OverflowError):
+        return default
+    return max(low, min(high, minutes))
+
+
+def redact_identifier_keys(value: object) -> object:
+    """Redact UUIDs used as mapping keys while preserving container shape."""
+    if isinstance(value, list):
+        return [redact_identifier_keys(item) for item in value]
+    if not isinstance(value, dict):
+        return value
+
+    result: dict[object, object] = {}
+    redacted_index = 0
+    for key, item in value.items():
+        safe_key: object = key
+        if isinstance(key, str) and _UUID_RE.fullmatch(key):
+            while True:
+                redacted_index += 1
+                candidate = f"**REDACTED_KEY_{redacted_index}**"
+                if candidate not in value and candidate not in result:
+                    safe_key = candidate
+                    break
+        result[safe_key] = redact_identifier_keys(item)
+    return result
+
+
+def omit_sensitive_diagnostic_branches(value: object) -> object:
+    """Remove raw biometric, schedule, occupancy, and timeline branches."""
+    if isinstance(value, list):
+        return [omit_sensitive_diagnostic_branches(item) for item in value]
+    if not isinstance(value, dict):
+        return value
+    return {
+        key: omit_sensitive_diagnostic_branches(item)
+        for key, item in value.items()
+        if key not in _SENSITIVE_DIAGNOSTIC_BRANCHES
+    }

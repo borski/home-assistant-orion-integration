@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import re
 from typing import Any
 from uuid import uuid4
 
@@ -24,6 +23,7 @@ from orion_sleep_api import (
     util,
 )
 
+from . import helpers
 from .const import (
     CONF_ACCESS_TOKEN,
     CONF_AUTH_METHOD,
@@ -50,16 +50,6 @@ _LOGGER = logging.getLogger(__name__)
 
 AUTH_METHOD_EMAIL = "email"
 AUTH_METHOD_PHONE = "phone"
-
-# Orion's auth endpoint requires a full US phone number including the leading
-# country code ("1"), e.g. 15132015808. Anything shorter is rejected server-side.
-_PHONE_RE = re.compile(r"^1\d{10}$")
-
-
-def _normalize_phone(raw: str) -> str:
-    """Strip spaces, dashes, parens and a leading + from a phone number."""
-    return re.sub(r"[\s\-\(\)\+]", "", raw or "")
-
 
 class OrionSleepConfigFlow(ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Orion Sleep."""
@@ -156,13 +146,10 @@ class OrionSleepConfigFlow(ConfigFlow, domain=DOMAIN):
         if user_input is not None:
             raw = user_input.get("phone", "")
             phone_default = raw
-            phone = _normalize_phone(raw)
-            if not _PHONE_RE.match(phone):
-                _LOGGER.debug(
-                    "Rejected phone number %r (normalized: %r) — must be 11 digits starting with 1",
-                    raw,
-                    phone,
-                )
+            try:
+                phone = util.normalize_phone(raw)
+            except ValueError as err:
+                _LOGGER.debug("Rejected phone number: %s", err)
                 errors["base"] = "invalid_phone"
             else:
                 try:
@@ -367,7 +354,7 @@ class OrionSleepOptionsFlow(OptionsFlow):
         name reaches a unique id, so renaming is always non-breaking.
         """
         users = self._known_users()
-        labels = util.unique_alias_labels(users)
+        labels = helpers.unique_alias_labels(users)
         label_to_id = {label: user_id for user_id, label in labels.items()}
         existing = dict(self._config_entry.options.get(CONF_DISPLAY_ALIASES) or {})
 
@@ -378,7 +365,7 @@ class OrionSleepOptionsFlow(OptionsFlow):
                 if label in label_to_id
             }
             options = dict(self._pending_options)
-            options[CONF_DISPLAY_ALIASES] = util.clean_alias_map(
+            options[CONF_DISPLAY_ALIASES] = helpers.clean_alias_map(
                 aliases, set(labels)
             )
             return await self._async_finish_init(options)
@@ -492,8 +479,9 @@ class OrionSleepOptionsFlow(OptionsFlow):
         phone_default = ""
         if user_input is not None:
             phone_default = user_input.get("phone", "")
-            phone = _normalize_phone(phone_default)
-            if not _PHONE_RE.match(phone):
+            try:
+                phone = util.normalize_phone(phone_default)
+            except ValueError:
                 errors["base"] = "invalid_phone"
             else:
                 self._partner_auth_value = phone

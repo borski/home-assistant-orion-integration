@@ -14,8 +14,8 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from orion_sleep_api import util
 
+from . import helpers
 from .const import OCCUPANCY_HOLD_SECONDS
 from .coordinator import OrionDataUpdateCoordinator
 from .entity import OrionBaseEntity
@@ -310,7 +310,7 @@ class OrionScheduleOverrideBinarySensor(OrionBaseEntity, BinarySensorEntity):
     ) -> None:
         super().__init__(coordinator, device_id)
         self._user_id = user_id
-        self._attr_unique_id = util.schedule_unique_id(
+        self._attr_unique_id = helpers.schedule_unique_id(
             device_id, "is_override_applied", user_id
         )
         self._attr_icon = "mdi:calendar-edit"

@@ -24,6 +24,7 @@ from homeassistant.helpers import entity_platform
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from orion_sleep_api import util
 
+from . import helpers
 from .coordinator import OrionDataUpdateCoordinator
 from .entity import OrionBaseEntity
 
@@ -122,7 +123,7 @@ class OrionScheduleTime(OrionBaseEntity, TimeEntity):
         super().__init__(coordinator, device_id)
         self._user_id = user_id
         self._field = field
-        self._attr_unique_id = util.schedule_unique_id(device_id, key, user_id)
+        self._attr_unique_id = helpers.schedule_unique_id(device_id, key, user_id)
         self._attr_icon = icon
         self._attr_name = f"{coordinator.display_name_for_user(user_id)} {label}"
 

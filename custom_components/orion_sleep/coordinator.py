@@ -22,6 +22,7 @@ from orion_sleep_api import (
     util,
 )
 
+from . import helpers
 from .const import (
     CONF_DISPLAY_ALIASES,
     CONF_INSIGHTS_DAYS,
@@ -87,7 +88,7 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
         # User-facing display overrides keyed by immutable Orion user id.
         # Aliases only ever change friendly names. Unique ids and entity ids
         # are derived from device and zone ids, so renaming is non-breaking.
-        self.display_aliases: dict[str, str] = util.clean_alias_map(
+        self.display_aliases: dict[str, str] = helpers.clean_alias_map(
             self.options.get(CONF_DISPLAY_ALIASES)
         )
         self.partner_device_serial = str(config_entry.data.get(CONF_PARTNER_DEVICE_SERIAL, ""))
@@ -278,12 +279,12 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
 
     def get_latest_session(self) -> dict | None:
         """Get the most recent sleep session from insights data."""
-        return util.latest_session(util.nested_mapping(self.data, "insights", "data"))
+        return util.latest_session(helpers.nested_mapping(self.data, "insights", "data"))
 
     def get_latest_session_for_zone(self, zone_id: str) -> dict | None:
         """Get the most recent sleep session for one device zone."""
         return util.latest_session_for_zone(
-            util.nested_mapping(self.data, "insights", "data"), zone_id
+            helpers.nested_mapping(self.data, "insights", "data"), zone_id
         )
 
     def get_latest_partner_session(self, device_id: str) -> dict | None:
@@ -291,7 +292,7 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
         if not self.has_partner_for_device(device_id):
             return None
         return util.latest_session(
-            util.nested_mapping(self.data, "partner_insights", "data")
+            helpers.nested_mapping(self.data, "partner_insights", "data")
         )
 
     def get_latest_completed_session(self) -> dict | None:
@@ -301,7 +302,7 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
         already carries an end_time. See util.latest_completed_session.
         """
         return util.latest_completed_session(
-            util.nested_mapping(self.data, "insights", "data")
+            helpers.nested_mapping(self.data, "insights", "data")
         )
 
     def get_latest_completed_partner_session(self, device_id: str) -> dict | None:
@@ -309,7 +310,7 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
         if not self.has_partner_for_device(device_id):
             return None
         return util.latest_completed_session(
-            util.nested_mapping(self.data, "partner_insights", "data")
+            helpers.nested_mapping(self.data, "partner_insights", "data")
         )
 
     def session_active(self, session: dict | None) -> bool:
@@ -374,8 +375,8 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
 
     def live_session(self) -> dict:
         """Orion's own live-session record for the authenticated user."""
-        return util.nested_mapping(self.data, "live_session", "response") or (
-            util.nested_mapping(self.data, "live_session")
+        return helpers.nested_mapping(self.data, "live_session", "response") or (
+            helpers.nested_mapping(self.data, "live_session")
         )
 
     def server_says_in_bed(self) -> bool | None:
@@ -391,8 +392,8 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
 
     def sleep_config(self) -> dict:
         """Account-level configuration from /v1/sleep-configurations."""
-        return util.nested_mapping(self.data, "sleep_config", "response") or (
-            util.nested_mapping(self.data, "sleep_config")
+        return helpers.nested_mapping(self.data, "sleep_config", "response") or (
+            helpers.nested_mapping(self.data, "sleep_config")
         )
 
     def zone_split_mode(self) -> str | None:
@@ -423,7 +424,7 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
         target = user_id or self.user_id
         if not target:
             return None
-        row = util.nested_mapping(self.data, "schedules", "today_sleep_schedule").get(
+        row = helpers.nested_mapping(self.data, "schedules", "today_sleep_schedule").get(
             target
         )
         return row if isinstance(row, dict) else None
@@ -794,7 +795,7 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
         which is the state on a fresh install and after a restart if the
         slider has never been touched.
         """
-        return util.clamp_cooling_minutes(
+        return helpers.clamp_cooling_minutes(
             self.rapid_cool_minutes.get(zone_id),
             DEFAULT_COOLING_MINUTES,
             MIN_COOLING_MINUTES,
@@ -803,7 +804,7 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
 
     def set_rapid_cool_duration(self, zone_id: str, minutes: object) -> int:
         """Record the chosen window for a zone and return what was stored."""
-        value = util.clamp_cooling_minutes(
+        value = helpers.clamp_cooling_minutes(
             minutes, DEFAULT_COOLING_MINUTES, MIN_COOLING_MINUTES, MAX_COOLING_MINUTES
         )
         self.rapid_cool_minutes[zone_id] = value
@@ -909,7 +910,7 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
         # before a scheduled transition, with the socket confirmed live.
         # Nothing consumes this any more. It is kept because an empty
         # array is itself the finding, and diagnostics should show it.
-        timelines = util.nested_mapping(self.data, "ws_timelines")
+        timelines = helpers.nested_mapping(self.data, "ws_timelines")
         entries = timelines.get(device_id)
         return entries if isinstance(entries, list) else []
 

@@ -28,6 +28,7 @@ from homeassistant.helpers.entity_platform import (
 from homeassistant.util import dt as dt_util
 from orion_sleep_api import OrionApiError, util
 
+from . import helpers
 from .coordinator import OrionDataUpdateCoordinator
 from .entity import OrionBaseEntity
 
@@ -590,7 +591,7 @@ SCHEDULE_SENSOR_DESCRIPTIONS: tuple[OrionSensorEntityDescription, ...] = (
     OrionSensorEntityDescription(
         key="schedule_duration",
         icon="mdi:timer-sand",
-        value_fn=lambda schedule: util.schedule_duration_text(schedule),
+        value_fn=lambda schedule: helpers.schedule_duration_text(schedule),
     ),
     # device_class=TEMPERATURE added 2026-07-26. Without it HA treats "°C"
     # as a custom unit and will NOT convert for a Fahrenheit household, so
@@ -844,7 +845,7 @@ class OrionSensorEntity(OrionBaseEntity, SensorEntity):
     # primary one. The partner subclass overrides both.
 
     def _sessions_insights(self) -> dict:
-        return util.nested_mapping(self.coordinator.data, "insights", "data")
+        return helpers.nested_mapping(self.coordinator.data, "insights", "data")
 
     def _sessions_client(self):
         return self.coordinator.api_client
@@ -1114,7 +1115,7 @@ class OrionPartnerInsightSensor(OrionSensorEntity):
         return _get_partner_day_field(self.coordinator.data or {}, field)
 
     def _sessions_insights(self) -> dict:
-        return util.nested_mapping(self.coordinator.data, "partner_insights", "data")
+        return helpers.nested_mapping(self.coordinator.data, "partner_insights", "data")
 
     def _sessions_client(self):
         return self.coordinator.partner_api_client
@@ -1157,7 +1158,7 @@ class OrionScheduleSensorEntity(OrionBaseEntity, SensorEntity):
         super().__init__(coordinator, device_id)
         self.entity_description = description
         self._user_id = user_id
-        self._attr_unique_id = util.schedule_unique_id(
+        self._attr_unique_id = helpers.schedule_unique_id(
             device_id, description.key, user_id
         )
         self._attr_translation_key = None
@@ -1632,19 +1633,33 @@ class OrionAccessSensor(OrionBaseEntity, SensorEntity):
         self._attr_name = "Bed Access"
 
     def _people(self) -> list[dict]:
-        """Access records, with names routed through the alias layer.
+        """Who has access, named the way this household names people.
 
-        `summarize_access` returns the vendor's own name because util has
-        no idea what the user renamed anybody to. Every other entity in
-        this integration shows the alias, so this one does too, and a
-        a household that renamed the vendor's name to something they
-        actually use does not get one sensor still using the old one.
+        The library returns facts and no display name, deliberately. It
+        cannot know what anyone here is called. Naming is this
+        integration's job, so it happens here: the alias if one is set,
+        otherwise whatever the vendor has on the account.
+
+        The vendor's raw user record arrives under `user` and is dropped
+        on the way out. It carries a profile image URL and a full legal
+        name, and this ends up in an entity attribute.
         """
-        people = util.summarize_access(self.coordinator.devices, self._device_id)
-        for person in people:
-            alias = self.coordinator.display_name_for_user(person["user_id"])
-            if alias:
-                person["name"] = alias
+        people = []
+        for entry in util.access_entries(self.coordinator.devices, self._device_id):
+            user_id = entry["user_id"]
+            people.append(
+                {
+                    "name": (
+                        self.coordinator.display_name_for_user(user_id)
+                        or util.orion_user_label(entry.get("user"))
+                        or f"User {user_id[:8]}"
+                    ),
+                    "role": entry["role"],
+                    "user_id": user_id,
+                    "away": entry["away"],
+                    "expires": entry["expires"],
+                }
+            )
         return people
 
     @property

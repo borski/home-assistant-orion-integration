@@ -10,8 +10,11 @@
   "config_flow": true,
   "dependencies": [],
   "requirements": [
-    "orion-sleep-api==1.0.0"
+    "orion-sleep-api==0.2.0"
   ],
   "integration_type": "hub",
-  "iot_class": "cloud_polling"
+  "iot_class": "cloud_push",
+  "loggers": [
+    "orion_sleep_api"
+  ]
 }
