@@ -998,3 +998,51 @@ def test_session_edit_window_refuses_non_datetimes():
                 pass
             else:
                 raise AssertionError(f"{bad!r} must be refused")
+
+
+# ── Session value series ──────────────────────────────────────────────
+
+
+def test_series_stats_reduces_a_clean_series():
+    assert util.series_stats([10.0, 20.0, 30.0]) == {
+        "average": 20.0, "min": 10.0, "max": 30.0, "samples": 3,
+    }
+
+
+def test_series_stats_skips_dropouts_rather_than_scoring_them_zero():
+    # A null is missing data. Counting it as zero would drag a 20 degree
+    # average down to 10 and make a normal night look like a fault.
+    assert util.series_stats([20.0, None, 20.0]) == {
+        "average": 20.0, "min": 20.0, "max": 20.0, "samples": 2,
+    }
+
+
+def test_series_stats_rejects_bool_hiding_as_a_reading():
+    assert util.series_stats([True, False]) is None
+    stats = util.series_stats([20.0, True])
+    assert stats is not None and stats["samples"] == 1
+
+
+def test_series_stats_returns_none_when_nothing_usable_survives():
+    for bad in (None, [], "20", 20, {}, [None, None], ["a", "b"], [{}, []]):
+        assert util.series_stats(bad) is None
+
+
+def test_series_stats_handles_a_single_sample():
+    assert util.series_stats([17.5]) == {
+        "average": 17.5, "min": 17.5, "max": 17.5, "samples": 1,
+    }
+
+
+def test_validate_device_orientation_accepts_both_sides():
+    assert util.validate_device_orientation("left") == "left"
+    assert util.validate_device_orientation("right") == "right"
+
+
+def test_validate_device_orientation_rejects_anything_else():
+    for bad in (None, "", "Left", "up", 0, True, [], {}, "left "):
+        try:
+            util.validate_device_orientation(bad)
+        except ValueError:
+            continue
+        raise AssertionError(f"{bad!r} should have been rejected")

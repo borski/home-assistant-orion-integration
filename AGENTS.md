@@ -205,6 +205,8 @@ Entities read from coordinator:
 | Sensor | Light Sleep Minutes | `_light_sleep_minutes` | `session.sleep_summary.light_sleep`, numeric |
 | Sensor | Awake Minutes | `_awake_minutes` | `session.sleep_summary.awake_time`, numeric |
 | Sensor | \<person\> Apnea Index / Obstructive Time / Central Time / Longest Event | `_apnea_ahi`, `_apnea_obstructive_time`, `_apnea_central_time`, `_apnea_longest_event` | From `session.apnea`, null until a night finishes. AHI is events per hour of sleep. Zero is a real answer most nights, so the coercion rejects bool rather than falsy values: `False` must not read as a clean night. Deliberately no severity banding on the entity, because a consumer topper's estimate should not wear clinical labels. |
+| Select | Bed Orientation | `_orientation` | `devices[].orientation`, one device-level value. Writes via `PUT /v1/devices/{deviceId}`, the one device route that genuinely takes the UUID. The vendor app captions its own version of this screen "Update your side to fix your insight", so it is how the bed decides which physical side a zone sits on. Write is APP-DERIVED and unobserved, hence `EntityCategory.CONFIG` and a warning log on change. |
+| Sensor | \<person\> Average Target / Average Bed Temperature | `_avg_target_temperature`, `_avg_bed_temperature` | Mean of `session.temperature_setpoint.values` and `session.temperature.values`, 500+ samples each. A series cannot be a state, so it is reduced to a scalar with min/max as attributes. **Attributes are named `min_celsius` / `max_celsius` on purpose:** HA converts a state to the user's unit but leaves attributes untouched, and a bare `min: 17.5` beside a state of `69.9 °F` reads as a fault. |
 | Sensor | Last Session End | `_last_session_end` | `session.end_time` of the newest FINISHED session. Timestamp. Selected via `is_in_progress`, never via a missing `end_time`. |
 | Binary Sensor | Sleep Session (partner) | `_partner_session_active` | Partner `session.is_in_progress`. Only created when a partner is linked. |
 | Sensor | Bedtime | `_bedtime` | `today_sleep_schedule.bedtime` (HH:mm) |
@@ -246,7 +248,7 @@ Entities read from coordinator:
 | Button | Swap Bed Sides | `_action_swap_sides` | `POST /v1/sleep-configurations/user-swap`. Enabled by default: pressing it again reverses it, so a misfire is cheap. |
 | Button (disabled) | Split Zones | `_action_split_zones` | `POST /v1/sleep-configurations/user-split`. Disabled by default because **nothing in the live payload reports split state**, so a press has no observable result and no way to confirm what it did. |
 
-**A two-zone device with no partner linked exposes 74 base entities. A linked partner adds 38 more, for 112.**
+**A two-zone device with no partner linked exposes 71 base entities. A linked partner adds 55 more, for 126.** Counted from `core.entity_registry`, not derived: 16 device-level entities plus 55 per person.
 
 - 2 climate entities, one per zone.
 - 36 sensors: 11 insights, 4 apnea, 5 schedule temperatures and duration, current offset, live connection, 6 topper sensor readings, 2 measured and 2 target zone temperatures, 2 cooling countdowns, LED brightness, firmware, and Wi-Fi signal.
@@ -591,6 +593,23 @@ foreign ID, but "presumably" is not a good enough basis for the one call that
 cannot be taken back.
 
 ## Verification Log
+
+### 2026-07-27 — `POST /v1/sleep-sessions/end` takes no body
+
+Read from the decompiled client at 1096482: `networkInstance.post` is
+bound and called with the path as its only argument. No session id, no
+payload. It ends whatever session is open for the account behind the
+token. APP-DERIVED, never executed, because provoking it needs a live
+session to throw away.
+
+### 2026-07-27 — Day-level sensors were silently dropping session attributes
+
+`extra_state_attributes` returned early whenever `day_field` was set, so
+`sleep_score` could show the vendor's quality and colour but never the
+session's `has_been_edited`. The two are not alternatives: the score
+comes from the day bucket and the edit flag from the session inside it.
+Now merged. Caught only because the attribute was expected and absent,
+which is the failure mode worth watching for: a sensor that looks fine.
 
 ### 2026-07-27 — Session edit is real, and reversible
 

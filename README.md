@@ -184,7 +184,7 @@ There is no option to disable it.
 
 ## Entities
 
-One Home Assistant device per paired topper. A two-zone bed with no partner linked exposes **74 entities**. Linking a partner adds 35 more.
+One Home Assistant device per paired topper. A two-zone bed with no partner linked exposes **71 entities**. Linking a partner adds 35 more.
 
 Names below use `<person>` where the display alias is substituted, and `<zone>` for a bed side.
 

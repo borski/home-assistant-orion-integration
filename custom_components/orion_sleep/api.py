@@ -18,6 +18,7 @@ from .util import (
     describe_api_error,
     safe_api_error_code,
     should_refresh_token,
+    validate_device_orientation,
     validate_schedule_write,
     validate_session_delete_reason,
 )
@@ -397,6 +398,24 @@ class OrionApiClient:
         await self.ensure_valid_token()
         return await self._request("PUT", f"/v1/devices/{device_id}", json_data=fields)
 
+    async def set_device_orientation(self, device_id: str, orientation: str) -> dict:
+        """PUT /v1/devices/{deviceId} — set which side the bed faces.
+
+        One device-level value, not one per sleeper. The vendor app gives
+        this its own screen and captions it "Update your side to fix your
+        insight", so it is how the bed decides which physical side a zone
+        sits on.
+
+        **Path takes the device UUID.** This is the one device route that
+        genuinely does. Every /live and /action route takes the serial.
+
+        Confidence: APP-DERIVED. The route and the body key are read from
+        the decompiled client, and the value set is the two strings the
+        app offers. Sending it has never been observed.
+        """
+        validate_device_orientation(orientation)
+        return await self.update_device(device_id, orientation=orientation)
+
     async def update_live_device_zones(self, device_serial: str, zones: list[dict]) -> dict:
         """PUT /v1/devices/{serial_number}/live — bulk update zone power/temp.
 
@@ -770,6 +789,25 @@ class OrionApiClient:
             },
             timeout_seconds=SESSION_EDIT_TIMEOUT_SECONDS,
         )
+
+    async def end_sleep_session(self) -> dict:
+        """POST /v1/sleep-sessions/end — stop the session in progress.
+
+        Ends whichever session is currently open for the account behind
+        this client. There is no session id and no body: the decompiled
+        client calls `post` with the path as its only argument.
+
+        Worth reaching for when the bed has decided someone is asleep who
+        is not. Ending it there and then is cleaner than deleting a
+        fabricated night the following morning, and it stops the bad
+        window from growing.
+
+        Confidence: APP-DERIVED. Route and the absence of a body are read
+        from the decompiled client at 1096482. Never executed, because
+        provoking it needs a live session to throw away.
+        """
+        await self.ensure_valid_token()
+        return await self._request("POST", "/v1/sleep-sessions/end")
 
     async def delete_sleep_session(self, session_id: str, reason: str) -> dict:
         """DELETE /v1/sleep-sessions/{id} — permanently remove a session.

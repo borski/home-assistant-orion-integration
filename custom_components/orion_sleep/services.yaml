@@ -183,3 +183,23 @@ edit_sleep_session:
       required: true
       selector:
         datetime:
+
+end_sleep_session:
+  name: End sleep session
+  description: >-
+    Stop the sleep session the bed currently thinks is running. Use this
+    when the topper has decided someone is asleep who is not. Ends
+    whatever session is open for the account behind the targeted entity.
+  target:
+    entity:
+      integration: orion_sleep
+      domain: sensor
+  fields:
+    confirm:
+      name: Confirm
+      description: >-
+        Must be true. This is not aimed at a specific night, it ends
+        whichever session is currently open.
+      required: true
+      selector:
+        boolean:

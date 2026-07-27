@@ -42,6 +42,7 @@ SERVICE_LIST_SLEEP_SESSIONS = "list_sleep_sessions"
 SERVICE_DELETE_SLEEP_SESSION = "delete_sleep_session"
 SERVICE_CONFIRM_SLEEP_SESSION = "confirm_sleep_session"
 SERVICE_EDIT_SLEEP_SESSION = "edit_sleep_session"
+SERVICE_END_SLEEP_SESSION = "end_sleep_session"
 
 _INSIGHT_DISPLAY_NAMES = {
     "sleep_score": "Sleep Score",
@@ -68,6 +69,8 @@ _INSIGHT_DISPLAY_NAMES = {
     "time_in_bed": "Time in Bed",
     "sleep_efficiency": "Sleep Efficiency",
     "session_confidence": "Session Confidence",
+    "avg_target_temperature": "Average Target Temperature",
+    "avg_bed_temperature": "Average Bed Temperature",
     "apnea_ahi": "Apnea Index",
     "apnea_obstructive_time": "Obstructive Apnea Time",
     "apnea_central_time": "Central Apnea Time",
@@ -166,6 +169,32 @@ def _seconds_to_ms(seconds: float | int | None) -> str | None:
     return f"{s}s"
 
 
+def _temp_stats(session: dict | None, block: str) -> dict | None:
+    """Reduce one per-session temperature series to average/min/max.
+
+    `temperature_setpoint` is what the bed was aiming for through the
+    night and `temperature` is what it measured. Both arrive as a few
+    hundred samples, which no Home Assistant state can hold, so they get
+    reduced to scalars here.
+    """
+    return util.series_stats(util.session_subsection(session, block).get("values"))
+
+
+def _temp_attrs(session: dict | None, block: str) -> dict:
+    stats = _temp_stats(session, block)
+    if stats is None:
+        return {}
+    # Home Assistant converts a sensor's state to the user's preferred
+    # unit but leaves attributes exactly as given. Naming these plainly
+    # "min" and "max" put 17.5 next to a state of 69.9 and looked like a
+    # fault. The unit is in the key instead.
+    return {
+        "min_celsius": stats["min"],
+        "max_celsius": stats["max"],
+        "samples": stats["samples"],
+    }
+
+
 def _time_in_bed(session: dict | None) -> float | None:
     """Minutes between getting in and getting out.
 
@@ -243,6 +272,13 @@ INSIGHT_SENSOR_DESCRIPTIONS: tuple[OrionSensorEntityDescription, ...] = (
         state_class=SensorStateClass.MEASUREMENT,
         icon="mdi:medal-outline",
         value_fn=lambda session: None,  # day-level, see day_field
+        # Whether this night is the bed's own number or a correction
+        # someone made in the app. Worth knowing now that the integration
+        # can edit sessions itself.
+        extra_attrs_fn=lambda session: {
+            "edited": (session or {}).get("has_been_edited"),
+            "rated": (session or {}).get("has_been_rated"),
+        },
     ),
     OrionSensorEntityDescription(
         key="total_sleep_time",
@@ -489,6 +525,36 @@ INSIGHT_SENSOR_DESCRIPTIONS: tuple[OrionSensorEntityDescription, ...] = (
             _get_apnea(session).get("longest_event_seconds")
         ),
     ),
+    # ── Overnight temperature ─────────────────────────────────────
+    #
+    # The live climate entity already records target and measured temp
+    # continuously, but only from whenever the integration was installed
+    # and only until the recorder purges it. These are the vendor's own
+    # series for the night, reduced to scalars and tied to the session.
+    OrionSensorEntityDescription(
+        key="avg_target_temperature",
+        device_class=SensorDeviceClass.TEMPERATURE,
+        native_unit_of_measurement=UnitOfTemperature.CELSIUS,
+        state_class=SensorStateClass.MEASUREMENT,
+        suggested_display_precision=1,
+        icon="mdi:thermometer-check",
+        completed_only=True,
+        value_fn=lambda session: (_temp_stats(session, "temperature_setpoint") or {}).get(
+            "average"
+        ),
+        extra_attrs_fn=lambda session: _temp_attrs(session, "temperature_setpoint"),
+    ),
+    OrionSensorEntityDescription(
+        key="avg_bed_temperature",
+        device_class=SensorDeviceClass.TEMPERATURE,
+        native_unit_of_measurement=UnitOfTemperature.CELSIUS,
+        state_class=SensorStateClass.MEASUREMENT,
+        suggested_display_precision=1,
+        icon="mdi:thermometer",
+        completed_only=True,
+        value_fn=lambda session: (_temp_stats(session, "temperature") or {}).get("average"),
+        extra_attrs_fn=lambda session: _temp_attrs(session, "temperature"),
+    ),
     OrionSensorEntityDescription(
         key="last_session_end",
         device_class=SensorDeviceClass.TIMESTAMP,
@@ -654,6 +720,11 @@ async def async_setup_entry(
         },
         "async_confirm_sleep_session",
     )
+    platform.async_register_entity_service(
+        SERVICE_END_SLEEP_SESSION,
+        {vol.Required("confirm"): cv.boolean},
+        "async_end_sleep_session",
+    )
 
 
 # ── Entities ──────────────────────────────────────────────────────────────
@@ -772,6 +843,39 @@ class OrionSensorEntity(OrionBaseEntity, SensorEntity):
             await client.edit_sleep_session(session_id, asleep_at, awake_at)
         except OrionApiError as err:
             raise HomeAssistantError(f"Orion refused the session edit: {err}") from err
+        await self.coordinator.async_request_refresh()
+
+    async def async_end_sleep_session(self, confirm: bool) -> None:
+        """Stop the session the bed currently thinks is running.
+
+        For the case where the topper has decided someone is asleep who
+        is not. Ending it now beats deleting a fabricated night in the
+        morning, because the bad window stops growing and everything
+        downstream of it never gets computed.
+
+        There is no session id here. The route ends whatever is open for
+        this entity's account, which is why `confirm` is required: it is
+        not addressed at a specific night and cannot be aimed.
+        """
+        if not confirm:
+            raise HomeAssistantError(
+                "Refusing to end a sleep session without confirm: true"
+            )
+
+        session = self._session()
+        if not self.coordinator.session_active(session):
+            raise HomeAssistantError(
+                f"No sleep session is in progress for {self._sessions_owner()}"
+            )
+
+        _LOGGER.warning(
+            "Ending the in-progress Orion sleep session for %s",
+            self._sessions_owner(),
+        )
+        try:
+            await self._sessions_client().end_sleep_session()
+        except OrionApiError as err:
+            raise HomeAssistantError(f"Orion rejected ending the session: {err}") from err
         await self.coordinator.async_request_refresh()
 
     async def async_confirm_sleep_session(
@@ -893,16 +997,15 @@ class OrionSensorEntity(OrionBaseEntity, SensorEntity):
         if not self.coordinator.data:
             return None
 
-        if self.entity_description.day_field:
-            attrs = {
-                name: self._day_value(name)
-                for name in self.entity_description.day_attrs
-            }
-            return {k: v for k, v in attrs.items() if v is not None} or None
-
-        if self.entity_description.extra_attrs_fn is None:
-            return None
-        attrs = self.entity_description.extra_attrs_fn(self._session())
+        # A day-level sensor can still carry session attributes. Sleep
+        # score is both: the number comes from the day bucket, while
+        # "was this night edited" comes from the session inside it.
+        attrs: dict[str, Any] = {
+            name: self._day_value(name)
+            for name in self.entity_description.day_attrs
+        }
+        if self.entity_description.extra_attrs_fn is not None:
+            attrs.update(self.entity_description.extra_attrs_fn(self._session()))
         # Filter out None values
         return {k: v for k, v in attrs.items() if v is not None} or None
 

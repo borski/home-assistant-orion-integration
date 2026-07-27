@@ -756,3 +756,55 @@ def session_edit_window(fell_asleep: object, woke_up: object) -> tuple[str, str]
         start.strftime(SESSION_EDIT_WIRE_FORMAT),
         end.strftime(SESSION_EDIT_WIRE_FORMAT),
     )
+
+
+# ── Per-session value series ──────────────────────────────────────────
+
+DEVICE_ORIENTATIONS: tuple[str, ...] = ("left", "right")
+
+
+def series_stats(values: object) -> dict | None:
+    """Average, minimum and maximum of a session value series.
+
+    The insights payload reports temperature as a list of a few hundred
+    samples with gaps punched out as nulls. A series is not something
+    Home Assistant can hold in a state, so this reduces it to the three
+    numbers that are worth graphing.
+
+    Nulls and non-numbers are skipped rather than treated as zero: a
+    dropout is missing data, and folding it in as zero would drag the
+    average toward freezing. Bool is rejected for the usual reason, that
+    it would otherwise arrive as a plausible 0 or 1 degrees.
+
+    Returns None when nothing usable survives, so the sensor reads
+    unknown instead of inventing a number from an empty night.
+    """
+    if not isinstance(values, list):
+        return None
+    clean = [
+        float(v)
+        for v in values
+        if not isinstance(v, bool) and isinstance(v, (int, float))
+    ]
+    if not clean:
+        return None
+    return {
+        "average": round(sum(clean) / len(clean), 2),
+        "min": min(clean),
+        "max": max(clean),
+        "samples": len(clean),
+    }
+
+
+def validate_device_orientation(value: object) -> str:
+    """Return a valid orientation or raise ValueError.
+
+    The device reports a single orientation for the whole bed, not one
+    per sleeper, and the vendor app treats changing it as the fix for
+    insights landing on the wrong side.
+    """
+    if not isinstance(value, str) or value not in DEVICE_ORIENTATIONS:
+        raise ValueError(
+            f"orientation must be one of {sorted(DEVICE_ORIENTATIONS)}, got {value!r}"
+        )
+    return value

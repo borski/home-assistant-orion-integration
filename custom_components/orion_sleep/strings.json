@@ -235,6 +235,17 @@
       },
       "session_confidence": {
         "name": "Session Confidence"
+      },
+      "avg_target_temperature": {
+        "name": "Average Target Temperature"
+      },
+      "avg_bed_temperature": {
+        "name": "Average Bed Temperature"
+      }
+    },
+    "select": {
+      "device_orientation": {
+        "name": "Bed Orientation"
       }
     }
   },
@@ -356,6 +367,16 @@
         "woke_up": {
           "name": "Woke up",
           "description": "When sleep actually ended. Local time."
+        }
+      }
+    },
+    "end_sleep_session": {
+      "name": "End sleep session",
+      "description": "Stop the sleep session the bed currently thinks is running.",
+      "fields": {
+        "confirm": {
+          "name": "Confirm",
+          "description": "Must be true. Ends whichever session is currently open."
         }
       }
     }
