@@ -224,7 +224,7 @@ Entities read from coordinator:
 
 | Sensor | \<zone\> Measured Temperature | `_{zoneId}_measured_temp` | `status.zones[].temp`. Duplicates the climate entity's `current_temperature` on purpose: climate attributes are not retained as long-term statistics, a `sensor` with a `state_class` is. |
 | Sensor | \<zone\> Target Temperature | `_{zoneId}_target_temp` | `zones[].temp`, the LIVE setpoint. Distinct from `today_sleep_schedule.*_temp`, which is schedule intent and diverges the moment a zone is nudged by hand. |
-| Sensor | \<person\> Next Scheduled Action | `_user_{userId}_next_scheduled_action` | Timestamp of the next temperature change the bed will make on its own, with the action name and per-zone targets as attrs. Built from the WS `timeline`, which is materialized server-side and so reflects overrides and smart temperature. Unavailable until an `update` frame arrives, and again after the last action of the day. |
+| Sensor | \<person\> Next Scheduled Action | `_user_{userId}_next_scheduled_action` | Timestamp of the next temperature change the bed will make on its own, with the action name and per-zone targets as attrs. Built from the WS `timeline`, which is materialized server-side and so reflects overrides and smart temperature. **The server sends `timeline: []` even mid-schedule, measured 2026-07-27 at 01:20 local across five consecutive `update` frames, so this sensor reads unavailable.** Whether the array is ever non-empty is unconfirmed. |
 | Binary Sensor (diag) | Device Online | `_device_online` | `status.online`, the server's view of the topper. Distinct from Live Connection, which is OUR socket to Orion. The two can legitimately disagree in both directions. |
 | Update | Firmware | `_firmware_update` | `installed_version` from `status.firmware.cb`, `latest_version` from `status.pending_update.is_available`. Supports INSTALL and PROGRESS. Replaced the read-only Firmware Update Available binary sensor. See the caveats below. |
 | Number | LED Brightness | `_led_brightness` | 0-100 write via `PUT /v1/devices/{serial_number}/live`. Debounced with an optimistic local write and a post-write lock, mirroring the vendor app. |
@@ -551,6 +551,50 @@ The service accepts 1 to 240 and lets the server reject what it dislikes.
 ## Verification Log
 
 Live-request confirmations, newest first. A claim only earns "measured" by appearing here.
+
+### 2026-07-27 — Thermal relief (rapid cooling) works
+
+Alex toggled `switch.sleepy_*_rapid_cool` on and back off from the dashboard.
+The bed cooled, the switch reported on, and turning it off restored the previous
+setpoint without any manual correction.
+
+`PUT /v1/devices/{serial}/live/thermal-relief` and
+`POST /v1/devices/{serial}/live/thermal-relief/cancel` are therefore **MEASURED**,
+along with the read side at `zones[].thermal_relief` carrying `end_time`,
+`previous_temp`, and `previous_on`.
+
+The restore is server-side. The bed remembers what it was doing before the
+cooling started and puts it back on cancel, which is why this write has a safe
+undo path even though it changes the physical device.
+
+Still unmeasured on this route: `duration_minutes` values other than 30, and the
+`type` field beyond `"cool"`. The app only ever sends `"cool"`, so a heat variant
+is assumed not to exist rather than known not to.
+
+### 2026-07-27 — `timeline` arrives empty even mid-schedule
+
+`sensor.sleepy_*_next_scheduled_action` read `unavailable` fifteen minutes after
+a restart with the socket healthy, so the previous "it only comes on update
+frames, wait for one" explanation was wrong.
+
+Captured 75 seconds of live WebSocket traffic at **01:20 local**. One
+`live_device.snapshot` followed by five `live_device.update` frames. **Every
+update frame carried `"timeline": []`.**
+
+So the field is present, the server sends it on every update, and it is empty.
+
+Note on the clock, because the first read of this was wrong. **Home Assistant
+container logs are UTC.** A capture that looked like an idle mid-morning window
+was actually the middle of the night, two hours after bedtime fired at 23:00 and
+about five and a half hours before wake-up at 07:00. That makes the empty array
+harder to explain away, not easier: the bed was inside its own schedule, with a
+known upcoming action, and still queued nothing.
+
+Consequence: the sensor is not broken and needs no code change, but the "it only
+populates near an action" theory has no support. **Open question:** whether the
+array is ever non-empty at all. Worth one capture within a few minutes of a
+scheduled transition. If that is empty too, the field carries no usable signal
+and both sensors should be deleted rather than left permanently unavailable.
 
 ### 2026-07-27 — Occupancy is our invention, not the vendor's
 

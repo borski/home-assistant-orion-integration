@@ -267,9 +267,11 @@ class OrionRapidCoolSwitch(OrionBaseEntity, SwitchEntity):
     hidden. So there is real state to reflect, and turning the switch off
     is a genuine cancel rather than a second fire-and-forget button.
 
-    Confidence: APP-DERIVED. Read out of the Orion Android v2.4.1
-    bytecode (start at decompiled line 938590, cancel at 938680) and
-    never executed. Turning this on is the test.
+    Confidence: MEASURED 2026-07-27. Toggled on and back off against a
+    live bed. The side cooled, `thermal_relief` populated, and the
+    cancel restored the previous setpoint without intervention.
+    Originally read out of the Orion Android v2.4.1 bytecode, start at
+    decompiled line 938590 and cancel at 938680.
     """
 
     _attr_icon = "mdi:snowflake"

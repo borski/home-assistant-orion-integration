@@ -10,3 +10,6 @@ working/
 /schedule_user_id_test.py
 /schedule_flag_test.py
 /override_route_test.py
+
+# Scratch lockfile from ad-hoc `uv run` tooling. This project uses mise.
+uv.lock

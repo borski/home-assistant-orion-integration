@@ -465,11 +465,15 @@ class OrionApiClient:
         The app calls this Hot Flash Relief and describes it as "pause
         schedules for temporary max cooling relief".
 
-        **Confidence: APP-DERIVED.** Read from Orion Android v2.4.1
-        Hermes bytecode, never executed. `_startThermalRelief` builds
-        the path at decompiled line 938590 and dispatches a PUT at
-        938599. The caller assembles the body at 1281908 to 1281910:
-        `type`, `zones`, `duration_minutes`.
+        **Confidence: MEASURED 2026-07-27.** Started and cancelled from
+        the dashboard on a live bed. The side cooled, `thermal_relief`
+        appeared on that zone, and cancelling restored the previous
+        setpoint with no manual correction.
+
+        Originally read from Orion Android v2.4.1 Hermes bytecode:
+        `_startThermalRelief` builds the path at decompiled line 938590
+        and dispatches a PUT at 938599. The caller assembles the body at
+        1281908 to 1281910: `type`, `zones`, `duration_minutes`.
 
         Unlike every other route in this client, this one **legitimately
         takes multiple keys in one body.** It is the only multi-key
@@ -479,21 +483,24 @@ class OrionApiClient:
         shared bed means per person. Cooling one side leaves the other
         untouched.
 
-        `duration_minutes` is an integer. The app clamps its own picker
-        to a `HOT_FLASH_DURATION_OPTIONS` set that lives in a separate
-        bytecode module and was not resolved, so the exact menu values
-        are UNRESOLVED. 30 appears as the clamp seed and the default is
-        that array's index 1. Whether the server enforces a range at all
-        is unknown, so this method does not impose one beyond requiring
-        a positive integer.
+        `duration_minutes` is an integer. Only 30 has been sent. The
+        app clamps its own picker to a `HOT_FLASH_DURATION_OPTIONS` set
+        that lives in a separate bytecode module and was not resolved,
+        so the exact menu values are UNRESOLVED. 30 appears as the clamp
+        seed and the default is that array's index 1. Whether the server
+        enforces a range at all is unknown, so this method does not
+        impose one beyond requiring a positive integer.
 
-        `relief_type` is `"cool"` at the only observed call site. No
-        heating variant was found.
+        `relief_type` is `"cool"` at the only observed call site and the
+        only value ever sent. No heating variant was found, which is an
+        absence of evidence rather than evidence of absence.
 
-        The server tracks relief state, so it is readable afterwards at
-        `zones[].thermal_relief`. The app's own settings copy confirms
-        this: "an active session's countdown stays visible even when
-        this is off."
+        The server tracks relief state, confirmed on the wire: after a
+        successful start, `zones[].thermal_relief` carries `end_time`,
+        `previous_temp`, and `previous_on`. The restore is therefore
+        server-side, which is what gives this write a safe undo path.
+        The app's own settings copy says the same thing: "an active
+        session's countdown stays visible even when this is off."
 
         On failure the app raises "Failed to start thermal relief"
         (decompiled 938602), so a non-2xx here is a real rejection
@@ -527,10 +534,13 @@ class OrionApiClient:
         Ends relief early on the named zones. The device restores the
         `previous_temp` and `previous_on` it stashed when relief began.
 
-        **Confidence: APP-DERIVED.** `_cancelThermalRelief` builds the
-        path at decompiled line 938680 and POSTs `{"zones": [...]}` at
-        938689 to 938692. The caller maps zone objects to bare ids
-        before passing them.
+        **Confidence: MEASURED 2026-07-27.** Cancelled from the
+        dashboard on a live bed. The zone returned to its prior setpoint
+        on its own.
+
+        `_cancelThermalRelief` builds the path at decompiled line 938680
+        and POSTs `{"zones": [...]}` at 938689 to 938692. The caller maps
+        zone objects to bare ids before passing them.
         """
         if not zone_ids:
             raise ValueError("cancel_thermal_relief requires at least one zone id")

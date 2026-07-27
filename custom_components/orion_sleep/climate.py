@@ -270,9 +270,9 @@ class OrionZoneClimateEntity(OrionBaseEntity, ClimateEntity):
         window, then the device restores what it was doing. The other
         side of the bed is untouched.
 
-        APP-DERIVED until someone watches it run. It is the one route in
-        this integration that legitimately sends several keys in one
-        body, because that is what the vendor's own client does.
+        MEASURED 2026-07-27. It is the one route in this integration that
+        legitimately sends several keys in one body, because that is what
+        the vendor's own client does.
         """
         try:
             await self.coordinator.api_client.start_thermal_relief(
