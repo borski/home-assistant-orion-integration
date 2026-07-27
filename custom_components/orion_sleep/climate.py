@@ -37,6 +37,11 @@ from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import entity_platform
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
+from .const import (
+    DEFAULT_COOLING_MINUTES,
+    MAX_COOLING_MINUTES,
+    MIN_COOLING_MINUTES,
+)
 from .coordinator import OrionDataUpdateCoordinator
 from .entity import OrionBaseEntity
 
@@ -44,16 +49,6 @@ _LOGGER = logging.getLogger(__name__)
 
 SERVICE_START_COOLING = "start_cooling"
 SERVICE_STOP_COOLING = "stop_cooling"
-
-# The app clamps its picker to a HOT_FLASH_DURATION_OPTIONS array that
-# lives in a separate bytecode module and was not resolved, so the exact
-# menu values are UNRESOLVED. 30 shows up as the clamp seed and the
-# default is that array's index 1. Whether the server enforces a range
-# at all is unknown, so this is a deliberately generous bound with a
-# default matching the one value we did see.
-DEFAULT_COOLING_MINUTES = 30
-MIN_COOLING_MINUTES = 1
-MAX_COOLING_MINUTES = 240
 
 # Only "standby" has ever been captured on the wire. The heating/cooling
 # spellings are guesses from the field name, so they are listed here but

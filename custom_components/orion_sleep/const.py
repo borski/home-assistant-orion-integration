@@ -41,6 +41,18 @@ DEFAULT_SCAN_INTERVAL = 600  # 10 minutes
 CONF_INSIGHTS_DAYS = "insights_days"
 DEFAULT_INSIGHTS_DAYS = 7
 
+# Rapid cooling (the app calls it Hot Flash Relief).
+#
+# The app clamps its picker to a HOT_FLASH_DURATION_OPTIONS array that lives
+# in a separate bytecode module and was not resolved, so the exact menu
+# values are UNRESOLVED. 30 shows up as the clamp seed and the app's default
+# is that array's index 1. Whether the server enforces a range at all is
+# unknown, so these are deliberately generous bounds around the one value we
+# actually saw.
+DEFAULT_COOLING_MINUTES = 30
+MIN_COOLING_MINUTES = 1
+MAX_COOLING_MINUTES = 240
+
 # Display aliases. Maps an immutable Orion user id to the name Alex wants
 # shown ("Ada" -> "Alex"). Affects friendly names ONLY. Unique ids and
 # entity ids are built from device and zone ids, never from a person's name,

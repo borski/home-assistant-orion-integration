@@ -226,21 +226,55 @@ Entities read from coordinator:
 | Sensor | \<zone\> Target Temperature | `_{zoneId}_target_temp` | `zones[].temp`, the LIVE setpoint. Distinct from `today_sleep_schedule.*_temp`, which is schedule intent and diverges the moment a zone is nudged by hand. |
 | Sensor | \<person\> Next Scheduled Action | `_user_{userId}_next_scheduled_action` | Timestamp of the next temperature change the bed will make on its own, with the action name and per-zone targets as attrs. Built from the WS `timeline`, which is materialized server-side and so reflects overrides and smart temperature. Unavailable until an `update` frame arrives, and again after the last action of the day. |
 | Binary Sensor (diag) | Device Online | `_device_online` | `status.online`, the server's view of the topper. Distinct from Live Connection, which is OUR socket to Orion. The two can legitimately disagree in both directions. |
-| Binary Sensor (diag) | Firmware Update Available | `_firmware_update_available` | `status.pending_update.is_available`. Deliberately not an `update` entity: nothing in the payload carries the available version string. |
+| Update | Firmware | `_firmware_update` | `installed_version` from `status.firmware.cb`, `latest_version` from `status.pending_update.is_available`. Supports INSTALL and PROGRESS. Replaced the read-only Firmware Update Available binary sensor. See the caveats below. |
 | Number | LED Brightness | `_led_brightness` | 0-100 write via `PUT /v1/devices/{serial_number}/live`. Debounced with an optimistic local write and a post-write lock, mirroring the vendor app. |
 | Switch | Quiet Mode | `_quiet_mode` | Write via the same live route. Replaced the old read-only binary sensor once the write was measured. |
 | Binary Sensor | \<zone\> Cooling | `_{zoneId}_thermal_relief` | Hot flash relief running on that side. Reads `zones[].thermal_relief`, and counts as active only when `end_time` is finite AND in the future, which is the app's own test. Exposes `ends_at`, `previous_temp`, and `previous_on`, so the temperature the bed will restore is visible while cooling runs. |
+| Switch | \<person\> Rapid Cool | `_{zoneId}_rapid_cool` | Hot flash relief as a toggle. On starts a 30 minute window on that side, off cancels it and restores the previous setpoint. A switch rather than two buttons because the bed tracks the window server-side, so off is a genuine cancel. Carries the same attrs as the Cooling binary sensor. |
+| Sensor | \<person\> Cooling Ends | `_{zoneId}_cooling_ends` | TIMESTAMP device class, so Home Assistant renders a live countdown that ticks on its own. `None` whenever cooling is not running. The same value exists as an `ends_at` attribute on the switch, but an attribute is static text. |
 | Button | Swap Bed Sides | `_action_swap_sides` | `POST /v1/sleep-configurations/user-swap`. Enabled by default: pressing it again reverses it, so a misfire is cheap. |
 | Button (disabled) | Split Zones | `_action_split_zones` | `POST /v1/sleep-configurations/user-split`. Disabled by default because **nothing in the live payload reports split state**, so a press has no observable result and no way to confirm what it did. |
 
-**A two-zone device with no partner linked exposes 66 base entities. A linked partner adds 35 more, for 101.**
+**A two-zone device with no partner linked exposes 69 base entities. A linked partner adds 35 more, for 104.**
 
 - 2 climate entities, one per zone.
-- 31 sensors: 11 insights, 5 schedule temperatures and duration, current offset, live connection, 6 topper sensor readings, 2 measured and 2 target zone temperatures, LED brightness, firmware, and Wi-Fi signal.
+- 33 sensors: 11 insights, 5 schedule temperatures and duration, current offset, live connection, 6 topper sensor readings, 2 measured and 2 target zone temperatures, 2 cooling countdowns, LED brightness, firmware, and Wi-Fi signal.
 - 5 numbers: 4 schedule-phase temperature offsets plus LED brightness.
 - 2 time entities: bedtime and wake up time.
-- 7 switches: runtime power, Away Mode, quiet mode, and 4 schedule flags. Away Mode is omitted for accounts with multiple devices because the API action is account-global.
-- 8 binary sensors: sleep session, 2 occupancy sensors, 2 cooling sensors, firmware update available, safety problem, and the schedule override indicator.
+- 9 switches: runtime power, Away Mode, quiet mode, 2 rapid cool, and 4 schedule flags. Away Mode is omitted for accounts with multiple devices because the API action is account-global.
+- 7 binary sensors: sleep session, 2 occupancy sensors, 2 cooling sensors, safety problem, and the schedule override indicator.
+- 1 update entity: Control Tower firmware.
+
+### Firmware updates
+
+Modelled on the Lucid Motors integration's `update.py`, which is the
+closest well-built analogue: a device that reports its own installed
+version and can be told to flash, with no way to roll back.
+
+The read half is MEASURED. The install half is not, and cannot be made so
+on demand:
+
+- `latest_version` returns `installed_version` when nothing is waiting.
+  That equality is how an update entity says "up to date".
+- When an update **is** waiting, Orion says only
+  `pending_update.is_available: true`. It has never named the version.
+  So `latest_version` falls back to the literal string `Available`, which
+  is a placeholder, not data. Every plausible version key in the block is
+  checked first, so this stops being reachable the day Orion starts
+  naming them.
+- `PROGRESS` reports a bare boolean. Nothing carries a percentage, so the
+  bar is indeterminate. `RELEASE_NOTES` is unsupported: no route exists.
+- `POST /v1/devices/{serial_number}/update` takes the **serial**. The
+  client had it wired to the UUID until 2026-07-27, which would have
+  404'd exactly the way `/action` did. `activate_device` and
+  `deactivate_device` carried the same bug and were corrected at the same
+  time. All three still have zero verified executions.
+
+This is the only write in the integration with no save-and-restore path,
+and the only one that cannot be provoked for testing, because
+`is_available` has been false continuously. Alex accepted that
+trade-off on 2026-07-27: the first real update is the test, and warranty
+covers the downside.
 - 3 buttons: reboot, swap bed sides, and split zones. The last two are real routes from the app; reboot and split ship disabled by default. Forget Wi-Fi is intentionally not exposed.
 
 A linked partner adds 11 insight sensors plus a second full schedule family of 16: 5 sensors, 4 offset numbers, 2 time entities, 4 switches, and the override indicator.

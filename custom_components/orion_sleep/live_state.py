@@ -158,9 +158,10 @@ def pending_update_available(live: dict | None) -> bool | None:
     block is missing or wrongly typed, so a device that has never
     reported the field stays unavailable instead of claiming "no update".
 
-    Deliberately NOT modelled as an `update` entity: nothing in the live
-    payload carries the available version string, so `latest_version`
-    would have to be invented.
+    This is what backs the `update` entity's latest_version. Note the
+    block has only ever carried `is_available` on this account, never a
+    version string, so the entity has to fall back to a placeholder when
+    an update is genuinely waiting.
     """
     status = live.get("status") if isinstance(live, dict) else None
     pending = status.get("pending_update") if isinstance(status, dict) else None
@@ -174,6 +175,19 @@ def pending_update_info(live: dict | None) -> dict | None:
     """Return the full pending-update block for entity attributes."""
     status = live.get("status") if isinstance(live, dict) else None
     value = status.get("pending_update") if isinstance(status, dict) else None
+    return value if isinstance(value, dict) else None
+
+
+def firmware_update_info(live: dict | None) -> dict | None:
+    """Return the in-flight firmware update block.
+
+    Reads `status.firmware_update`, which carries `in_progress`,
+    `current_step`, `result`, `workflow_id` and a few timestamps. Only
+    `current_step: "complete"` and `result: "success"` have ever been
+    captured, so anything describing a running update is unverified.
+    """
+    status = live.get("status") if isinstance(live, dict) else None
+    value = status.get("firmware_update") if isinstance(status, dict) else None
     return value if isinstance(value, dict) else None
 
 

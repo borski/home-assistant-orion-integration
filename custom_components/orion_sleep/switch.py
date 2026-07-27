@@ -13,6 +13,7 @@ from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import util
+from .const import DEFAULT_COOLING_MINUTES
 from .coordinator import OrionDataUpdateCoordinator
 from .entity import OrionBaseEntity, OrionLiveSettingMixin
 
@@ -46,6 +47,8 @@ async def async_setup_entry(
             continue
         entities.append(OrionPowerSwitch(coordinator, device_id))
         entities.append(OrionQuietModeSwitch(coordinator, device_id))
+        for zone_id in coordinator.device_zone_ids(device_id):
+            entities.append(OrionRapidCoolSwitch(coordinator, device_id, zone_id))
         for user_id in coordinator.schedule_user_ids():
             for field, label, icon in _SCHEDULE_FLAGS:
                 entities.append(
@@ -248,6 +251,83 @@ class OrionQuietModeSwitch(OrionLiveSettingMixin, OrionBaseEntity, SwitchEntity)
     async def async_turn_off(self, **kwargs: Any) -> None:
         """Disable quiet mode."""
         await self._async_write_live_setting(False, self._reported_state())
+
+
+class OrionRapidCoolSwitch(OrionBaseEntity, SwitchEntity):
+    """One person's rapid cooling, as a toggle.
+
+    The app calls this Hot Flash Relief: it pauses the schedule and drives
+    that side to maximum cooling for a fixed window, then restores the
+    previous setpoint on its own.
+
+    A switch rather than a pair of buttons because the bed tracks this
+    server-side. `zones[].thermal_relief` carries `end_time`,
+    `previous_temp` and `previous_on`, and the app's own settings copy
+    says an active countdown stays visible even when the feature is
+    hidden. So there is real state to reflect, and turning the switch off
+    is a genuine cancel rather than a second fire-and-forget button.
+
+    Confidence: APP-DERIVED. Read out of the Orion Android v2.4.1
+    bytecode (start at decompiled line 938590, cancel at 938680) and
+    never executed. Turning this on is the test.
+    """
+
+    _attr_icon = "mdi:snowflake"
+
+    def __init__(
+        self,
+        coordinator: OrionDataUpdateCoordinator,
+        device_id: str,
+        zone_id: str,
+    ) -> None:
+        super().__init__(coordinator, device_id)
+        self._zone_id = zone_id
+        self._attr_unique_id = f"{device_id}_{zone_id}_rapid_cool"
+        self._attr_name = (
+            f"{coordinator.zone_label(device_id, zone_id)} Rapid Cool"
+        )
+
+    @property
+    def is_on(self) -> bool:
+        """True while the server reports an unexpired cooling window."""
+        return self.coordinator.thermal_relief_active(self._device_id, self._zone_id)
+
+    @property
+    def extra_state_attributes(self) -> dict | None:
+        """Expose when it ends and what it will restore."""
+        relief = self.coordinator.zone_thermal_relief(self._device_id, self._zone_id)
+        if not relief:
+            return None
+
+        attrs: dict[str, Any] = {}
+        ends = self.coordinator.thermal_relief_until(self._device_id, self._zone_id)
+        if ends is not None:
+            attrs["ends_at"] = ends.isoformat()
+        for key in ("type", "previous_temp", "previous_on"):
+            value = relief.get(key)
+            if value is not None:
+                attrs[key] = value
+        return attrs or None
+
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        """Start cooling this side for the default window."""
+        try:
+            await self.coordinator.api_client.start_thermal_relief(
+                self._serial(), [self._zone_id], DEFAULT_COOLING_MINUTES
+            )
+        except ValueError as err:
+            raise HomeAssistantError(str(err)) from err
+        await self.coordinator.async_request_refresh()
+
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        """Cancel cooling on this side and restore the previous setpoint."""
+        try:
+            await self.coordinator.api_client.cancel_thermal_relief(
+                self._serial(), [self._zone_id]
+            )
+        except ValueError as err:
+            raise HomeAssistantError(str(err)) from err
+        await self.coordinator.async_request_refresh()
 
 
 class OrionScheduleFlagSwitch(OrionBaseEntity, SwitchEntity):

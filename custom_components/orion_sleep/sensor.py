@@ -464,6 +464,7 @@ async def async_setup_entry(
         for zone_id in coordinator.device_zone_ids(device_id):
             entities.append(OrionZoneMeasuredTempSensor(coordinator, device_id, zone_id))
             entities.append(OrionZoneTargetTempSensor(coordinator, device_id, zone_id))
+            entities.append(OrionCoolingEndsSensor(coordinator, device_id, zone_id))
         for sensor_name in _TOPPER_SENSORS:
             entities.append(OrionLiveHeartRateSensor(coordinator, device_id, sensor_name))
             entities.append(OrionLiveBreathRateSensor(coordinator, device_id, sensor_name))
@@ -898,6 +899,45 @@ class OrionZoneTargetTempSensor(_OrionZoneTempSensor):
 
     def _read(self) -> float | None:
         return self.coordinator.zone_setpoint(self._device_id, self._zone_id)
+
+
+class OrionCoolingEndsSensor(OrionBaseEntity, SensorEntity):
+    """When rapid cooling ends on one side.
+
+    A TIMESTAMP sensor rather than an attribute so Home Assistant renders
+    it as a live countdown ("in 24 minutes") that ticks on its own. The
+    same value sits on the Rapid Cool switch as `ends_at`, but an
+    attribute is static text.
+
+    Reads `zones[].thermal_relief.end_time`, a Unix millisecond stamp.
+    Returns None whenever cooling is not running, which is also how a
+    stale window that the server never cleared reads, because
+    `thermal_relief_until` only returns a time that is still in the
+    future.
+
+    No `state_class`: Home Assistant rejects one on a non-numeric sensor.
+    """
+
+    _attr_device_class = SensorDeviceClass.TIMESTAMP
+    _attr_icon = "mdi:timer-sand"
+
+    def __init__(
+        self,
+        coordinator: OrionDataUpdateCoordinator,
+        device_id: str,
+        zone_id: str,
+    ) -> None:
+        super().__init__(coordinator, device_id)
+        self._zone_id = zone_id
+        self._attr_unique_id = f"{device_id}_{zone_id}_cooling_ends"
+        self._attr_name = (
+            f"{coordinator.zone_label(device_id, zone_id)} Cooling Ends"
+        )
+
+    @property
+    def native_value(self):
+        """Cooling end time, or None when nothing is running."""
+        return self.coordinator.thermal_relief_until(self._device_id, self._zone_id)
 
 
 class OrionLedBrightnessSensor(OrionBaseEntity, SensorEntity):

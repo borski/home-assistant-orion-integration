@@ -611,24 +611,49 @@ class OrionApiClient:
         body: dict[str, Any] = {"action_type": action}
         return await self._request("POST", f"/v1/devices/{device_serial}/action", json_data=body)
 
-    async def activate_device(self, device_id: str, model: str) -> dict:
-        """POST /v1/devices/{deviceId}/activate — pair/register a device."""
+    async def activate_device(self, device_serial: str, model: str) -> dict:
+        """POST /v1/devices/{serial_number}/activate — pair/register a device.
+
+        Takes the SERIAL, not the UUID. The Orion Android v2.4.1 bytecode
+        passes `arg.serial` at decompiled line 924189. This method has no
+        callers and has never been executed.
+        """
         await self.ensure_valid_token()
         return await self._request(
             "POST",
-            f"/v1/devices/{device_id}/activate",
+            f"/v1/devices/{device_serial}/activate",
             json_data={"model": model},
         )
 
-    async def deactivate_device(self, device_id: str) -> dict:
-        """POST /v1/devices/{deviceId}/deactivate — unpair a device."""
-        await self.ensure_valid_token()
-        return await self._request("POST", f"/v1/devices/{device_id}/deactivate")
+    async def deactivate_device(self, device_serial: str) -> dict:
+        """POST /v1/devices/{serial_number}/deactivate — unpair a device.
 
-    async def trigger_firmware_update(self, device_id: str) -> dict:
-        """POST /v1/devices/{deviceId}/update — trigger firmware update."""
+        Takes the SERIAL, not the UUID (decompiled line 1095239). No
+        callers, deliberately never wired to a control.
+        """
         await self.ensure_valid_token()
-        return await self._request("POST", f"/v1/devices/{device_id}/update")
+        return await self._request("POST", f"/v1/devices/{device_serial}/deactivate")
+
+    async def trigger_firmware_update(self, device_serial: str) -> dict:
+        """POST /v1/devices/{serial_number}/update — start a firmware update.
+
+        Confidence: APP-DERIVED. The route and its identifier were read
+        out of the Orion Android v2.4.1 bytecode at decompiled line
+        942957, where the app passes `serial_number`. It has never been
+        executed from here.
+
+        Takes the SERIAL, not the UUID. Every device route that was
+        assumed to take the UUID has turned out to want the serial, and
+        `/action` returned 404 until that was corrected.
+
+        This is the one write in the integration with no save-and-restore
+        path. A flash cannot be undone, and it cannot be provoked on
+        demand either: `pending_update.is_available` has been false for
+        the entire time we have been watching, so there is nothing to
+        install until Orion actually ships one.
+        """
+        await self.ensure_valid_token()
+        return await self._request("POST", f"/v1/devices/{device_serial}/update")
 
     async def update_schedule_temperature(
         self,

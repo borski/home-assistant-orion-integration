@@ -826,6 +826,15 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
         """Return the full pending-update block from the live snapshot."""
         return live_state.pending_update_info(self.live_devices.get(device_id))
 
+    def firmware_update_info(self, device_id: str) -> dict | None:
+        """Return the in-flight firmware update block."""
+        return live_state.firmware_update_info(self.live_devices.get(device_id))
+
+    def firmware_update_in_progress(self, device_id: str) -> bool:
+        """Whether the device says a firmware update is running right now."""
+        info = self.firmware_update_info(device_id) or {}
+        return info.get("in_progress") is True
+
     def network_info(self, device_id: str) -> dict | None:
         """Return device network details from the live snapshot."""
         return live_state.network_info(self.live_devices.get(device_id))
