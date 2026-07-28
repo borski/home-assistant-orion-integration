@@ -37,6 +37,7 @@ from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import entity_platform
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
+from . import helpers
 from .const import (
     DEFAULT_COOLING_MINUTES,
     MAX_COOLING_MINUTES,
@@ -87,7 +88,7 @@ async def async_setup_entry(
             _LOGGER.warning(
                 "Orion device %s exposed no zones; no climate entity created. "
                 "This resolves itself once the first live snapshot arrives",
-                device_id,
+                helpers.short_id(device_id),
             )
             continue
 

@@ -139,7 +139,10 @@ def verify_code(
     # Extract session from the nested response
     session = (data.get("response") or {}).get("session")
     if not session or "access_token" not in session:
-        print(f"[ERROR] Unexpected verify response: {json.dumps(data, indent=2)}")
+        # Keys only. An auth response body carries access_token and
+        # refresh_token, and the moment this branch fires is exactly the
+        # moment somebody copies the output into a bug report.
+        print(f"[ERROR] Unexpected verify response, keys: {sorted(data)}")
         return None
     return session
 
@@ -157,7 +160,10 @@ def refresh_tokens(refresh_token: str) -> dict | None:
     # Try same nested structure as verify; fall back to top-level
     session = (data.get("response") or {}).get("session", data)
     if "access_token" not in session:
-        print(f"[ERROR] Unexpected refresh response: {json.dumps(data, indent=2)}")
+        # Keys only. An auth response body carries access_token and
+        # refresh_token, and the moment this branch fires is exactly the
+        # moment somebody copies the output into a bug report.
+        print(f"[ERROR] Unexpected refresh response, keys: {sorted(data)}")
         return None
     return session
 

@@ -1034,7 +1034,7 @@ paths:
         ```
 
         - The path segment is the device's **`serial_number`** (e.g.
-          `54F82A13AF5C`), not its UUID. Using the UUID returns
+          `AA11BB22CC33`), not its UUID. Using the UUID returns
           `404 {"error":"Not Found","message":"Device not found"}`.
         - The JWT access token from `POST /v1/auth/verify` or
           `POST /v1/auth/refresh` is passed as the `token` query parameter.
@@ -1122,7 +1122,7 @@ paths:
         {
           "type": "live_device.snapshot",        // or "live_device.update"
           "payload": {
-            "serial_number": "54F82A13AF5C",
+            "serial_number": "AA11BB22CC33",
             "model": "OSCT001-1",
             "zones": [                           // setpoints (user intent)
               { "id": "zone_a", "temp": 20.5, "on": false },
@@ -1212,7 +1212,7 @@ paths:
           description: Device serial_number (NOT its UUID `id`)
           schema:
             type: string
-            example: 54F82A13AF5C
+            example: AA11BB22CC33
         - name: token
           in: query
           required: true
@@ -1784,7 +1784,7 @@ components:
         serial_number:
           type: string
           description: Device serial_number (matches the WS path segment)
-          example: 54F82A13AF5C
+          example: AA11BB22CC33
         model:
           type: string
           example: OSCT001-1

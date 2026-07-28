@@ -232,7 +232,11 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
             except OrionAuthError as err:
                 raise ConfigEntryAuthFailed(str(err)) from err
             except (OrionApiError, OrionConnectionError) as err:
-                _LOGGER.warning("Failed to fetch live state for %s: %s", serial, err)
+                _LOGGER.warning(
+                    "Failed to fetch live state for %s: %s",
+                    helpers.short_id(serial),
+                    err,
+                )
                 # Preserve whatever we already had rather than blanking it.
                 if dev_id in self.live_devices:
                     new_live[dev_id] = self.live_devices[dev_id]

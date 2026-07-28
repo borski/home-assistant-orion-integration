@@ -68,7 +68,14 @@ def _planned_renames(entry: ConfigEntry, coordinator) -> list[tuple[str, str]]:
             own = insight_keys + ["session_active", "server_in_bed", "current_phase"]
             pairs += _person_renames(device_id, primary, own, "")
 
-        if partner:
+        # Same predicate the platforms use. `partner_user` being populated
+        # is not enough: `has_partner_for_device` also needs the serial to
+        # match and (coordinator.py) a single device on the account, so on
+        # a two-bed account no partner entity is ever built. Renaming on
+        # the strength of the profile alone would re-key her entities onto
+        # ids nothing claims, and the legacy ids they could be recovered
+        # from would be gone. This migration is one-way.
+        if partner and coordinator.has_partner_for_device(device_id):
             # The reason this migration exists. Keyed on the literal role
             # "partner", replacing the linked account handed the new
             # person the previous person's entity, and with it their
@@ -102,6 +109,16 @@ def async_migrate_entry_identity(
     account_id = coordinator.user_id
     if not account_id or entry.unique_id == account_id:
         return False
+    for other in hass.config_entries.async_entries(DOMAIN):
+        if other.entry_id != entry.entry_id and other.unique_id == account_id:
+            # Two entries sharing a unique_id makes every future
+            # _abort_if_unique_id_configured unreliable, and Home Assistant
+            # currently only logs it.
+            _LOGGER.warning(
+                "Not re-identifying this entry: another entry is already "
+                "configured for the same Orion account"
+            )
+            return False
     hass.config_entries.async_update_entry(entry, unique_id=account_id)
     _LOGGER.info(
         "Config entry is now identified by its Orion account rather than "

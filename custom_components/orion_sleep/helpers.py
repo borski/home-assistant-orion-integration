@@ -27,6 +27,18 @@ _SENSITIVE_DIAGNOSTIC_BRANCHES = frozenset(
         "sensors",
         "timeline",
         "today_sleep_schedule",
+        # Whether somebody is in bed right now, since when, and which
+        # side. Occupancy over a date range also reads as "the house was
+        # empty", which is why this belongs with the biometrics rather
+        # than with the config.
+        "live_session",
+        # Chronotype and sleep targets.
+        "sleep_config",
+        # The same schedule as `timeline`, which the coordinator stores at
+        # top level under a different name. Omitting `schedules` and
+        # `today_sleep_schedule` and then letting it out under a third
+        # spelling is how a deliberate omission becomes a leak.
+        "ws_timelines",
     }
 )
 
@@ -34,6 +46,20 @@ _SENSITIVE_DIAGNOSTIC_BRANCHES = frozenset(
 _UUID_RE = re.compile(
     r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
 )
+
+
+def short_id(value: object) -> str:
+    """Last four characters of an identifier, for logs.
+
+    The library already does this for device serials, and says why: logs
+    get pasted into bug reports, and `serial_number` and `user_id` are
+    both in the diagnostics redaction set. Publishing them at INFO or
+    WARNING contradicts a policy the rest of the project keeps. Four
+    characters still tell a two-person household which record is meant.
+    DEBUG keeps the whole value, because enabling it is deliberate.
+    """
+    text = value if isinstance(value, str) else str(value or "")
+    return "…" + text[-4:] if len(text) > 4 else (text or "?")
 
 
 def nested_mapping(container: object, *keys: str) -> dict:
@@ -73,7 +99,14 @@ def renames_to_apply(
     target id.
     """
     out: list[tuple[str, str]] = []
-    taken = set(already_in_use)
+    # Seeded with BOTH, because an id this entry currently holds is just
+    # as occupied as one another entry holds. Seeding only from
+    # `already_in_use` (which the caller builds by excluding this entry's
+    # own ids) meant a rename onto a live id was approved and then refused
+    # by the registry. `taken.discard(old)` below is what makes a chain
+    # work: the rename that vacates an id has to come first, and one that
+    # does not is deferred to the next startup rather than attempted.
+    taken = set(already_in_use) | set(on_this_entry)
     for old, new in pairs:
         if not new or old == new or old not in on_this_entry:
             continue
@@ -227,9 +260,21 @@ def clamp_cooling_minutes(value: object, default: int, low: int, high: int) -> i
 
 
 def redact_identifier_keys(value: object) -> object:
-    """Redact UUIDs used as mapping keys while preserving container shape."""
+    """Redact UUIDs wherever they appear, preserving container shape.
+
+    Keys and list elements both. Home Assistant's `async_redact_data`
+    matches on field NAMES, so a uuid sitting in a plain list is invisible
+    to it: `/v1/auth/me` returns `devices` as an array of device ids, and
+    the field is called `devices`, not anything identifier-shaped. Neither
+    defence looked at it.
+    """
     if isinstance(value, list):
-        return [redact_identifier_keys(item) for item in value]
+        return [
+            "**REDACTED**"
+            if isinstance(item, str) and _UUID_RE.fullmatch(item)
+            else redact_identifier_keys(item)
+            for item in value
+        ]
     if not isinstance(value, dict):
         return value
 

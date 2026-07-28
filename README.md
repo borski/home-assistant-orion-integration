@@ -506,3 +506,5 @@ The one rule that matters: **do not ship a control against an unverified route.*
 MIT. See [LICENSE](LICENSE).
 
 Not affiliated with or endorsed by Orion Longevity Inc.
+
+> `orion_info.py` prints raw API and WebSocket payloads, which include live heart rate, breathing rate and bed occupancy. Its output is unredacted by design. Read it before pasting it anywhere.

@@ -36,6 +36,7 @@ from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from orion_sleep_api import OrionApiClient
 
+from . import helpers
 from .coordinator import OrionDataUpdateCoordinator
 from .entity import OrionBaseEntity
 
@@ -141,7 +142,9 @@ class OrionActionButton(OrionBaseEntity, ButtonEntity):
     async def async_press(self) -> None:
         """Invoke this button's own endpoint."""
         _LOGGER.info(
-            "Orion button '%s' pressed on device %s", self._def.key, self._device_id
+            "Orion button '%s' pressed on device %s",
+            self._def.key,
+            helpers.short_id(self._device_id),
         )
         serial = self._get_device().get("serial_number")
         if not serial:

@@ -93,6 +93,30 @@ class OrionSleepConfigFlow(ConfigFlow, domain=DOMAIN):
         )
 
 
+
+    def _async_reauth_account_matches(self, account_id: str | None) -> bool:
+        """Whether these credentials belong to the entry being reauthed.
+
+        Permissive in exactly two cases, both of which mean "we cannot
+        tell", never "we checked and it differs":
+
+        * the profile fetch failed, so there is no id to compare
+        * the entry predates account-keyed ids and is still keyed on the
+          address that was typed into the form, so there is nothing to
+          compare against. `async_migrate_entry_identity` moves those over
+          on the next successful setup, and from then on this check bites.
+        """
+        entry = self._reauth_entry
+        if entry is None or not account_id:
+            return True
+        existing = entry.unique_id
+        if not existing:
+            return True
+        typed = (entry.data.get(CONF_AUTH_VALUE) or "").strip().lower()
+        if existing == typed:
+            return True
+        return existing == account_id
+
     async def _async_account_id(self, tokens: dict) -> str | None:
         """The Orion user id behind the tokens we just received.
 
@@ -107,6 +131,18 @@ class OrionSleepConfigFlow(ConfigFlow, domain=DOMAIN):
             access_token=tokens["access_token"],
             refresh_token=tokens["refresh_token"],
             expires_at=tokens["expires_at"],
+        )
+        # If this probe rotates the tokens, the rotation has to reach the
+        # dict the caller persists. Otherwise the refresh token we just
+        # spent is the one written to the entry, and the entry works until
+        # its first real refresh and then dies into a reauth loop that
+        # repeats the same mistake. `util.auth_tokens_from_session` coerces
+        # a missing `expires_at` to 0 and 0 reads as expired, so any verify
+        # response without that field arms this on the first call.
+        client.set_token_refresh_callback(
+            lambda access, refresh, expires_at: tokens.update(
+                access_token=access, refresh_token=refresh, expires_at=expires_at
+            )
         )
         try:
             profile = await client.get_current_user()
@@ -238,11 +274,23 @@ class OrionSleepConfigFlow(ConfigFlow, domain=DOMAIN):
                 # WebSockets, and two sets of entities fighting over the
                 # same unique ids. The account id is only knowable here,
                 # after the code has been accepted.
-                if not self._reauth_entry:
-                    account_id = await self._async_account_id(tokens)
-                    if account_id:
-                        await self.async_set_unique_id(account_id)
-                        self._abort_if_unique_id_configured()
+                account_id = await self._async_account_id(tokens)
+
+                if self._reauth_entry:
+                    # Reauth was the one door into this flow with no
+                    # identity check on it, and it is the dangerous one.
+                    # Finishing account A's reauth prompt with account B's
+                    # credentials swapped primary and partner, and the
+                    # entity migration then re-keyed each person's history
+                    # onto the OTHER person. Two people's sleep scores,
+                    # heart rates and apnea counts exchanged, silently,
+                    # with recorder history and statistics attached. No
+                    # error anywhere, because both renames succeed.
+                    if not self._async_reauth_account_matches(account_id):
+                        return self.async_abort(reason="reauth_account_mismatch")
+                elif account_id:
+                    await self.async_set_unique_id(account_id)
+                    self._abort_if_unique_id_configured()
 
                 if self._reauth_entry:
                     self.hass.config_entries.async_update_entry(
@@ -572,6 +620,17 @@ class OrionSleepOptionsFlow(OptionsFlow):
                     access_token=tokens["access_token"],
                     refresh_token=tokens["refresh_token"],
                     expires_at=tokens["expires_at"],
+                )
+                # Same reason as `_async_account_id`: this client calls
+                # ensure_valid_token before its first request, and a
+                # rotation here would otherwise be thrown away while the
+                # spent refresh token is what gets persisted below.
+                authenticated_client.set_token_refresh_callback(
+                    lambda access, refresh, expires_at: tokens.update(
+                        access_token=access,
+                        refresh_token=refresh,
+                        expires_at=expires_at,
+                    )
                 )
                 try:
                     partner_devices = util.dedupe_devices_by_id(

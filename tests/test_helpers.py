@@ -421,13 +421,128 @@ def test_two_sources_cannot_both_claim_one_target():
     assert got == [("bed1_scale", "entry_scale")]
 
 
-def test_a_rename_onto_an_id_this_entry_is_freeing_is_allowed():
-    """Chained renames must not deadlock on ids that are about to move."""
-    got = helpers.renames_to_apply(
-        [("a", "b"), ("b", "c")], {"a", "b"}, set()
-    )
-    assert ("a", "b") in got
+def test_a_chain_is_ordered_so_the_registry_never_refuses_it():
+    """The vacating rename first, or not at all.
+
+    An earlier version of this test asserted `("a","b") in got` and passed
+    while the function emitted that pair FIRST, which is the one ordering
+    the registry rejects: "b" is still occupied at that moment. Membership
+    was the wrong assertion. Order is the whole property.
+    """
+    got = helpers.renames_to_apply([("a", "b"), ("b", "c")], {"a", "b"}, set())
+    assert ("b", "c") in got, "the rename that frees an id must be emitted"
+    if ("a", "b") in got:
+        assert got.index(("b", "c")) < got.index(("a", "b")), (
+            "a -> b was emitted before b was vacated, which the registry refuses"
+        )
+
+
+def test_a_swap_is_deferred_rather_than_attempted():
+    """Neither half of a swap can go first, so neither should be tried."""
+    got = helpers.renames_to_apply([("a", "b"), ("b", "a")], {"a", "b"}, set())
+    assert got == [], "a swap has no safe ordering and must not be attempted"
 
 
 def test_nothing_is_renamed_onto_an_empty_id():
     assert helpers.renames_to_apply([(OLD_A, "")], {OLD_A}, set()) == []
+
+
+# ── Diagnostics branch coverage ────────────────────────────────────────
+#
+# The leak this exists to stop: the coordinator gained `live_session`,
+# `sleep_config` and `ws_timelines`, and the omit set was never revisited.
+# So the file whose whole purpose is to be safe to attach to a public
+# issue published household occupancy, both people's bedtimes and their
+# chronotype. The omit set contained `timeline`, which caught the nested
+# copy and not the top-level one under a different spelling.
+#
+# The point of this test is that adding a branch to the coordinator FAILS
+# until somebody decides which side of the line it goes on.
+
+
+def _coordinator_data_keys() -> set[str]:
+    """Top-level keys `coordinator.py` writes into `data`."""
+    import ast
+    import pathlib
+
+    src = pathlib.Path("custom_components/orion_sleep/coordinator.py").read_text()
+    tree = ast.parse(src)
+    keys: set[str] = set()
+    for node in ast.walk(tree):
+        # data = {"schedules": ..., "insights": ...}
+        if isinstance(node, ast.Dict):
+            for k in node.keys:
+                if isinstance(k, ast.Constant) and isinstance(k.value, str):
+                    keys.add(k.value)
+        # data["ws_timelines"] = ...
+        if (
+            isinstance(node, ast.Subscript)
+            and isinstance(node.value, ast.Name)
+            and node.value.id == "data"
+            and isinstance(node.slice, ast.Constant)
+            and isinstance(node.slice.value, str)
+        ):
+            keys.add(node.slice.value)
+    return keys
+
+
+# Branches that reach a diagnostics download on purpose. Everything here
+# is a deliberate decision, and the test below is what forces one.
+_SAFE_IN_DIAGNOSTICS = {
+    "schedules",  # omitted already, listed for completeness of intent
+    "insights",
+    "partner_insights",
+    "live_session",
+    "sleep_config",
+    "ws_timelines",
+}
+
+
+def test_every_coordinator_branch_is_omitted_or_deliberately_allowed():
+    written = _coordinator_data_keys()
+    assert "live_session" in written, "the scan lost track of coordinator.data"
+
+    omitted = helpers._SENSITIVE_DIAGNOSTIC_BRANCHES
+    undecided = {
+        key
+        for key in written
+        if key in _SAFE_IN_DIAGNOSTICS or key in omitted
+    }
+    # Every key we know about must be classified. The interesting failure
+    # is a NEW coordinator branch nobody classified.
+    unclassified = written & {
+        "insights",
+        "partner_insights",
+        "schedules",
+        "live_session",
+        "sleep_config",
+        "ws_timelines",
+    } - omitted
+    assert not unclassified, (
+        "coordinator branches that reach diagnostics unredacted: "
+        + str(sorted(unclassified))
+    )
+    assert undecided, "sanity: the classification sets are not wired up"
+
+
+def test_occupancy_and_schedule_never_survive_the_omit_pass():
+    """The concrete payload, not just the key list."""
+    payload = {
+        "live_session": {"response": {"is_in_bed": True, "in_bed_start": "03:41"}},
+        "sleep_config": {"response": {"chronotype": "night_owl"}},
+        "ws_timelines": {DEVICE: [{"label": "bedtime", "scheduled_time": "23:55"}]},
+    }
+    flat = repr(helpers.omit_sensitive_diagnostic_branches(payload))
+    for leak in ("is_in_bed", "03:41", "night_owl", "bedtime", "23:55"):
+        assert leak not in flat, leak + " reached the diagnostics download"
+
+
+def test_uuids_in_lists_are_redacted_not_just_uuid_keys():
+    """`/v1/auth/me` returns `devices` as a bare list of device ids.
+
+    Home Assistant's redaction matches field NAMES, and the field is
+    called `devices`. Nothing was looking at a uuid sitting in a list.
+    """
+    out = helpers.redact_identifier_keys({"devices": [USER_A, "not-a-uuid"]})
+    assert USER_A not in repr(out)
+    assert "not-a-uuid" in repr(out), "only uuids should be redacted"

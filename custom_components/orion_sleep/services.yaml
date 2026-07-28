@@ -204,6 +204,13 @@ end_sleep_session:
       selector:
         boolean:
 
+list_access:
+  target:
+    entity:
+      integration: orion_sleep
+      domain: sensor
+  fields: {}
+
 list_invites:
   target:
     entity:

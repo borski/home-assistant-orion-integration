@@ -453,6 +453,10 @@ class OrionServerOccupancyBinarySensor(OrionBaseEntity, BinarySensorEntity):
         return {
             "in_bed_start": session.get("in_bed_start"),
             "in_bed_end": session.get("in_bed_end"),
-            "session_id": session.get("session_id"),
+            # No session_id. Attributes go into the recorder's
+            # state_attributes table and into every backup, and this file
+            # already states that policy for the same identifier: the
+            # session-listing service exists so an id can be found without
+            # ever recording one forever for a lookup done once.
             "zone_id": session.get("zone_id") or None,
         }

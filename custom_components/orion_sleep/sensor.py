@@ -44,6 +44,7 @@ SERVICE_DELETE_SLEEP_SESSION = "delete_sleep_session"
 SERVICE_CONFIRM_SLEEP_SESSION = "confirm_sleep_session"
 SERVICE_EDIT_SLEEP_SESSION = "edit_sleep_session"
 SERVICE_END_SLEEP_SESSION = "end_sleep_session"
+SERVICE_LIST_ACCESS = "list_access"
 SERVICE_LIST_INVITES = "list_invites"
 SERVICE_INVITE_USER = "invite_user"
 SERVICE_CANCEL_INVITE = "cancel_invite"
@@ -761,6 +762,12 @@ async def async_setup_entry(
     # targets the Bed Access sensor. The device owns the guest list; a
     # person's insight sensor has nothing to say about who else can use
     # the bed.
+    platform.async_register_entity_service(
+        SERVICE_LIST_ACCESS,
+        {},
+        "async_list_access",
+        supports_response=SupportsResponse.ONLY,
+    )
     platform.async_register_entity_service(
         SERVICE_LIST_INVITES,
         {},
@@ -1680,11 +1687,15 @@ class OrionAccessSensor(OrionBaseEntity, SensorEntity):
                 {
                     "name": (
                         self.coordinator.display_name_for_user(user_id)
-                        or util.orion_user_label(entry.get("user"))
-                        or f"User {user_id[:8]}"
+                        # NOT orion_user_label: its fallback chain ends at
+                        # email and then phone, so an account with no name
+                        # set would put a login credential into a recorded
+                        # attribute. This sensor already dropped the raw
+                        # user record for carrying a legal name and a photo
+                        # url, and that chain reintroduces the same thing.
+                        or "User " + helpers.short_id(user_id)
                     ),
                     "role": entry["role"],
-                    "user_id": user_id,
                     "away": entry["away"],
                     "expires": entry["expires"],
                 }
@@ -1699,6 +1710,11 @@ class OrionAccessSensor(OrionBaseEntity, SensorEntity):
     def extra_state_attributes(self) -> dict:
         people = self._people()
         return {
+            # `people` carries display names and roles. It deliberately
+            # does NOT carry raw Orion user ids: attributes are recorded
+            # and land in backups, and a household roster is not worth
+            # keeping forever to satisfy a service call that already
+            # takes the id as a parameter.
             "people": people,
             # Built from the normalised records rather than raw API
             # values. A set comprehension over unvalidated data is how
@@ -1712,6 +1728,31 @@ class OrionAccessSensor(OrionBaseEntity, SensorEntity):
     # Every one of these acts on the account that owns the device, so
     # they all go through the primary client. A partner's token cannot
     # manage access it was granted.
+
+    async def async_list_access(self) -> dict:
+        """Who has access, with their Orion user ids, as a response.
+
+        The ids are here and not in `extra_state_attributes` for the same
+        reason session ids are not: attributes are written to the recorder
+        and to every backup, so putting a household roster there keeps it
+        forever to serve a lookup done once. `remove_user_access`,
+        `update_user_phone` and `assign_zones` all take a user id, and this
+        is where you get it.
+        """
+        return {
+            "people": [
+                {
+                    "name": self.coordinator.display_name_for_user(entry["user_id"]),
+                    "user_id": entry["user_id"],
+                    "role": entry["role"],
+                    "away": entry["away"],
+                    "expires": entry["expires"],
+                }
+                for entry in util.access_entries(
+                    self.coordinator.devices, self._device_id
+                )
+            ]
+        }
 
     async def async_list_invites(self) -> dict:
         """Pending invitations, as a service response."""
@@ -1733,7 +1774,11 @@ class OrionAccessSensor(OrionBaseEntity, SensorEntity):
             raise HomeAssistantError(str(err)) from err
         except OrionApiError as err:
             raise HomeAssistantError(f"Orion rejected the invite: {err}") from err
-        _LOGGER.info("Sent an Orion %s invite for device %s", role, self._device_id)
+        _LOGGER.info(
+            "Sent an Orion %s invite for device %s",
+            role,
+            helpers.short_id(self._device_id),
+        )
         await self.coordinator.async_request_refresh()
 
     async def async_cancel_invite(self, invite_id: str) -> None:
@@ -1781,7 +1826,9 @@ class OrionAccessSensor(OrionBaseEntity, SensorEntity):
             raise HomeAssistantError(str(err)) from err
         except OrionApiError as err:
             raise HomeAssistantError(f"Orion could not revoke access: {err}") from err
-        _LOGGER.warning("Revoked Orion access for user %s", user_id)
+        _LOGGER.warning(
+            "Revoked Orion access for user %s", helpers.short_id(user_id)
+        )
         await self.coordinator.async_request_refresh()
 
     async def async_create_guest(self) -> None:
@@ -1840,7 +1887,11 @@ class OrionAccessSensor(OrionBaseEntity, SensorEntity):
             raise HomeAssistantError(str(err)) from err
         except OrionApiError as err:
             raise HomeAssistantError(f"Orion could not assign that zone: {err}") from err
-        _LOGGER.info("Assigned Orion zones %s to user %s", zone_ids, user_id)
+        _LOGGER.info(
+            "Assigned Orion zones %s to user %s",
+            zone_ids,
+            helpers.short_id(user_id),
+        )
         await self.coordinator.async_request_refresh()
 
     async def async_set_device_name(self, name: str) -> None:
