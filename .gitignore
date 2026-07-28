@@ -13,3 +13,4 @@ working/
 
 # Scratch lockfile from ad-hoc `uv run` tooling. This project uses mise.
 uv.lock
+.venv-ha/

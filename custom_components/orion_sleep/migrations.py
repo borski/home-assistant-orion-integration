@@ -383,6 +383,11 @@ def async_migrate_unique_ids(
     # wrong entity, taking its history with it.
     holder_entity_ids = {row.id: row.entity_id for row in registry.entities.values()}
     owned_row_ids = {row.id for row in known}
+    # Named, not pattern-matched. The account-level select is the only
+    # entity 2.x built once per device for a single account value, so it is
+    # the only target where a surplus row of ours is expected rather than a
+    # conflict worth refusing.
+    surplus_ok = {f"{entry.entry_id}_temperature_display_unit"}
     pending: list[tuple[Any, str, str]] = []
     seen_sources: set[tuple[str, str, str]] = set()
     for old, new in planned:
@@ -407,13 +412,18 @@ def async_migrate_unique_ids(
                 if holder in pending_source_ids:
                     deferred.append((row, old, new))
                     continue
-                if holder in owned_row_ids:
-                    # Our own row already sits on the target, so the work
-                    # this rename exists to do is done. The only plan that
-                    # reaches here is the account-level one, where a
-                    # multi-bed account has surplus 2.x rows for a single
-                    # value. Treating that as a conflict made removing a
-                    # bed a permanent, unretryable setup failure.
+                if holder in owned_row_ids and new in surplus_ok:
+                    # Only the account-level value legitimately has more
+                    # than one 2.x row, because it was built inside the
+                    # per-device loop. Treating that as a conflict made
+                    # removing a bed a permanent setup failure.
+                    #
+                    # Scoped to that target by name. Accepting it for ANY
+                    # row of ours silently swallowed a two-generation
+                    # registry, which is what an upgrade followed by a
+                    # downgrade without reverting produces. That splits one
+                    # person's history across two entities and leaves the
+                    # registry in the one shape revert cannot resolve.
                     continue
                 declined.append((row.entity_id, holder_entity_ids.get(holder, new)))
                 continue

@@ -169,6 +169,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 if isinstance(device, dict) and device.get("id")
             }
         )
+        # Written BEFORE the sibling barrier below, deliberately. The
+        # barrier waits on entries that have not yet named their beds, so
+        # if nobody wrote first, two entries starting together would wait
+        # on each other forever. The cost is that a setup which then fails
+        # has published a claim, which is why the `finally` withdraws it.
         identity_data = {
             CONF_DEVICE_IDS: device_ids,
             CONF_ACCOUNT_ID: coordinator.user_id,
@@ -210,6 +215,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             if platforms_loaded:
                 await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
             await coordinator.async_shutdown()
+            # A dead coordinator left in runtime_data is read by the
+            # options flow, including the partner device-serial decision.
+            if hasattr(entry, "runtime_data"):
+                del entry.runtime_data
 
     # Reload on options change
     # Registered AFTER the migration, deliberately. The migration records
