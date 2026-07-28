@@ -81,7 +81,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if entry.data.get(CONF_UID_RECOVERY_ACTIVE):
         raise ConfigEntryError(
             "Orion entity ids were prepared for a downgrade. Install 2.x, or "
-            "clear recovery mode before loading 3.x again"
+            "run the orion_sleep.resume_unique_ids action to return to 3.x"
         )
     session = async_get_clientsession(hass)
     api_client = OrionApiClient(
@@ -172,8 +172,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         # Written BEFORE the sibling barrier below, deliberately. The
         # barrier waits on entries that have not yet named their beds, so
         # if nobody wrote first, two entries starting together would wait
-        # on each other forever. The cost is that a setup which then fails
-        # has published a claim, which is why the `finally` withdraws it.
+        # on each other forever. A claim left behind by a setup that then
+        # failed is harmless now, because the claim is not what decides
+        # ownership. See `bed_owner`.
         identity_data = {
             CONF_DEVICE_IDS: device_ids,
             CONF_ACCOUNT_ID: coordinator.user_id,
@@ -289,6 +290,17 @@ def _async_register_recovery_service(hass: HomeAssistant) -> None:
 
     async def _handle_revert(call: ServiceCall) -> None:
         entry = await _admin_entry(call)
+        # Refuse rather than race. `_UNLOADABLE_STATES` deliberately omits
+        # SETUP_IN_PROGRESS because Home Assistant will not unload then,
+        # but treating "cannot unload" as "safe to proceed" ran the reverse
+        # registry transaction against rows the forward migration was
+        # renaming at that moment.
+        if entry.state not in _UNLOADABLE_STATES | {ConfigEntryState.NOT_LOADED}:
+            raise HomeAssistantError(
+                f"Orion is currently {entry.state}. Wait for it to settle, "
+                "then run this again"
+            )
+
         # Set the guard before unloading. A pending retry or an update
         # listener must not start the forward migration between unload and
         # the reverse registry transaction.
@@ -296,21 +308,41 @@ def _async_register_recovery_service(hass: HomeAssistant) -> None:
             entry,
             data={**entry.data, CONF_UID_RECOVERY_ACTIVE: True},
         )
-        # Also unload from SETUP_RETRY and SETUP_ERROR. Guarding on LOADED
-        # alone left a pending retry timer armed and running against the
-        # registry while the reverse transaction was in flight.
-        if entry.state in _UNLOADABLE_STATES:
-            unloaded = await hass.config_entries.async_unload(entry.entry_id)
-            if not unloaded:
-                raise HomeAssistantError("Could not unload Orion before recovery")
+        try:
+            # Also unload from SETUP_RETRY and SETUP_ERROR. Guarding on
+            # LOADED alone left a pending retry timer armed and running
+            # against the registry while the reverse transaction was in
+            # flight.
+            if entry.state in _UNLOADABLE_STATES:
+                unloaded = await hass.config_entries.async_unload(entry.entry_id)
+                if not unloaded:
+                    raise HomeAssistantError(
+                        "Could not unload Orion before recovery"
+                    )
 
-        result = async_revert_unique_ids(hass, entry)
-        if not result.complete:
+            result = async_revert_unique_ids(hass, entry)
+            if not result.complete:
+                raise HomeAssistantError(
+                    f"Orion recovery is incomplete: {result.remaining} entity "
+                    "mappings could not be returned to their pre-3.0 ids. "
+                    "Resolve the conflicting entity registry rows and run this "
+                    "again before installing 2.x, or run "
+                    "orion_sleep.resume_unique_ids to go back to 3.x"
+                )
+        except Exception:
+            # Never leave the latch set on a run that did not finish. It
+            # makes 3.x refuse to load, and the way out is a service the
+            # user has no reason to know exists.
+            data = dict(entry.data)
+            data.pop(CONF_UID_RECOVERY_ACTIVE, None)
+            hass.config_entries.async_update_entry(entry, data=data)
+            raise
+        if result.partner_unmapped:
             raise HomeAssistantError(
-                f"Orion recovery is incomplete: {result.remaining} entity "
-                "mappings could not be returned to their pre-3.0 ids. Resolve "
-                "the conflicting entity registry rows and run this again "
-                "before installing 2.x"
+                "A partner account is linked but no partner entity mappings "
+                "were recorded, so a downgrade would strand the partner's "
+                "history on ids 2.x never asks for. Reload Orion so the "
+                "partner verifies, then run this again"
             )
         if not result.identity_restored:
             # Cosmetic to 2.x, so it does not fail the run. Worth saying,

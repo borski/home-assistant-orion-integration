@@ -121,6 +121,10 @@ async def async_setup_entry(
 class OrionZoneClimateEntity(OrionBaseEntity, ClimateEntity):
     """A single temperature zone (one side of the bed)."""
 
+    # Fed by the live-device stream, so a fresh socket keeps it
+    # available even while a polled endpoint is failing.
+    _live_fed = True
+
     _attr_hvac_modes = [HVACMode.HEAT_COOL, HVACMode.OFF]
     _attr_supported_features = (
         ClimateEntityFeature.TARGET_TEMPERATURE

@@ -33,6 +33,7 @@ from . import helpers
 from .const import (
     CONF_AUTH_VALUE,
     CONF_DEVICE_IDS,
+    CONF_PARTNER_ACCESS_TOKEN,
     CONF_UID_MIGRATION,
     CONF_UID_RECOVERY_ACTIVE,
     DOMAIN,
@@ -48,6 +49,11 @@ class RevertResult:
     reverted: int
     remaining: int
     identity_restored: bool
+    # A partner is linked but no partner mappings survived to be reverted.
+    # The eviction that produces this is deliberate, and a single transient
+    # partner fetch failure is enough to trigger it, so the caller has to
+    # be told rather than shown a clean success.
+    partner_unmapped: bool = False
 
     @property
     def complete(self) -> bool:
@@ -94,6 +100,45 @@ def overlapping_entry_ids(
             if other is not None and other.domain == DOMAIN:
                 overlapping.add(configured)
     return overlapping
+
+
+def bed_owner(hass: HomeAssistant, device_ids: set[str]) -> str | None:
+    """Which config entry the registry says already owns these beds.
+
+    Two entries covering one bed is a shape 2.x permitted, because it had
+    no cross-entry check. Before 3.0 the primary account's entities were
+    `{device}_{key}` with no person in them, so both entries computed the
+    same id and whichever registered first got the row. The history in
+    that row belongs to whoever HA happened to register, and no amount of
+    reasoning at migration time recovers which account that was.
+
+    So the tie is broken by where the history actually is, rather than by
+    who wrote a claim first. Ownership by boot order was the original bug,
+    and a claim published by a setup that then failed is indistinguishable
+    from one held by a healthy entry, so claims cannot be the arbiter
+    either. Registry rows can: they are what carries the recorder history,
+    they survive restarts, and they do not move on their own.
+
+    Returns None when nobody owns any rows yet, which is a genuinely fresh
+    install and where the caller falls back to a stable tie-break.
+    """
+    if not device_ids:
+        return None
+
+    registry = er.async_get(hass)
+    owners: dict[str, int] = {}
+    prefixes = tuple(f"{device_id}_" for device_id in device_ids)
+    for row in registry.entities.values():
+        if row.platform != DOMAIN or not row.config_entry_id:
+            continue
+        if row.unique_id.startswith(prefixes):
+            owners[row.config_entry_id] = owners.get(row.config_entry_id, 0) + 1
+
+    if not owners:
+        return None
+    most = max(owners.values())
+    # Sorted, so a tie resolves the same way on every host and every start.
+    return min(entry_id for entry_id, count in owners.items() if count == most)
 
 
 def unresolved_device_entries(hass: HomeAssistant, entry_id: str) -> set[str]:
@@ -358,12 +403,22 @@ def async_migrate_unique_ids(
     because the old ids are gone by then. Safe to run before the identity
     is known: nothing is renamed without a user id to rename it onto.
     """
-    device_ids = {d.get("id") for d in coordinator.devices if d.get("id")}
-    if overlapping_entry_ids(hass, entry.entry_id, device_ids):
-        raise ConfigEntryError(
-            "another Orion config entry covers the same bed; refusing to assign "
-            "shared history by startup order"
-        )
+    device_ids = {str(d["id"]) for d in coordinator.devices if d.get("id")}
+    rivals = overlapping_entry_ids(hass, entry.entry_id, device_ids)
+    if rivals:
+        # Exactly one entry may migrate a shared bed, and which one must not
+        # depend on boot order or on who published a claim first. Ownership
+        # follows the registry rows, because that is where the history is.
+        # Only when nobody owns any rows does it fall back to a stable
+        # tie-break, and at that point there is no history to misassign.
+        owner = bed_owner(hass, device_ids) or min(rivals | {entry.entry_id})
+        if owner != entry.entry_id:
+            raise ConfigEntryError(
+                "Another Orion config entry already holds this bed's entity "
+                f"history ({owner}). Two entries cannot both own it, so this "
+                "one will not migrate. Remove whichever entry you do not want, "
+                "then reload"
+            )
 
     registry = er.async_get(hass)
     known = er.async_entries_for_config_entry(registry, entry.entry_id)
@@ -399,7 +454,7 @@ def async_migrate_unique_ids(
                 pending.append((row, old, new))
                 seen_sources.add(source)
 
-    declined: list[str] = []
+    declined: list[tuple[str, str]] = []
     migrated = 0
     while pending:
         progressed = False
@@ -430,7 +485,10 @@ def async_migrate_unique_ids(
             try:
                 registry.async_update_entity(row.entity_id, new_unique_id=new)
             except ValueError:
-                declined.append((row.entity_id, new))
+                blocker = occupied.get((row.domain, row.platform, new))
+                declined.append(
+                    (row.entity_id, holder_entity_ids.get(blocker) or f"unique_id {new}")
+                )
                 continue
             occupied.pop((row.domain, row.platform, old), None)
             occupied[target] = row.id
@@ -439,7 +497,16 @@ def async_migrate_unique_ids(
             migrated += 1
             progressed = True
         if not progressed:
-            declined.extend((row.entity_id, new) for row, _old, new in deferred)
+            declined.extend(
+                (
+                    row.entity_id,
+                    holder_entity_ids.get(
+                        occupied.get((row.domain, row.platform, new))
+                    )
+                    or f"unique_id {new}",
+                )
+                for row, _old, new in deferred
+            )
             break
         pending = deferred
 
@@ -550,8 +617,21 @@ def async_revert_unique_ids(hass: HomeAssistant, entry: ConfigEntry) -> RevertRe
             None,
         )
         if source is None:
+            # Nothing of ours sits on the new id, so there is no rename to
+            # perform. Retaining the record made `remaining` permanently
+            # non-zero, which made the service raise on every call while
+            # the recovery latch was already set: an unactionable, endless
+            # failure of the only rollback path.
+            #
+            # A foreign entry holding the old id is worth saying out loud,
+            # because 2.x will not get that id back, but it is not
+            # something this entry can fix by trying again.
             if old_row is not None and old_row.config_entry_id != entry.entry_id:
-                remaining.append(record)
+                _LOGGER.warning(
+                    "%s is held by another config entry, so 2.x will not "
+                    "reclaim it",
+                    old,
+                )
             continue
         if old_row is not None and old_row.id != source.id:
             remaining.append(record)
@@ -575,12 +655,29 @@ def async_revert_unique_ids(hass: HomeAssistant, entry: ConfigEntry) -> RevertRe
             hass.config_entries.async_update_entry(entry, unique_id=auth_value)
             identity_restored = True
 
+    # Latch only when this run actually did something, or still has work
+    # left. Latching on a no-op meant running the action speculatively
+    # bricked the entry: 3.x refuses to load while the flag is set, and
+    # the way back is a differently named service the message never
+    # mentioned.
     _write_journal(
         hass,
         entry,
         remaining,
-        recovery_active=True,
+        recovery_active=True if (reverted or remaining) else None,
     )
     if reverted:
         _LOGGER.info("Reverted %d Orion entities to their pre-3.0 ids", reverted)
-    return RevertResult(reverted, len(remaining), identity_restored)
+    partner_unmapped = bool(
+        entry.data.get(CONF_PARTNER_ACCESS_TOKEN)
+    ) and not any(r.get("role") == "partner" for r in recorded)
+    if partner_unmapped:
+        _LOGGER.warning(
+            "A partner account is linked but no partner entity mappings were "
+            "recorded, so the partner's entities will stay on their 3.x ids "
+            "after a downgrade. This happens when the partner could not be "
+            "verified on the last setup. Reload Orion and run this again"
+        )
+    return RevertResult(
+        reverted, len(remaining), identity_restored, partner_unmapped
+    )

@@ -104,7 +104,10 @@
       "unknown": "An unexpected error occurred"
     },
     "abort": {
-      "identity_unavailable": "Orion accepted the code but the partner account details could not be read, so nothing was saved. The code is now used, try linking again."
+      "identity_unavailable": "Orion accepted the code but the partner account details could not be read, so nothing was saved. The code is now used, try linking again.",
+      "cannot_connect": "Could not reach Orion after the code was accepted, so nothing was saved. The code is now used, try linking again.",
+      "partner_same_account": "That login is the primary account. Link the other sleeper's Orion account instead. The code is now used, so start again.",
+      "partner_device_ambiguous": "Partner linking needs both accounts to contain exactly one matching Orion bed. The code is now used, so start again."
     }
   },
   "entity": {

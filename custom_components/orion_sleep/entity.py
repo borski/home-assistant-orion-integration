@@ -31,6 +31,13 @@ class OrionBaseEntity(CoordinatorEntity[OrionDataUpdateCoordinator]):
 
     _attr_has_entity_name = True
 
+    # Set on entities whose state comes from the live-device stream rather
+    # than from a polled endpoint. Those, and only those, may stay
+    # available while a poll is failing, because the socket is genuinely
+    # still feeding them. Everything else must go unavailable rather than
+    # present a stale insight as current.
+    _live_fed = False
+
     def __init__(
         self,
         coordinator: OrionDataUpdateCoordinator,
@@ -38,6 +45,16 @@ class OrionBaseEntity(CoordinatorEntity[OrionDataUpdateCoordinator]):
     ) -> None:
         super().__init__(coordinator)
         self._device_id = device_id
+
+    @property
+    def available(self) -> bool:
+        """Poll health, or a fresh socket for the entities it feeds."""
+        if super().available:
+            return True
+        if not self._live_fed:
+            return False
+        serial = self._get_device().get("serial_number")
+        return bool(serial and self.coordinator.push_is_fresh(str(serial)))
 
     @property
     def device_info(self) -> DeviceInfo:

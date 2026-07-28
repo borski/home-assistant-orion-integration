@@ -105,7 +105,22 @@ class FakeClient:
         return {}
 
     async def get_live_device(self, serial: str) -> dict[str, Any]:
-        return {"serial_number": serial, "zones": [], "status": {}}
+        # Real zone rows, because several entities are unavailable without
+        # them for reasons that have nothing to do with poll health.
+        return {
+            "serial_number": serial,
+            "zones": [
+                {"id": "zone_a", "on": True, "temp": 24.0},
+                {"id": "zone_b", "on": False, "temp": 22.0},
+            ],
+            "status": {
+                "online": True,
+                "sensors": {
+                    "sensor1": {"heart_rate": 61, "breath_rate": 14, "status_text": "normal"},
+                    "sensor2": {"heart_rate": 0, "breath_rate": 0, "status_text": "empty"},
+                },
+            },
+        }
 
 
 class FakeWebSocketManager:

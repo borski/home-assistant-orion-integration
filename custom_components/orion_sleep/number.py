@@ -171,6 +171,10 @@ class OrionLedBrightnessNumber(OrionLiveSettingMixin, OrionBaseEntity, NumberEnt
     while this owns control.
     """
 
+    # Fed by the live-device stream, so a fresh socket keeps it
+    # available even while a polled endpoint is failing.
+    _live_fed = True
+
     _attr_native_min_value = 0
     _attr_native_max_value = 100
     _attr_native_step = 1

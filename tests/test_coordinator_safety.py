@@ -232,3 +232,19 @@ def test_the_partner_topology_warning_is_latched():
     refresh = ast.unparse(_orion.function(COORD, "_async_refresh_partner_identity"))
     assert "self._warned_partner_topology = True" in refresh
     assert "self._warned_partner_topology = False" in refresh
+
+
+def test_malformed_vendor_data_never_raises_out_of_the_read_helpers():
+    """`HOSTILE` was defined under this heading and never referenced.
+
+    A section promising that malformed vendor data cannot raise, with no
+    test under it, is worse than no section: it reads like a guarantee.
+    These are the accessors the coordinator funnels every vendor payload
+    through, so they are where the guarantee has to hold.
+    """
+    helpers = _orion.load("helpers")
+    for payload in HOSTILE:
+        assert isinstance(helpers.nested_mapping(payload, "insights", "data"), dict)
+        assert isinstance(helpers.nested_mapping(payload, "schedules"), dict)
+        helpers.omit_sensitive_diagnostic_branches(payload)
+        helpers.redact_identifier_keys(payload)

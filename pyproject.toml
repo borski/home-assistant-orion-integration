@@ -4,7 +4,6 @@
 # They are separate invocations because the fast suite installs fake
 # `homeassistant` modules into sys.modules and does not remove them.
 testpaths = ["tests"]
-asyncio_mode = "auto"
 
 [tool.ruff]
 line-length = 100

@@ -1330,6 +1330,10 @@ class OrionWebSocketStateSensor(OrionBaseEntity, SensorEntity):
 class _OrionLiveSensorBase(OrionBaseEntity, SensorEntity):
     """Shared plumbing for per-topper-sensor live entities."""
 
+    # Fed by the live-device stream, so a fresh socket keeps it
+    # available even while a polled endpoint is failing.
+    _live_fed = True
+
     _attr_state_class = SensorStateClass.MEASUREMENT
 
     def __init__(
@@ -1463,6 +1467,10 @@ class _OrionZoneTempSensor(OrionBaseEntity, SensorEntity):
     window. A `sensor` with a `state_class` is.
     """
 
+    # Fed by the live-device stream, so a fresh socket keeps it
+    # available even while a polled endpoint is failing.
+    _live_fed = True
+
     _attr_device_class = SensorDeviceClass.TEMPERATURE
     _attr_native_unit_of_measurement = UnitOfTemperature.CELSIUS
     _attr_state_class = SensorStateClass.MEASUREMENT
@@ -1572,6 +1580,10 @@ class OrionLedBrightnessSensor(OrionBaseEntity, SensorEntity):
     documented live payload, so no `light` entity is modelled.
     """
 
+    # Fed by the live-device stream, so a fresh socket keeps it
+    # available even while a polled endpoint is failing.
+    _live_fed = True
+
     _attr_name = "LED Brightness"
     _attr_icon = "mdi:brightness-6"
     _attr_native_unit_of_measurement = PERCENTAGE
@@ -1633,6 +1645,10 @@ class OrionFirmwareSensor(OrionBaseEntity, SensorEntity):
 
 class OrionWifiSignalSensor(OrionBaseEntity, SensorEntity):
     """Control Tower Wi-Fi signal and connection details."""
+
+    # Fed by the live-device stream, so a fresh socket keeps it
+    # available even while a polled endpoint is failing.
+    _live_fed = True
 
     _attr_translation_key = "wifi_signal"
     _attr_entity_category = EntityCategory.DIAGNOSTIC

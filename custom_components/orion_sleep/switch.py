@@ -78,6 +78,10 @@ class OrionPowerSwitch(OrionBaseEntity, SwitchEntity):
     State is derived from each zone's `on` field in the live snapshot.
     """
 
+    # Fed by the live-device stream, so a fresh socket keeps it
+    # available even while a polled endpoint is failing.
+    _live_fed = True
+
     _attr_translation_key = "power"
     _attr_icon = "mdi:power"
 
@@ -220,6 +224,10 @@ class OrionQuietModeSwitch(OrionLiveSettingMixin, OrionBaseEntity, SwitchEntity)
     Supersedes the read-only `binary_sensor.*_quiet_mode`, which the
     codebase created because no write path was known at the time.
     """
+
+    # Fed by the live-device stream, so a fresh socket keeps it
+    # available even while a polled endpoint is failing.
+    _live_fed = True
 
     _attr_icon = "mdi:volume-off"
     _attr_name = "Quiet Mode"

@@ -7,8 +7,6 @@ written.
 
 from __future__ import annotations
 
-from unittest.mock import patch
-
 import pytest
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.helpers import entity_registry as er
@@ -64,47 +62,51 @@ async def test_a_two_generation_registry_is_not_silently_accepted(hass, patched)
         )
 
 
-@pytest.mark.xfail(
-    reason=(
-        "KNOWN DEFECT, no fix landed. A setup that fails still leaves its bed "
-        "claim behind, and on the next start that claim locks out the entry "
-        "which legitimately owns the bed. Withdrawing the claim in the setup "
-        "teardown was tried and reverted: the coordinator re-publishes it on "
-        "every attempt, so withdrawing changes entry data, which triggers "
-        "another setup, which re-publishes. That reload loop is worse than "
-        "the bug. The real fix is a deterministic owner among conflicting "
-        "claims rather than first-writer-wins, which is a design change."
-    ),
-    strict=True,
-)
-async def test_a_failed_setup_withdraws_the_bed_claim_it_published(hass, patched):
-    """A claim must not outlive the setup that published it.
+async def test_a_stale_claim_does_not_lock_out_the_entry_holding_the_history(
+    hass, patched
+):
+    """Ownership must follow the rows, not whoever published a claim first.
 
-    `async_setup_entry` writes the claim before the sibling barrier,
-    deliberately, because if nobody wrote first two entries starting
-    together would wait on each other forever. The consequence is that a
-    setup which then fails has already published a claim to the bed, and
-    `overlapping_entry_ids` cannot tell that apart from a claim held by a
-    healthy entry. Left behind, it locks out whoever actually owns the bed.
+    A setup that fails still leaves its bed claim behind, and there is no
+    safe way to withdraw it: the coordinator republishes on every attempt,
+    so withdrawing changes entry data, which triggers another setup, which
+    republishes. That reload loop is worse than the stale claim.
 
-    Forced here by making a step AFTER the write raise, because the
-    coordinator's own overlap check is correctly ordered and would
-    otherwise stop setup before the write is reached.
+    So the claim stopped being the arbiter. The entry that owns the
+    registry rows owns the bed, because that is where the recorder history
+    actually lives and rows do not move on their own.
     """
-    entry = make_entry(hass)
-    boom = RuntimeError("something after the identity write")
+    ghost = make_entry(hass, entry_id="entry-ghost", unique_id="acct-ghost")
+    hass.config_entries.async_update_entry(
+        ghost, data={**ghost.data, CONF_DEVICE_IDS: [BED_A]}
+    )
+    real = make_entry(hass, entry_id="entry-real", unique_id=ACCOUNT)
+    row(hass, f"{BED_A}_sleep_score", real)
 
-    with patch(
-        "custom_components.orion_sleep.async_migrate_unique_ids",
-        side_effect=boom,
-    ):
-        await hass.config_entries.async_setup(entry.entry_id)
-        await hass.async_block_till_done()
+    await hass.config_entries.async_setup(real.entry_id)
+    await hass.async_block_till_done()
 
-    assert entry.state is not ConfigEntryState.LOADED
-    assert not entry.data.get(CONF_DEVICE_IDS), (
-        "setup failed but left its bed claim behind. On the next restart "
-        "that claim locks out the entry that legitimately owns the bed"
+    assert real.state is ConfigEntryState.LOADED, (
+        "a claim left behind by another entry's failed setup locked out the "
+        f"entry that actually holds this bed's history. reason={real.reason!r}"
+    )
+
+
+async def test_exactly_one_entry_migrates_a_shared_bed(hass, patched):
+    """Two entries, one bed, neither owning rows yet.
+
+    Nobody's history is at stake, but they still cannot both migrate. The
+    winner must be the same on every host and every restart.
+    """
+    a = make_entry(hass, entry_id="entry-aaa", unique_id="acct-a")
+    b = make_entry(hass, entry_id="entry-bbb", unique_id="acct-b")
+
+    await hass.config_entries.async_setup(a.entry_id)
+    await hass.async_block_till_done()
+
+    loaded = [e.entry_id for e in (a, b) if e.state is ConfigEntryState.LOADED]
+    assert loaded == ["entry-aaa"], (
+        f"expected the deterministic winner to be entry-aaa, got {loaded}"
     )
 
 

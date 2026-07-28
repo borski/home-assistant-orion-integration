@@ -707,19 +707,22 @@ class OrionSleepOptionsFlow(OptionsFlow):
                     partner_devices = util.dedupe_devices_by_id(
                         await authenticated_client.list_devices()
                     )
+                # Every branch from here aborts rather than re-showing the
+                # form. `verify_auth_code` above has spent the one-time
+                # code, so offering the box again can only ever return
+                # invalid_code, and closing the dialog is the user's only
+                # exit. It also discards `_pending_options`, which was
+                # collected two steps earlier.
                 except OrionAuthError:
-                    errors["base"] = "invalid_code"
+                    return self.async_abort(reason="identity_unavailable")
                 except (OrionApiError, OrionConnectionError):
-                    errors["base"] = "cannot_connect"
+                    return self.async_abort(reason="cannot_connect")
                 else:
                     if not isinstance(partner_profile, dict):
                         partner_id = None
                     else:
                         partner_id = partner_profile.get("id")
                     if not isinstance(partner_id, str) or not partner_id:
-                        # Same reasoning as the primary flow. The partner's
-                        # code has been spent, so offering the form again
-                        # only produces invalid_code.
                         return self.async_abort(reason="identity_unavailable")
                     coordinator = getattr(self._config_entry, "runtime_data", None)
                     primary_devices = getattr(coordinator, "devices", [])
@@ -728,13 +731,13 @@ class OrionSleepOptionsFlow(OptionsFlow):
                         primary_devices, partner_devices
                     )
                     if partner_id == primary_id:
-                        errors["base"] = "partner_same_account"
-                    elif (
+                        return self.async_abort(reason="partner_same_account")
+                    if (
                         len(primary_devices) != 1
                         or len(partner_devices) != 1
                         or len(shared_serials) != 1
                     ):
-                        errors["base"] = "partner_device_ambiguous"
+                        return self.async_abort(reason="partner_device_ambiguous")
                     else:
                         partner_serial = next(iter(shared_serials))
                         self.hass.config_entries.async_update_entry(

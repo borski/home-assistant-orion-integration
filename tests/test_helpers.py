@@ -419,6 +419,26 @@ def _coordinator_data_keys() -> set[str]:
 
 # Branches that reach a diagnostics download on purpose. Everything here
 # is a deliberate decision, and the test below is what forces one.
+# Keys the `ast` scan picks up from unrelated dict literals in
+# coordinator.py. They are not coordinator.data branches, so they are not
+# a diagnostics decision. Curated deliberately: an unknown key failing the
+# test is the point.
+_INCIDENTAL_DICT_KEYS = {
+    "id",
+    "on",
+    "temp",
+    "zones",
+    "status",
+    "serial_number",
+    "response",
+    "success",
+    "data",
+    "user_id",
+    "devices",
+    "name",
+    "error",
+}
+
 _SAFE_IN_DIAGNOSTICS = {
     "schedules",  # omitted already, listed for completeness of intent
     "insights",
@@ -441,14 +461,11 @@ def test_every_coordinator_branch_is_omitted_or_deliberately_allowed():
     }
     # Every key we know about must be classified. The interesting failure
     # is a NEW coordinator branch nobody classified.
-    unclassified = written & {
-        "insights",
-        "partner_insights",
-        "schedules",
-        "live_session",
-        "sleep_config",
-        "ws_timelines",
-    } - omitted
+    # Intersecting with a hardcoded list and then subtracting a set that
+    # contained all of it made this empty for every possible input, so a
+    # NEW coordinator branch could never fail it. Which was the one thing
+    # it existed to catch.
+    unclassified = written - omitted - _SAFE_IN_DIAGNOSTICS - _INCIDENTAL_DICT_KEYS
     assert not unclassified, (
         "coordinator branches that reach diagnostics unredacted: "
         + str(sorted(unclassified))

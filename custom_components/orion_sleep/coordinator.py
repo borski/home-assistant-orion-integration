@@ -216,14 +216,25 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
                 if isinstance(device.get("id"), str) and device["id"]
             )
             recorded_ids = list(self.config_entry.data.get(CONF_DEVICE_IDS) or [])
-            from .migrations import overlapping_entry_ids
+            from .migrations import bed_owner, overlapping_entry_ids
 
-            if overlapping_entry_ids(
+            rivals = overlapping_entry_ids(
                 self.hass, self.config_entry.entry_id, set(refreshed_ids)
-            ):
-                raise UpdateFailed(
-                    "Orion device ownership now overlaps another config entry"
+            )
+            if rivals:
+                # Same rule setup uses. Overlap alone is not a failure: a
+                # claim left behind by another entry's failed setup looks
+                # identical to one held by a healthy entry, so treating any
+                # overlap as fatal let a dead entry lock out the one that
+                # actually holds the history.
+                owner = bed_owner(self.hass, set(refreshed_ids)) or min(
+                    rivals | {self.config_entry.entry_id}
                 )
+                if owner != self.config_entry.entry_id:
+                    raise UpdateFailed(
+                        "Another Orion config entry holds this bed's entity "
+                        f"history ({owner})"
+                    )
             if refreshed_ids != recorded_ids:
                 self.hass.config_entries.async_update_entry(
                     self.config_entry,
@@ -652,17 +663,25 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
 
         Publishing directly keeps the poll on its own clock.
 
-        `last_update_success` is still set, because `CoordinatorEntity`
-        resolves `available` from it. Dropping it meant one failed poll
-        marked every entity unavailable and a socket delivering a full
-        snapshot every two seconds could no longer bring them back, for
-        up to a whole scan interval. That inverts the failure this method
-        was written to fix.
+        Deliberately does NOT touch `last_update_success` or
+        `last_exception`. A frame proves one bed's live state is fresh. It
+        says nothing about `/v2/insights`, the schedule endpoint, the live
+        session, or the account still being authenticated, all of which are
+        carried forward from the last successful poll. Marking the whole
+        coordinator healthy on a frame made every insight sensor report
+        available while serving days-old data, and erased the record of
+        why the poll failed before anyone could read it.
+
+        Entities that genuinely are socket-fed opt in through
+        `OrionBaseEntity._live_fed` instead, which is a per-entity claim
+        rather than a global one.
         """
         self.data = data
-        self.last_update_success = True
-        self.last_exception = None
         self.async_update_listeners()
+
+    def push_is_fresh(self, serial: str) -> bool:
+        """Whether this bed's socket has delivered a frame recently."""
+        return self._ws_manager.is_fresh(serial)
 
     @callback
     def _handle_ws_state(self, serial: str, state: str) -> None:

@@ -146,6 +146,23 @@ class Coordinator:
 
 @pytest.fixture(scope="module")
 def migrations():
+    """Restores sys.modules on the way out.
+
+    This installs fake `homeassistant` and `custom_components` modules and
+    used to leave them there for the rest of the process. Harmless only
+    while nothing else imports Home Assistant. The moment a real HA test
+    lands in the same run, collection order decides whether it gets the
+    real package or these stubs, and the failure looks like an HA bug.
+    """
+    saved = dict(sys.modules)
+    try:
+        yield from _load_migrations()
+    finally:
+        sys.modules.clear()
+        sys.modules.update(saved)
+
+
+def _load_migrations():
     package = types.ModuleType("custom_components.orion_sleep")
     package.__path__ = [str(ROOT)]
     sys.modules["custom_components"] = types.ModuleType("custom_components")
@@ -199,7 +216,7 @@ def migrations():
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
-    return module
+    yield module
 
 
 def record(domain, old, new, platform=DOMAIN, role="primary"):
@@ -378,20 +395,29 @@ def test_deleted_entity_does_not_block_downgrade_forever(migrations):
     assert "_uid_migration_v3" not in entry.data
 
 
-def test_foreign_owner_of_legacy_id_blocks_recovery(migrations):
+def test_a_foreign_owner_of_a_legacy_id_does_not_block_recovery(migrations):
+    """There is nothing to revert, so retaining the record helped nobody.
+
+    Keeping it made `remaining` permanently non-zero, which made the
+    recovery service raise on every call while the latch was already set.
+    An unactionable, endless failure of the only rollback path. 2.x will
+    not reclaim that id, which is worth a warning and is not something
+    this entry can fix by trying again.
+    """
     old = f"{DEVICE}_sleep_score"
-    new = f"{DEVICE}_user_{ACCOUNT}_sleep_score"
+    new_id = f"{DEVICE}_user_{ACCOUNT}_sleep_score"
     entry = Entry(
         data={
             "auth_value": "alice@example.com",
-            "_uid_migration_v3": [record("sensor", old, new)],
+            "_uid_migration_v3": [record("sensor", old, new_id)],
         }
     )
     foreign = Row("sensor.foreign", "sensor", old, config_entry_id="entry-2")
     hass = Hass([entry, Entry(entry_id="entry-2")], EntityRegistry([foreign]))
+
     result = migrations.async_revert_unique_ids(hass, entry)
-    assert result.remaining == 1
-    assert entry.data["_uid_migration_v3"]
+    assert result.remaining == 0
+    assert result.complete
 
 
 def test_account_identity_collision_is_fatal(migrations):
