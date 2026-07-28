@@ -19,6 +19,7 @@ from .const import (
     CONF_REFRESH_TOKEN,
 )
 from .coordinator import OrionDataUpdateCoordinator
+from .migrations import async_migrate_entry_identity, async_migrate_unique_ids
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -105,11 +106,24 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         api_client,
         partner_api_client=partner_api_client,
     )
-    await coordinator.async_config_entry_first_refresh()
-
-    entry.runtime_data = coordinator
-
-    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    # The first refresh starts a WebSocket client per device. If it, or
+    # the platform setup after it, raises, Home Assistant never calls
+    # async_unload_entry, because as far as it is concerned setup never
+    # succeeded. Nothing would stop those sockets, and they reconnect on
+    # a backoff forever with no config entry left to own them. A reauth
+    # loop would stack a fresh set on every attempt.
+    try:
+        await coordinator.async_config_entry_first_refresh()
+        entry.runtime_data = coordinator
+        # Must run after the refresh, which is what resolves who the two
+        # accounts actually are, and before the platforms build entities
+        # against the new scheme. In between is the only correct window.
+        async_migrate_unique_ids(hass, entry, coordinator)
+        async_migrate_entry_identity(hass, entry, coordinator)
+        await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    except Exception:
+        await coordinator.async_shutdown()
+        raise
 
     # Reload on options change
     entry.async_on_unload(entry.add_update_listener(_async_options_updated))

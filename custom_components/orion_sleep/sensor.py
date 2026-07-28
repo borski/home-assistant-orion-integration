@@ -280,6 +280,7 @@ INSIGHT_SENSOR_DESCRIPTIONS: tuple[OrionSensorEntityDescription, ...] = (
         day_field="score",
         day_attrs=("quality", "color"),
         native_unit_of_measurement="points",
+        suggested_display_precision=0,
         state_class=SensorStateClass.MEASUREMENT,
         icon="mdi:medal-outline",
         value_fn=lambda session: None,  # day-level, see day_field
@@ -325,6 +326,7 @@ INSIGHT_SENSOR_DESCRIPTIONS: tuple[OrionSensorEntityDescription, ...] = (
         key="heart_rate_avg",
         translation_key="heart_rate_avg",
         native_unit_of_measurement="bpm",
+        suggested_display_precision=0,
         state_class=SensorStateClass.MEASUREMENT,
         icon="mdi:heart-pulse",
         value_fn=lambda session: _get_heart_rate(session).get("average"),
@@ -343,6 +345,7 @@ INSIGHT_SENSOR_DESCRIPTIONS: tuple[OrionSensorEntityDescription, ...] = (
         key="breath_rate",
         translation_key="breath_rate",
         native_unit_of_measurement="breaths/min",
+        suggested_display_precision=1,
         state_class=SensorStateClass.MEASUREMENT,
         icon="mdi:lungs",
         value_fn=lambda session: _get_breath_rate(session).get("average"),
@@ -361,6 +364,7 @@ INSIGHT_SENSOR_DESCRIPTIONS: tuple[OrionSensorEntityDescription, ...] = (
         key="hrv",
         translation_key="hrv",
         native_unit_of_measurement="ms",
+        suggested_display_precision=0,
         state_class=SensorStateClass.MEASUREMENT,
         icon="mdi:heart-flash",
         value_fn=lambda session: _get_hrv(session).get("average"),
@@ -373,6 +377,7 @@ INSIGHT_SENSOR_DESCRIPTIONS: tuple[OrionSensorEntityDescription, ...] = (
         key="body_movement_rate",
         translation_key="body_movement_rate",
         native_unit_of_measurement="/hr",
+        suggested_display_precision=1,
         state_class=SensorStateClass.MEASUREMENT,
         icon="mdi:run",
         value_fn=lambda session: _get_movement(session).get("movement_rate"),
@@ -404,6 +409,7 @@ INSIGHT_SENSOR_DESCRIPTIONS: tuple[OrionSensorEntityDescription, ...] = (
     OrionSensorEntityDescription(
         key="total_sleep_minutes",
         native_unit_of_measurement=UnitOfTime.MINUTES,
+        suggested_display_precision=0,
         state_class=SensorStateClass.MEASUREMENT,
         icon="mdi:sleep",
         value_fn=lambda session: _minutes_value(_get_sleep_summary(session).get("time_asleep")),
@@ -411,6 +417,7 @@ INSIGHT_SENSOR_DESCRIPTIONS: tuple[OrionSensorEntityDescription, ...] = (
     OrionSensorEntityDescription(
         key="deep_sleep_minutes",
         native_unit_of_measurement=UnitOfTime.MINUTES,
+        suggested_display_precision=0,
         state_class=SensorStateClass.MEASUREMENT,
         icon="mdi:power-sleep",
         value_fn=lambda session: _minutes_value(_get_sleep_summary(session).get("deep_sleep")),
@@ -418,6 +425,7 @@ INSIGHT_SENSOR_DESCRIPTIONS: tuple[OrionSensorEntityDescription, ...] = (
     OrionSensorEntityDescription(
         key="rem_sleep_minutes",
         native_unit_of_measurement=UnitOfTime.MINUTES,
+        suggested_display_precision=0,
         state_class=SensorStateClass.MEASUREMENT,
         icon="mdi:eye-refresh-outline",
         value_fn=lambda session: _minutes_value(_get_sleep_summary(session).get("rem_sleep")),
@@ -425,6 +433,7 @@ INSIGHT_SENSOR_DESCRIPTIONS: tuple[OrionSensorEntityDescription, ...] = (
     OrionSensorEntityDescription(
         key="light_sleep_minutes",
         native_unit_of_measurement=UnitOfTime.MINUTES,
+        suggested_display_precision=0,
         state_class=SensorStateClass.MEASUREMENT,
         icon="mdi:weather-night",
         value_fn=lambda session: _minutes_value(_get_sleep_summary(session).get("light_sleep")),
@@ -432,6 +441,7 @@ INSIGHT_SENSOR_DESCRIPTIONS: tuple[OrionSensorEntityDescription, ...] = (
     OrionSensorEntityDescription(
         key="awake_minutes",
         native_unit_of_measurement=UnitOfTime.MINUTES,
+        suggested_display_precision=0,
         state_class=SensorStateClass.MEASUREMENT,
         icon="mdi:eye-outline",
         value_fn=lambda session: _minutes_value(_get_sleep_summary(session).get("awake_time")),
@@ -512,6 +522,7 @@ INSIGHT_SENSOR_DESCRIPTIONS: tuple[OrionSensorEntityDescription, ...] = (
     OrionSensorEntityDescription(
         key="apnea_obstructive_time",
         native_unit_of_measurement=UnitOfTime.SECONDS,
+        suggested_display_precision=0,
         state_class=SensorStateClass.MEASUREMENT,
         icon="mdi:lungs",
         value_fn=lambda session: util.apnea_number(
@@ -521,6 +532,7 @@ INSIGHT_SENSOR_DESCRIPTIONS: tuple[OrionSensorEntityDescription, ...] = (
     OrionSensorEntityDescription(
         key="apnea_central_time",
         native_unit_of_measurement=UnitOfTime.SECONDS,
+        suggested_display_precision=0,
         state_class=SensorStateClass.MEASUREMENT,
         icon="mdi:lungs",
         value_fn=lambda session: util.apnea_number(
@@ -530,6 +542,7 @@ INSIGHT_SENSOR_DESCRIPTIONS: tuple[OrionSensorEntityDescription, ...] = (
     OrionSensorEntityDescription(
         key="apnea_longest_event",
         native_unit_of_measurement=UnitOfTime.SECONDS,
+        suggested_display_precision=0,
         state_class=SensorStateClass.MEASUREMENT,
         icon="mdi:timer-alert-outline",
         value_fn=lambda session: util.apnea_number(
@@ -601,6 +614,7 @@ SCHEDULE_SENSOR_DESCRIPTIONS: tuple[OrionSensorEntityDescription, ...] = (
         key="bedtime_temp",
         device_class=SensorDeviceClass.TEMPERATURE,
         native_unit_of_measurement=UnitOfTemperature.CELSIUS,
+        suggested_display_precision=1,
         state_class=SensorStateClass.MEASUREMENT,
         icon="mdi:thermometer-lines",
         value_fn=lambda schedule: schedule.get("bedtime_temp") if schedule else None,
@@ -614,6 +628,7 @@ SCHEDULE_SENSOR_DESCRIPTIONS: tuple[OrionSensorEntityDescription, ...] = (
         key="phase_1_temp",
         device_class=SensorDeviceClass.TEMPERATURE,
         native_unit_of_measurement=UnitOfTemperature.CELSIUS,
+        suggested_display_precision=1,
         state_class=SensorStateClass.MEASUREMENT,
         icon="mdi:thermometer-chevron-down",
         value_fn=lambda schedule: schedule.get("phase_1_temp") if schedule else None,
@@ -622,6 +637,7 @@ SCHEDULE_SENSOR_DESCRIPTIONS: tuple[OrionSensorEntityDescription, ...] = (
         key="phase_2_temp",
         device_class=SensorDeviceClass.TEMPERATURE,
         native_unit_of_measurement=UnitOfTemperature.CELSIUS,
+        suggested_display_precision=1,
         state_class=SensorStateClass.MEASUREMENT,
         icon="mdi:thermometer-chevron-up",
         value_fn=lambda schedule: schedule.get("phase_2_temp") if schedule else None,
@@ -630,6 +646,7 @@ SCHEDULE_SENSOR_DESCRIPTIONS: tuple[OrionSensorEntityDescription, ...] = (
         key="wakeup_temp",
         device_class=SensorDeviceClass.TEMPERATURE,
         native_unit_of_measurement=UnitOfTemperature.CELSIUS,
+        suggested_display_precision=1,
         state_class=SensorStateClass.MEASUREMENT,
         icon="mdi:thermometer-alert",
         value_fn=lambda schedule: schedule.get("wakeup_temp") if schedule else None,
@@ -825,7 +842,12 @@ class OrionSensorEntity(OrionBaseEntity, SensorEntity):
     ) -> None:
         super().__init__(coordinator, device_id)
         self.entity_description = description
-        self._attr_unique_id = f"{device_id}_{description.key}"
+        self._attr_unique_id = helpers.person_unique_id(
+            device_id,
+            description.key,
+            coordinator.user_id,
+            legacy=f"{device_id}_{description.key}",
+        )
         # These are the AUTHENTICATED account holder's insights, not a
         # device aggregate. Naming them explicitly keeps them symmetric
         # with the partner set instead of leaving one side unlabelled.
@@ -1104,7 +1126,12 @@ class OrionPartnerInsightSensor(OrionSensorEntity):
         description: OrionSensorEntityDescription,
     ) -> None:
         super().__init__(coordinator, device_id, description)
-        self._attr_unique_id = f"{device_id}_partner_{description.key}"
+        self._attr_unique_id = helpers.person_unique_id(
+            device_id,
+            description.key,
+            (coordinator.partner_user or {}).get("id"),
+            legacy=f"{device_id}_partner_{description.key}",
+        )
         self._attr_name = f"{coordinator.partner_name()} {_insight_label(description.key)}"
 
     def _session(self) -> dict | None:
@@ -1874,7 +1901,14 @@ class OrionSchedulePhaseSensor(OrionBaseEntity, SensorEntity):
 
     def __init__(self, coordinator, device_id: str) -> None:
         super().__init__(coordinator, device_id)
-        self._attr_unique_id = f"{device_id}_current_phase"
+        # Reads `live_session()`, which is the AUTHENTICATED user's
+        # session. This is one person's sensor, not the bed's.
+        self._attr_unique_id = helpers.person_unique_id(
+            device_id,
+            "current_phase",
+            coordinator.user_id,
+            legacy=f"{device_id}_current_phase",
+        )
         self._attr_name = f"{coordinator.primary_name()} Schedule Phase"
 
     @property

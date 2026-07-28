@@ -92,6 +92,29 @@ class OrionSleepConfigFlow(ConfigFlow, domain=DOMAIN):
             ),
         )
 
+
+    async def _async_account_id(self, tokens: dict) -> str | None:
+        """The Orion user id behind the tokens we just received.
+
+        Returns None rather than raising. A profile fetch failing is not
+        a reason to refuse a set of credentials Orion just accepted. The
+        entry keeps the typed-value unique id in that case, which is what
+        every entry created before this shipped already has.
+        """
+        session = async_get_clientsession(self.hass)
+        client = OrionApiClient(
+            session=session,
+            access_token=tokens["access_token"],
+            refresh_token=tokens["refresh_token"],
+            expires_at=tokens["expires_at"],
+        )
+        try:
+            profile = await client.get_current_user()
+        except (OrionApiError, OrionConnectionError, OrionAuthError):
+            return None
+        account_id = profile.get("id") if isinstance(profile, dict) else None
+        return account_id if isinstance(account_id, str) and account_id else None
+
     async def _async_send_code(self, auth_value: str) -> ConfigFlowResult | None:
         """Send verification code. Returns None on success, or a step result with errors."""
         self._auth_value = auth_value.strip()
@@ -207,6 +230,19 @@ class OrionSleepConfigFlow(ConfigFlow, domain=DOMAIN):
                     CONF_REFRESH_TOKEN: tokens["refresh_token"],
                     CONF_EXPIRES_AT: tokens["expires_at"],
                 }
+
+                # Identify the entry by the ACCOUNT, not by the string
+                # that was typed. One Orion account reached by email and
+                # by phone is still one account, and keying on the typed
+                # value let it be added twice: two pollers, two
+                # WebSockets, and two sets of entities fighting over the
+                # same unique ids. The account id is only knowable here,
+                # after the code has been accepted.
+                if not self._reauth_entry:
+                    account_id = await self._async_account_id(tokens)
+                    if account_id:
+                        await self.async_set_unique_id(account_id)
+                        self._abort_if_unique_id_configured()
 
                 if self._reauth_entry:
                     self.hass.config_entries.async_update_entry(

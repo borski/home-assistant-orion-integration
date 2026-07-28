@@ -21,6 +21,16 @@ TO_REDACT = {
     "user_id",
     "session_id",
     "id",
+    # Stable identifiers that survived because only `id` and `user_id`
+    # were listed. `redact_identifier_keys` catches UUIDs used as mapping
+    # KEYS, which is a different thing from a UUID sitting in a field.
+    #
+    # `zone_id` is deliberately NOT here: zones are "zone_a" and "zone_b",
+    # not UUIDs, so redacting them would make a zone-level bug report
+    # unreadable and protect nothing.
+    "device_id",
+    "workflow_id",
+    "invite_id",
     "name",
     "first_name",
     "last_name",

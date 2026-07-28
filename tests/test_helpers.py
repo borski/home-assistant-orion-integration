@@ -238,3 +238,115 @@ def test_nested_mapping_stops_at_the_first_non_mapping():
 def test_nested_mapping_never_raises():
     for bad in (None, [], "x", 0, True, {"a": None}):
         assert helpers.nested_mapping(bad, "a", "b") == {}
+
+
+# ── The redaction set itself ──────────────────────────────────────────
+#
+# `TO_REDACT` cannot be imported: diagnostics.py imports Home Assistant.
+# It can be read with `ast`, which is enough to check the thing that
+# actually goes wrong. Nobody forgets to redact a field they are thinking
+# about. They add code that reads a NEW identifier out of a payload and
+# never revisit a constant in another file.
+
+
+def _to_redact() -> set[str]:
+    """Read the TO_REDACT literal out of diagnostics.py without importing it."""
+    import ast
+    import pathlib
+
+    src = pathlib.Path("custom_components/orion_sleep/diagnostics.py").read_text()
+    for node in ast.parse(src).body:
+        if isinstance(node, ast.Assign) and any(
+            isinstance(t, ast.Name) and t.id == "TO_REDACT" for t in node.targets
+        ):
+            return {
+                el.value
+                for el in node.value.elts
+                if isinstance(el, ast.Constant) and isinstance(el.value, str)
+            }
+    raise AssertionError("TO_REDACT not found in diagnostics.py")
+
+
+# Identifier-shaped fields that are deliberately NOT redacted, and why.
+# Adding to this list is a decision. Forgetting is not.
+_DELIBERATELY_CLEAR = {
+    # Zones are "zone_a" and "zone_b", not UUIDs. Redacting them makes a
+    # zone-level bug report unreadable and protects nothing.
+    "zone_id",
+}
+
+
+def test_every_identifier_the_code_reads_is_redacted_or_excused():
+    """A new `*_id` read from a payload must not reach diagnostics raw."""
+    import pathlib
+    import re
+
+    fields: set[str] = set()
+    for path in pathlib.Path("custom_components/orion_sleep").glob("*.py"):
+        fields |= set(re.findall(r'\.get\("([a-z_]+_ids?)"', path.read_text()))
+
+    assert fields, "the scan found nothing, so it is not guarding anything"
+    missed = fields - _to_redact() - _DELIBERATELY_CLEAR
+    assert not missed, (
+        f"identifier fields read from payloads but never redacted: {sorted(missed)}. "
+        f"Add them to TO_REDACT, or to _DELIBERATELY_CLEAR with a reason."
+    )
+
+
+def test_the_excuse_list_does_not_rot():
+    """An excused field that is now redacted anyway is a stale excuse."""
+    both = _DELIBERATELY_CLEAR & _to_redact()
+    assert not both, f"listed as deliberately clear but also redacted: {sorted(both)}"
+
+
+# ── Whose entity is this ──────────────────────────────────────────────
+#
+# The failure being prevented: replace the linked partner account, and
+# the new person inherits the previous person's entity, recorder history
+# and long-term statistics. One human's sleep scores, heart rates and
+# apnea counts filed under another human's name.
+
+
+def test_a_person_id_is_keyed_on_the_account_not_the_role():
+    a = helpers.person_unique_id(DEVICE, "sleep_score", USER_A, legacy="x")
+    b = helpers.person_unique_id(DEVICE, "sleep_score", USER_B, legacy="x")
+    assert a != b, "two people on one bed must not share an id"
+    assert USER_A in a and USER_B in b
+    assert "partner" not in a and "partner" not in b
+
+
+def test_person_and_schedule_ids_use_one_scheme():
+    """`schedule_unique_id` predates this and must not have moved."""
+    assert helpers.person_unique_id(
+        DEVICE, "bedtime", USER_A, legacy="x"
+    ) == helpers.schedule_unique_id(DEVICE, "bedtime", USER_A)
+
+
+def test_an_unknown_account_keeps_the_id_it_already_had():
+    """Inventing a placeholder would mint a second entity for one person."""
+    for unknown in (None, ""):
+        assert (
+            helpers.person_unique_id(DEVICE, "sleep_score", unknown, legacy="legacy-id")
+            == "legacy-id"
+        )
+
+
+def test_no_entity_is_keyed_on_a_role_literal():
+    """The anti-pattern, guarded at the source rather than by memory.
+
+    `schedule_unique_id` has warned against this in its docstring since
+    it was written. The insight and session entities did it anyway, in
+    another file, and nothing failed.
+    """
+    import pathlib
+    import re
+
+    offenders = []
+    for path in pathlib.Path("custom_components/orion_sleep").glob("*.py"):
+        src = path.read_text()
+        for m in re.finditer(r"_attr_unique_id\s*=\s*f?\"([^\"]*)\"", src):
+            if re.search(r"_(partner|primary|owner|guest)_", m.group(1)):
+                offenders.append(path.name + ": " + m.group(1))
+    assert not offenders, (
+        "unique_id built from a role instead of an account id: " + str(offenders)
+    )

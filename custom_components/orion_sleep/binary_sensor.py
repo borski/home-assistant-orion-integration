@@ -87,7 +87,12 @@ class OrionSessionActiveBinarySensor(OrionBaseEntity, BinarySensorEntity):
         device_id: str,
     ) -> None:
         super().__init__(coordinator, device_id)
-        self._attr_unique_id = f"{device_id}_session_active"
+        self._attr_unique_id = helpers.person_unique_id(
+            device_id,
+            "session_active",
+            coordinator.user_id,
+            legacy=f"{device_id}_session_active",
+        )
         # Named for the account holder, matching the insight sensors.
         # This tracks one person's session, not the bed as a whole.
         self._attr_name = f"{coordinator.primary_name()} Sleep Session"
@@ -110,7 +115,12 @@ class OrionPartnerSessionActiveBinarySensor(OrionSessionActiveBinarySensor):
         device_id: str,
     ) -> None:
         super().__init__(coordinator, device_id)
-        self._attr_unique_id = f"{device_id}_partner_session_active"
+        self._attr_unique_id = helpers.person_unique_id(
+            device_id,
+            "session_active",
+            (coordinator.partner_user or {}).get("id"),
+            legacy=f"{device_id}_partner_session_active",
+        )
         self._attr_name = f"{coordinator.partner_name()} Sleep Session"
 
     def _session(self) -> dict | None:
@@ -419,7 +429,14 @@ class OrionServerOccupancyBinarySensor(OrionBaseEntity, BinarySensorEntity):
 
     def __init__(self, coordinator, device_id: str) -> None:
         super().__init__(coordinator, device_id)
-        self._attr_unique_id = f"{device_id}_server_in_bed"
+        # `server_says_in_bed()` reads the authenticated user's session,
+        # so this belongs to that person rather than to the bed.
+        self._attr_unique_id = helpers.person_unique_id(
+            device_id,
+            "server_in_bed",
+            coordinator.user_id,
+            legacy=f"{device_id}_server_in_bed",
+        )
         self._attr_name = f"{coordinator.primary_name()} In Bed (Orion)"
 
     @property

@@ -41,11 +41,18 @@ async def async_setup_entry(
     # The app's temperature scale is one setting on the account, not one
     # per bed. Creating it inside the loop gave a two-bed household two
     # controls for the same value, and an unguarded id gave the first
-    # device a unique_id of "None_temperature_display_unit". It hangs off
-    # the first device purely so it has somewhere to live in the registry.
+    # device a unique_id of "None_temperature_display_unit".
+    #
+    # It still hangs off a device so it has somewhere to live in the
+    # registry, but its IDENTITY is the config entry. Keying it on
+    # whichever device happened to sort first meant removing that bed, or
+    # the server returning them in a different order, silently minted a
+    # replacement entity and orphaned the history of the old one.
     first = next((d.get("id") for d in coordinator.devices if d.get("id")), None)
     if first:
-        entities.append(OrionTemperatureDisplaySelect(coordinator, first))
+        entities.append(
+            OrionTemperatureDisplaySelect(coordinator, first, entry.entry_id)
+        )
 
     async_add_entities(entities)
 
@@ -130,9 +137,9 @@ class OrionTemperatureDisplaySelect(OrionBaseEntity, SelectEntity):
     _attr_icon = "mdi:thermometer-lines"
     _attr_options = list(util.TEMPERATURE_DISPLAY_UNITS)
 
-    def __init__(self, coordinator, device_id: str) -> None:
+    def __init__(self, coordinator, device_id: str, entry_id: str) -> None:
         super().__init__(coordinator, device_id)
-        self._attr_unique_id = f"{device_id}_temperature_display_unit"
+        self._attr_unique_id = f"{entry_id}_temperature_display_unit"
         self._attr_name = "App Temperature Scale"
 
     @property

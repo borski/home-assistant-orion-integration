@@ -25,3 +25,63 @@ jobs:
           python -m json.tool custom_components/orion_sleep/translations/en.json >/dev/null
       - name: Test
         run: mise exec pipx:pytest -- pytest -q
+
+  # The suite above deliberately never imports Home Assistant or
+  # orion_sleep_api, so it inspects source with `ast` instead of running
+  # it. That means a missing library symbol, a renamed Home Assistant
+  # helper, or a platform that raises on import all pass it green. After
+  # extracting the API client into its own package, that is the exact
+  # class of breakage most likely to ship.
+  runtime:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install Home Assistant and the pinned client
+        run: |
+          REQ=$(python - <<'PY'
+          import json
+          m = json.load(open("custom_components/orion_sleep/manifest.json"))
+          print(" ".join(m["requirements"]))
+          PY
+          )
+          echo "manifest requires: $REQ"
+          pip install --quiet homeassistant $REQ
+      - name: Import every platform
+        run: |
+          python - <<'PY'
+          import importlib, json, pathlib, sys
+          sys.path.insert(0, "custom_components")
+          manifest = json.load(
+              open("custom_components/orion_sleep/manifest.json")
+          )
+          modules = sorted(
+              p.stem
+              for p in pathlib.Path("custom_components/orion_sleep").glob("*.py")
+              if p.stem != "__init__"
+          )
+          for name in modules:
+              importlib.import_module("orion_sleep." + name)
+              print("imported", name)
+          print("platforms declared:", manifest["dependencies"])
+          PY
+      - name: Every name the integration imports from the client exists
+        run: |
+          python - <<'PY'
+          import ast, pathlib, importlib
+          lib = importlib.import_module("orion_sleep_api")
+          missing = []
+          for path in pathlib.Path("custom_components/orion_sleep").glob("*.py"):
+              for node in ast.walk(ast.parse(path.read_text())):
+                  if not isinstance(node, ast.ImportFrom):
+                      continue
+                  if node.module != "orion_sleep_api":
+                      continue
+                  for alias in node.names:
+                      if not hasattr(lib, alias.name):
+                          missing.append(path.name + ": " + alias.name)
+          assert not missing, "not exported by the client: " + str(missing)
+          print("every imported client symbol resolves")
+          PY

@@ -52,6 +52,28 @@ def nested_mapping(container: object, *keys: str) -> dict:
     return current if isinstance(current, dict) else {}
 
 
+def person_unique_id(
+    device_id: str, key: str, user_id: str | None, *, legacy: str
+) -> str:
+    """Stable unique_id for any entity that belongs to one person.
+
+    Same scheme `schedule_unique_id` has always used, generalised because
+    the reasoning in its docstring was never specific to schedules. Sleep
+    scores, session flags and occupancy are just as much one person's as
+    a bedtime is, and those shipped keyed on the literal role "partner",
+    which is the exact thing that docstring warns against.
+
+    `legacy` is returned when the Orion user id is not known yet. That
+    only happens if identity is missing at platform setup, and inventing
+    a placeholder there would mint a second entity for a person who
+    already has one. Returning what previously shipped keeps them on the
+    entity they already have until identity resolves.
+    """
+    if not user_id:
+        return legacy
+    return f"{device_id}_user_{user_id}_{key}"
+
+
 def schedule_unique_id(device_id: str, key: str, user_id: str) -> str:
     """Stable unique_id for one person's schedule entity.
 
