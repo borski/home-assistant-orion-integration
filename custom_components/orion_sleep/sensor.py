@@ -32,6 +32,7 @@ from orion_sleep_api import OrionApiError, util
 from . import helpers
 from .coordinator import OrionDataUpdateCoordinator
 from .entity import OrionBaseEntity
+from .errors import orion_call
 
 # Topper sensors exposed on every WS payload. Mapping to zone_a/zone_b
 # isn't verified yet, so entities are named per sensor.
@@ -1038,10 +1039,8 @@ class OrionSensorEntity(OrionBaseEntity, SensorEntity):
                 f"No API client available for {self._sessions_owner()}"
             )
 
-        try:
+        async with orion_call("confirm that session"):
             await client.confirm_sleep_session(session_id, user_ids)
-        except ValueError as err:
-            raise HomeAssistantError(str(err)) from err
 
         await self.coordinator.async_request_refresh()
 
@@ -1085,10 +1084,8 @@ class OrionSensorEntity(OrionBaseEntity, SensorEntity):
             self._sessions_owner(),
             reason,
         )
-        try:
+        async with orion_call("delete that session"):
             await client.delete_sleep_session(session_id, reason)
-        except ValueError as err:
-            raise HomeAssistantError(str(err)) from err
         await self.coordinator.async_request_refresh()
 
     @property

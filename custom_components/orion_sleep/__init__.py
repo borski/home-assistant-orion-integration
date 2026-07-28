@@ -6,7 +6,7 @@ import logging
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from orion_sleep_api import OrionApiClient
 
@@ -17,11 +17,18 @@ from .const import (
     CONF_PARTNER_EXPIRES_AT,
     CONF_PARTNER_REFRESH_TOKEN,
     CONF_REFRESH_TOKEN,
+    DOMAIN,
 )
 from .coordinator import OrionDataUpdateCoordinator
-from .migrations import async_migrate_entry_identity, async_migrate_unique_ids
+from .migrations import (
+    async_migrate_entry_identity,
+    async_migrate_unique_ids,
+    async_revert_unique_ids,
+)
 
 _LOGGER = logging.getLogger(__name__)
+
+SERVICE_REVERT_UNIQUE_IDS = "revert_unique_ids"
 
 PLATFORMS: list[Platform] = [
     Platform.BUTTON,
@@ -126,7 +133,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         raise
 
     # Reload on options change
+    # Registered AFTER the migration, deliberately. The migration records
+    # its rename map into options, and a listener attached before that
+    # would see the write as a user options change and reload the entry
+    # mid-setup.
     entry.async_on_unload(entry.add_update_listener(_async_options_updated))
+
+    _async_register_recovery_service(hass)
 
     return True
 
@@ -164,3 +177,23 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             # the Android app's background-shutdown behavior.
             await coordinator.async_shutdown()
     return unloaded
+
+
+def _async_register_recovery_service(hass: HomeAssistant) -> None:
+    """Expose the one-click undo for the 3.0 entity re-key.
+
+    Domain-level and idempotent. Rolling back to 2.x leaves every re-keyed
+    entity unavailable with its history stranded on it, because 2.x asks
+    for ids that no longer exist and builds fresh ones instead. Run this
+    before downgrading, or after, to put them back.
+    """
+    if hass.services.has_service(DOMAIN, SERVICE_REVERT_UNIQUE_IDS):
+        return
+
+    async def _handle(call: ServiceCall) -> None:
+        total = 0
+        for entry in hass.config_entries.async_entries(DOMAIN):
+            total += async_revert_unique_ids(hass, entry)
+        _LOGGER.info("Reverted %d Orion entities to their pre-3.0 ids", total)
+
+    hass.services.async_register(DOMAIN, SERVICE_REVERT_UNIQUE_IDS, _handle)

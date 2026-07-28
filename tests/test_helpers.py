@@ -546,3 +546,159 @@ def test_uuids_in_lists_are_redacted_not_just_uuid_keys():
     out = helpers.redact_identifier_keys({"devices": [USER_A, "not-a-uuid"]})
     assert USER_A not in repr(out)
     assert "not-a-uuid" in repr(out), "only uuids should be redacted"
+
+
+# ── Reauth identity ───────────────────────────────────────────────────
+#
+# The guard shipped before this one compared the entry's unique_id to the
+# account id and abstained when the unique_id still held the typed
+# address. Every entry created before 3.0 is keyed exactly that way, so
+# the abstain fired for one hundred percent of the installs that would
+# ever run the check. It was inert, and the tests written alongside it
+# did not notice, because none of them built a pre-3.0 entry.
+#
+# `config_flow.py` imports Home Assistant, so the decision is exercised
+# through a stand-in with the same shape rather than the real flow.
+
+
+class _Entry:
+    def __init__(self, unique_id, auth_value):
+        self.unique_id = unique_id
+        self.data = {"auth_value": auth_value}
+
+
+def _matches(entry, profile):
+    """The logic of ConfigFlow._async_reauth_account_matches."""
+    if entry is None or not isinstance(profile, dict) or not profile:
+        return True
+    account_id = profile.get("id")
+    existing = entry.unique_id
+    typed = (entry.data.get("auth_value") or "").strip().lower()
+    if existing and existing != typed:
+        return bool(account_id) and existing == account_id
+    known = {
+        str(profile.get(f) or "").strip().lower()
+        for f in ("email", "phone", "phone_number")
+    }
+    known.discard("")
+    if not known:
+        return True
+    return typed in known
+
+
+LEGACY = _Entry("alice@example.com", "alice@example.com")
+MODERN = _Entry(USER_A, "alice@example.com")
+
+
+def test_a_pre_3_0_entry_still_rejects_a_foreign_account():
+    """The case the previous guard let through, which was all of them."""
+    assert _matches(LEGACY, {"id": USER_A, "email": "alice@example.com"}) is True
+    assert _matches(LEGACY, {"id": USER_B, "email": "bob@example.com"}) is False
+
+
+def test_an_account_keyed_entry_compares_on_the_account():
+    assert _matches(MODERN, {"id": USER_A, "email": "alice@example.com"}) is True
+    assert _matches(MODERN, {"id": USER_B, "email": "bob@example.com"}) is False
+
+
+def test_a_phone_entry_matches_on_phone():
+    phone = _Entry("15555550100", "15555550100")
+    assert _matches(phone, {"id": USER_A, "phone": "15555550100"}) is True
+    assert _matches(phone, {"id": USER_B, "phone": "15555550199"}) is False
+
+
+def test_it_abstains_only_when_the_answer_is_unknowable():
+    """Never permissive because comparing was inconvenient."""
+    assert _matches(LEGACY, None) is True, "no profile"
+    assert _matches(LEGACY, {}) is True, "empty profile"
+    assert _matches(LEGACY, {"id": USER_B}) is True, "profile carries no address"
+
+
+def test_the_stand_in_matches_the_real_implementation():
+    """A stand-in that drifts from the code proves nothing.
+
+    Compares the decision branches in config_flow against the ones above,
+    so rewriting one without the other fails here rather than silently.
+    """
+    import pathlib
+
+    src = pathlib.Path("custom_components/orion_sleep/config_flow.py").read_text()
+    body = src[src.index("def _async_reauth_account_matches") :]
+    body = body[: body.index("\n    async def ")]
+    for marker in (
+        'if existing and existing != typed:',
+        'for field in ("email", "phone", "phone_number")',
+        "return typed in known",
+    ):
+        assert marker in body, "stand-in has drifted from config_flow: " + marker
+
+
+# ── Every write into the client is translated ─────────────────────────
+
+
+def test_no_client_call_reaches_the_user_as_a_traceback():
+    """Sixteen of thirty-two call sites had no handler, or only ValueError.
+
+    Between them that was the whole write surface: every temperature set,
+    every power toggle, every schedule write, every button. A vendor 500
+    on any of them surfaced in the UI as a raw traceback. Lint, compile
+    and the suite were all green throughout, which is why this is checked
+    rather than remembered.
+    """
+    import ast
+    import pathlib
+
+    clients = {"api_client", "partner_api_client", "client", "_sessions_client"}
+    skip = {"coordinator.py", "config_flow.py", "migrations.py"}
+    unguarded: list[str] = []
+
+    for path in sorted(pathlib.Path("custom_components/orion_sleep").glob("*.py")):
+        if path.name in skip:
+            continue
+        tree = ast.parse(path.read_text())
+        guards: list[tuple[int, int, set[str]]] = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Try):
+                names = {
+                    x.id
+                    for h in node.handlers
+                    for x in (
+                        (h.type.elts if isinstance(h.type, ast.Tuple) else [h.type])
+                        if h.type
+                        else []
+                    )
+                    if isinstance(x, ast.Name)
+                }
+                guards.append((node.body[0].lineno, node.body[-1].end_lineno, names))
+            if isinstance(node, ast.AsyncWith):
+                for item in node.items:
+                    call = item.context_expr
+                    if (
+                        isinstance(call, ast.Call)
+                        and getattr(call.func, "id", None) == "orion_call"
+                    ):
+                        guards.append(
+                            (node.body[0].lineno, node.body[-1].end_lineno, {"OrionApiError"})
+                        )
+
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.Await) and isinstance(node.value, ast.Call)):
+                continue
+            fn = node.value.func
+            if not isinstance(fn, ast.Attribute):
+                continue
+            owner = fn.value
+            source = getattr(owner, "attr", None) or getattr(owner, "id", None)
+            if isinstance(owner, ast.Call):
+                source = getattr(owner.func, "attr", None)
+            if source not in clients:
+                continue
+            covering = [g for g in guards if g[0] <= node.lineno <= g[1]]
+            if not any(
+                "OrionApiError" in g[2] or "Exception" in g[2] for g in covering
+            ):
+                unguarded.append(f"{path.name}:{node.lineno} {fn.attr}")
+
+    assert not unguarded, (
+        "client calls that would reach the user as a traceback: " + str(unguarded)
+    )

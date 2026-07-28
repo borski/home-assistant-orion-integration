@@ -94,31 +94,54 @@ class OrionSleepConfigFlow(ConfigFlow, domain=DOMAIN):
 
 
 
-    def _async_reauth_account_matches(self, account_id: str | None) -> bool:
+    def _async_reauth_account_matches(self, profile: dict | None) -> bool:
         """Whether these credentials belong to the entry being reauthed.
 
-        Permissive in exactly two cases, both of which mean "we cannot
-        tell", never "we checked and it differs":
+        The first version of this compared the entry's unique_id to the
+        account id and gave up when the unique_id still held the typed
+        address, reasoning that there was nothing to compare. Every entry
+        created before 3.0 is keyed exactly that way, because the flow set
+        `unique_id = auth_value.lower()` and stored the same string in
+        `CONF_AUTH_VALUE`. So the early return fired for one hundred
+        percent of the installs that would ever run this check, and the
+        guard did nothing for anyone.
 
-        * the profile fetch failed, so there is no id to compare
-        * the entry predates account-keyed ids and is still keyed on the
-          address that was typed into the form, so there is nothing to
-          compare against. `async_migrate_entry_identity` moves those over
-          on the next successful setup, and from then on this check bites.
+        There is something to compare. The profile carries the account's
+        own email and phone, so match those against the address the entry
+        was set up with.
+
+        Permissive only where the answer is genuinely unknowable: no
+        profile, or a profile carrying neither field. Never permissive
+        because comparing was inconvenient.
         """
         entry = self._reauth_entry
-        if entry is None or not account_id:
+        if entry is None or not isinstance(profile, dict) or not profile:
             return True
-        existing = entry.unique_id
-        if not existing:
-            return True
-        typed = (entry.data.get(CONF_AUTH_VALUE) or "").strip().lower()
-        if existing == typed:
-            return True
-        return existing == account_id
 
-    async def _async_account_id(self, tokens: dict) -> str | None:
-        """The Orion user id behind the tokens we just received.
+        account_id = profile.get("id")
+        existing = entry.unique_id
+        typed = (entry.data.get(CONF_AUTH_VALUE) or "").strip().lower()
+
+        # Already account-keyed: compare directly.
+        if existing and existing != typed:
+            return bool(account_id) and existing == account_id
+
+        # Still keyed on the typed address, which is every pre-3.0 entry.
+        known = {
+            str(profile.get(field) or "").strip().lower()
+            for field in ("email", "phone", "phone_number")
+        }
+        known.discard("")
+        if not known:
+            return True
+        return typed in known
+
+    async def _async_account_profile(self, tokens: dict) -> dict | None:
+        """The Orion profile behind the tokens we just received.
+
+        The whole profile, not just the id. The reauth check needs the
+        email and phone to compare against an entry that predates
+        account-keyed unique ids.
 
         Returns None rather than raising. A profile fetch failing is not
         a reason to refuse a set of credentials Orion just accepted. The
@@ -148,8 +171,7 @@ class OrionSleepConfigFlow(ConfigFlow, domain=DOMAIN):
             profile = await client.get_current_user()
         except (OrionApiError, OrionConnectionError, OrionAuthError):
             return None
-        account_id = profile.get("id") if isinstance(profile, dict) else None
-        return account_id if isinstance(account_id, str) and account_id else None
+        return profile if isinstance(profile, dict) else None
 
     async def _async_send_code(self, auth_value: str) -> ConfigFlowResult | None:
         """Send verification code. Returns None on success, or a step result with errors."""
@@ -274,7 +296,10 @@ class OrionSleepConfigFlow(ConfigFlow, domain=DOMAIN):
                 # WebSockets, and two sets of entities fighting over the
                 # same unique ids. The account id is only knowable here,
                 # after the code has been accepted.
-                account_id = await self._async_account_id(tokens)
+                profile = await self._async_account_profile(tokens)
+                account_id = (
+                    profile.get("id") if isinstance(profile, dict) else None
+                )
 
                 if self._reauth_entry:
                     # Reauth was the one door into this flow with no
@@ -286,7 +311,7 @@ class OrionSleepConfigFlow(ConfigFlow, domain=DOMAIN):
                     # heart rates and apnea counts exchanged, silently,
                     # with recorder history and statistics attached. No
                     # error anywhere, because both renames succeed.
-                    if not self._async_reauth_account_matches(account_id):
+                    if not self._async_reauth_account_matches(profile):
                         return self.async_abort(reason="reauth_account_mismatch")
                 elif account_id:
                     await self.async_set_unique_id(account_id)

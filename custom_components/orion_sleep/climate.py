@@ -45,6 +45,7 @@ from .const import (
 )
 from .coordinator import OrionDataUpdateCoordinator
 from .entity import OrionBaseEntity
+from .errors import orion_call
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -203,7 +204,8 @@ class OrionZoneClimateEntity(OrionBaseEntity, ClimateEntity):
         temp = kwargs.get(ATTR_TEMPERATURE)
         if temp is None:
             return
-        await self.coordinator.api_client.update_live_device_zone(
+        async with orion_call("change the temperature"):
+            await self.coordinator.api_client.update_live_device_zone(
             device_serial=self._serial(),
             zone_id=self._zone_id,
             temp=float(temp),
@@ -219,7 +221,8 @@ class OrionZoneClimateEntity(OrionBaseEntity, ClimateEntity):
 
     async def async_turn_on(self) -> None:
         """Power this zone on, leaving its setpoint untouched."""
-        await self.coordinator.api_client.update_live_device_zone(
+        async with orion_call("change the temperature"):
+            await self.coordinator.api_client.update_live_device_zone(
             device_serial=self._serial(),
             zone_id=self._zone_id,
             on=True,
@@ -233,7 +236,8 @@ class OrionZoneClimateEntity(OrionBaseEntity, ClimateEntity):
         object and will power the zone back on at its next scheduled
         action — see `_handle_schedule_on_turn_off`.
         """
-        await self.coordinator.api_client.update_live_device_zone(
+        async with orion_call("change the temperature"):
+            await self.coordinator.api_client.update_live_device_zone(
             device_serial=self._serial(),
             zone_id=self._zone_id,
             on=False,
@@ -276,7 +280,8 @@ class OrionZoneClimateEntity(OrionBaseEntity, ClimateEntity):
         the vendor's own client does.
         """
         try:
-            await self.coordinator.api_client.start_thermal_relief(
+            async with orion_call("start rapid cooling"):
+                await self.coordinator.api_client.start_thermal_relief(
                 self._serial(), [self._zone_id], duration_minutes
             )
         except ValueError as err:
@@ -292,7 +297,8 @@ class OrionZoneClimateEntity(OrionBaseEntity, ClimateEntity):
         running: the server treats it as a no-op rather than an error.
         """
         try:
-            await self.coordinator.api_client.cancel_thermal_relief(
+            async with orion_call("stop rapid cooling"):
+                await self.coordinator.api_client.cancel_thermal_relief(
                 self._serial(), [self._zone_id]
             )
         except ValueError as err:

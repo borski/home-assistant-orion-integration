@@ -508,3 +508,19 @@ MIT. See [LICENSE](LICENSE).
 Not affiliated with or endorsed by Orion Longevity Inc.
 
 > `orion_info.py` prints raw API and WebSocket payloads, which include live heart rate, breathing rate and bed occupancy. Its output is unredacted by design. Read it before pasting it anywhere.
+
+## Downgrading from 3.0
+
+Version 3.0 re-keys every person's entities onto their Orion account id so
+that replacing a linked partner can no longer hand one person's sleep
+history to another. Entity ids, recorder history and dashboards are
+unaffected by the upgrade.
+
+Rolling back to 2.x is the direction that hurts. 2.x looks for the ids it
+used to write, does not find them, and builds a second set of entities.
+The originals stay in the registry holding all the history, permanently
+unavailable.
+
+Run the `orion_sleep.revert_unique_ids` action before downgrading. It
+replays the recorded rename map backwards and puts everything back. Take a
+Home Assistant backup first regardless.

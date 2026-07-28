@@ -442,6 +442,11 @@
         }
       }
     },
+    "revert_unique_ids": {
+      "name": "Revert entity ids to pre-3.0",
+      "description": "Undo the 3.0 entity re-key. Version 3.0 moved every person's entities onto their Orion account id. Rolling back to 2.x leaves those entities unavailable with all their history stranded, because 2.x looks for ids that no longer exist. Run this before or after downgrading to put them back.",
+      "fields": {}
+    },
     "set_device_name": {
       "name": "Set device name",
       "description": "Rename the bed in Orion. Home Assistant keeps its own name, so this only changes what the phone app shows.",

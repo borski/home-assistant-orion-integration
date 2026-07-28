@@ -27,6 +27,7 @@ from orion_sleep_api import util
 from . import helpers
 from .coordinator import OrionDataUpdateCoordinator
 from .entity import OrionBaseEntity
+from .errors import orion_call
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -151,7 +152,8 @@ class OrionScheduleTime(OrionBaseEntity, TimeEntity):
         # The API takes HH:mm only. Seconds are dropped rather than rounded,
         # because a schedule that fires at :00 is what the vendor supports
         # and silently shifting someone's bedtime by 30s would be worse.
-        await self.coordinator.api_client.update_schedule_field(
+        async with orion_call("save that schedule change"):
+            await self.coordinator.api_client.update_schedule_field(
             day=day,
             field=self._field,
             value=f"{value.hour:02d}:{value.minute:02d}",
@@ -199,7 +201,8 @@ class OrionScheduleTime(OrionBaseEntity, TimeEntity):
         if not fields:
             raise HomeAssistantError("Give at least one value to override")
 
-        await self.coordinator.api_client.override_schedule(
+        async with orion_call("override tonight's schedule"):
+            await self.coordinator.api_client.override_schedule(
             day=day, fields=fields, user_id=self._user_id
         )
         # The override response echoes pre-change values, so refetch rather

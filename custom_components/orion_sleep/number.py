@@ -20,6 +20,7 @@ from .const import (
 )
 from .coordinator import OrionDataUpdateCoordinator
 from .entity import OrionBaseEntity, OrionLiveSettingMixin
+from .errors import orion_call
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -147,7 +148,8 @@ class OrionTempOffsetNumber(OrionBaseEntity, NumberEntity):
                 "Orion has not reported a usable schedule for this person yet"
             )
 
-        await self.coordinator.api_client.update_schedule_field(
+        async with orion_call("save that schedule change"):
+            await self.coordinator.api_client.update_schedule_field(
             day=day,
             field=self._schedule_field,
             value=celsius,

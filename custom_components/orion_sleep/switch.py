@@ -16,6 +16,7 @@ from orion_sleep_api import OrionApiError
 from . import helpers
 from .coordinator import OrionDataUpdateCoordinator
 from .entity import OrionBaseEntity, OrionLiveSettingMixin
+from .errors import orion_call
 
 # Per-person schedule booleans. (schedule field, label, icon)
 #
@@ -110,7 +111,8 @@ class OrionPowerSwitch(OrionBaseEntity, SwitchEntity):
         zone_ids = [z.get("id") for z in device.get("zones", []) if z.get("id")]
         if not serial or not zone_ids:
             raise HomeAssistantError("Orion device has no controllable zones")
-        await self.coordinator.api_client.update_live_device_zones(
+        async with orion_call("change that setting"):
+            await self.coordinator.api_client.update_live_device_zones(
             device_serial=serial,
             zones=[{"id": zid, "on": on} for zid in zone_ids],
         )
@@ -321,7 +323,8 @@ class OrionRapidCoolSwitch(OrionBaseEntity, SwitchEntity):
         """Start cooling this side for the window chosen on its slider."""
         minutes = self.coordinator.rapid_cool_duration(self._zone_id)
         try:
-            await self.coordinator.api_client.start_thermal_relief(
+            async with orion_call("start rapid cooling"):
+                await self.coordinator.api_client.start_thermal_relief(
                 self._serial(), [self._zone_id], minutes
             )
         except ValueError as err:
@@ -331,7 +334,8 @@ class OrionRapidCoolSwitch(OrionBaseEntity, SwitchEntity):
     async def async_turn_off(self, **kwargs: Any) -> None:
         """Cancel cooling on this side and restore the previous setpoint."""
         try:
-            await self.coordinator.api_client.cancel_thermal_relief(
+            async with orion_call("stop rapid cooling"):
+                await self.coordinator.api_client.cancel_thermal_relief(
                 self._serial(), [self._zone_id]
             )
         except ValueError as err:
@@ -394,7 +398,8 @@ class OrionScheduleFlagSwitch(OrionBaseEntity, SwitchEntity):
             raise HomeAssistantError(
                 "Orion has not reported a usable schedule for this person yet"
             )
-        await self.coordinator.api_client.update_schedule_field(
+        async with orion_call("save that schedule change"):
+            await self.coordinator.api_client.update_schedule_field(
             day=day,
             field=self._field,
             value=value,

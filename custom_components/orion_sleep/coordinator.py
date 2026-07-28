@@ -380,6 +380,15 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
         """Return whether the partner account was verified for this bed."""
         if self.partner_api_client is None or not self.partner_device_serial:
             return False
+        # An account linked as its own partner is one person, not two.
+        # `schedule_user_ids` has always guarded this and this did not,
+        # so the insight and session entities were built twice for the
+        # same human while the schedule entities were built once. Both
+        # copies then wanted the same account-keyed id, one of them lost,
+        # and the loser sat on a dead id nothing would ever claim again.
+        partner_id = (self.partner_user or {}).get("id")
+        if partner_id and self.user_id and partner_id == self.user_id:
+            return False
         primary = next((d for d in self.devices if d.get("id") == device_id), None)
         if not primary:
             return False
