@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
@@ -1217,8 +1218,11 @@ class OrionCurrentTempOffsetSensor(OrionBaseEntity, SensorEntity):
         session = self.coordinator.get_latest_session()
         if not session:
             return None
-        temp_data = session.get("temperature", {})
-        values = temp_data.get("values", [])
+        # Through session_subsection like every other session read in this
+        # file. A bare .get raises AttributeError inside a property the
+        # moment the vendor sends a list here, which is the exact bug that
+        # helper exists to stop.
+        values = util.session_subsection(session, "temperature").get("values", [])
         if values:
             return self._celsius_to_offset(values[-1])
         return None
@@ -1262,8 +1266,6 @@ class OrionWebSocketStateSensor(OrionBaseEntity, SensorEntity):
         last_at = self.coordinator.ws_last_message_at(serial)
         if not last_at:
             return {"seconds_since_last_message": None}
-        import time
-
         return {"seconds_since_last_message": round(time.monotonic() - last_at, 1)}
 
     @property

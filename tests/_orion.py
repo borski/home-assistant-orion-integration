@@ -58,31 +58,3 @@ def function(node: ast.AST, name: str):
     assert found, f"{name} not found"
     assert len(found) == 1, f"{name} is defined {len(found)} times"
     return found[0]
-
-
-def raise_sites(node: ast.AST, exception_names: set[str]):
-    """Yield ``(lineno, name, call)`` for each raise of a named exception."""
-    for child in ast.walk(node):
-        if not isinstance(child, ast.Raise) or not isinstance(child.exc, ast.Call):
-            continue
-        func = child.exc.func
-        name = func.id if isinstance(func, ast.Name) else getattr(func, "attr", None)
-        if name in exception_names:
-            yield child.lineno, name, child.exc
-
-
-def interpolations(call: ast.Call) -> list[str]:
-    """Every interpolated expression in an exception message, as source text.
-
-    A plain string message yields an empty list, which is the safest shape.
-    """
-    if not call.args:
-        return []
-    message = call.args[0]
-    if not isinstance(message, ast.JoinedStr):
-        return []
-    return [
-        ast.unparse(part.value)
-        for part in message.values
-        if isinstance(part, ast.FormattedValue)
-    ]

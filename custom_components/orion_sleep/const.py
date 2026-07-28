@@ -2,13 +2,6 @@
 
 DOMAIN = "orion_sleep"
 
-# Live device WebSocket. Full URL is built as
-# f"{WS_BASE_URL}/device/{serial_number}?token={jwt}".
-
-# How stale a WS connection is allowed to get before we treat it as dropped
-# (the server pushes a live_device.update at least every ~2s).
-# Exponential reconnect backoff bounds.
-
 # Config entry data keys (stored in config_entry.data)
 CONF_AUTH_METHOD = "auth_method"  # "email" or "phone"
 CONF_AUTH_VALUE = "auth_value"  # the email address or phone number

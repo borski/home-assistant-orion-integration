@@ -34,9 +34,19 @@ async def async_setup_entry(
     entities: list[SelectEntity] = []
     for device in coordinator.devices:
         device_id = device.get("id")
-        if device_id:
-            entities.append(OrionOrientationSelect(coordinator, device_id))
-        entities.append(OrionTemperatureDisplaySelect(coordinator, device_id))
+        if not device_id:
+            continue
+        entities.append(OrionOrientationSelect(coordinator, device_id))
+
+    # The app's temperature scale is one setting on the account, not one
+    # per bed. Creating it inside the loop gave a two-bed household two
+    # controls for the same value, and an unguarded id gave the first
+    # device a unique_id of "None_temperature_display_unit". It hangs off
+    # the first device purely so it has somewhere to live in the registry.
+    first = next((d.get("id") for d in coordinator.devices if d.get("id")), None)
+    if first:
+        entities.append(OrionTemperatureDisplaySelect(coordinator, first))
+
     async_add_entities(entities)
 
 
