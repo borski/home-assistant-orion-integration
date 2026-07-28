@@ -193,3 +193,42 @@ HOSTILE = [
     {"schedules": {"today_sleep_schedule": None}},
     {"schedules": {"today_sleep_schedule": []}},
 ]
+
+
+# ── A live socket must not starve the poll ────────────────────────────
+#
+# `DataUpdateCoordinator.async_set_updated_data` is documented as
+# resetting the refresh interval, and its source confirms it: it
+# unsubscribes the pending refresh and schedules a new one. The bed pushes
+# a frame roughly every two seconds and the default scan interval is ten
+# minutes, so calling it per frame meant `_async_update_data` never ran
+# while a socket was healthy. Insights, schedules, the live session and
+# the device list froze at whatever the first poll returned.
+
+
+def test_websocket_pushes_never_reset_the_poll_timer():
+    for name in ("_handle_ws_message", "apply_live_device"):
+        body = ast.unparse(_orion.function(COORD, name))
+        assert "async_set_updated_data" not in body, (
+            f"{name} calls async_set_updated_data, which reschedules the poll. "
+            "At the bed's push rate that stops _async_update_data running at all."
+        )
+        assert "_async_push_without_rescheduling" in body
+
+
+def test_the_push_helper_does_not_touch_the_schedule():
+    fn = _orion.function(COORD, "_async_push_without_rescheduling")
+    # Statements only. The docstring names the very calls being banned.
+    statements = [n for n in fn.body if not _orion.is_docstring(n)]
+    body = "\n".join(ast.unparse(n) for n in statements)
+    assert "async_update_listeners" in body
+    for forbidden in ("_schedule_refresh", "_async_unsub_refresh", "async_set_updated_data"):
+        assert forbidden not in body, f"{forbidden} would move the next poll"
+
+
+def test_the_partner_topology_warning_is_latched():
+    """Unlatched, it repeated once per scan interval forever."""
+    assert "_warned_partner_topology" in COORD_SOURCE
+    refresh = ast.unparse(_orion.function(COORD, "_async_refresh_partner_identity"))
+    assert "self._warned_partner_topology = True" in refresh
+    assert "self._warned_partner_topology = False" in refresh

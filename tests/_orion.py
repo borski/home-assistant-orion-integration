@@ -58,3 +58,17 @@ def function(node: ast.AST, name: str):
     assert found, f"{name} not found"
     assert len(found) == 1, f"{name} is defined {len(found)} times"
     return found[0]
+
+
+def is_docstring(node: ast.AST) -> bool:
+    """Whether a statement is a bare string expression, ie a docstring.
+
+    Tests that ban a call by substring need this. Several functions here
+    name the very call they exist to avoid, in the docstring explaining
+    why they avoid it.
+    """
+    return (
+        isinstance(node, ast.Expr)
+        and isinstance(node.value, ast.Constant)
+        and isinstance(node.value.value, str)
+    )

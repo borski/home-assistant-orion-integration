@@ -47,7 +47,8 @@
       "bed_already_configured": "Another Orion entry already controls this bed. Remove the duplicate entry before adding this account.",
       "reauth_account_mismatch": "Those credentials are for a different Orion account. Reauthenticate with the account this entry was set up with, or remove the entry and add the other account separately.",
       "reauth_bed_mismatch": "This account now exposes a different set of Orion beds. The existing entry was left unchanged so its history cannot move to another bed.",
-      "reauth_successful": "Re-authentication successful"
+      "reauth_successful": "Re-authentication successful",
+      "identity_unavailable": "Orion accepted the code but its account details could not be read, so nothing was saved. The code is now used, start the flow again."
     }
   },
   "options": {
@@ -101,6 +102,9 @@
       "partner_device_ambiguous": "Partner linking requires both accounts to contain exactly one matching Orion bed.",
       "partner_same_account": "The partner login belongs to the primary account. Link the other sleeper's Orion account.",
       "unknown": "An unexpected error occurred"
+    },
+    "abort": {
+      "identity_unavailable": "Orion accepted the code but the partner account details could not be read, so nothing was saved. The code is now used, try linking again."
     }
   },
   "entity": {

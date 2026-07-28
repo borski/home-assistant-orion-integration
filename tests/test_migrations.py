@@ -10,7 +10,7 @@ from __future__ import annotations
 import importlib.util
 import sys
 import types
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import pytest
@@ -22,8 +22,17 @@ PARTNER = "22222222-2222-4222-8222-222222222222"
 DEVICE = "bed-1"
 
 
-@dataclass
+@dataclass(frozen=True)
 class Row:
+    """Immutable, because Home Assistant's registry rows are.
+
+    `EntityRegistry._async_update_entity` does `attr.evolve(old, ...)` and
+    stores the NEW object, so a caller holding the old one keeps a stale
+    copy. An earlier version of this fake mutated in place, which made a
+    test pass by reading a value real Home Assistant would never have
+    given it.
+    """
+
     entity_id: str
     domain: str
     unique_id: str
@@ -32,7 +41,8 @@ class Row:
 
     @property
     def id(self):
-        return self.entity_id
+        # Real registry rows have an opaque id distinct from entity_id.
+        return f"reg::{self.entity_id}"
 
 
 class EntityRegistry:
@@ -54,7 +64,9 @@ class EntityRegistry:
         )
         if collision:
             raise ValueError("unique id occupied")
-        row.unique_id = new_unique_id
+        updated = replace(row, unique_id=new_unique_id)
+        self.entities[entity_id] = updated
+        return updated
 
 
 class DeviceRegistry:
@@ -69,14 +81,33 @@ class DeviceRegistry:
         return types.SimpleNamespace(config_entries=set(owners))
 
 
+class ConfigEntryState:
+    """Only the members the migration actually branches on."""
+
+    NOT_LOADED = "not_loaded"
+    SETUP_IN_PROGRESS = "setup_in_progress"
+    LOADED = "loaded"
+    SETUP_RETRY = "setup_retry"
+    SETUP_ERROR = "setup_error"
+
+
 class Entry:
-    def __init__(self, *, entry_id="entry-1", data=None, options=None, unique_id=ACCOUNT):
+    def __init__(
+        self,
+        *,
+        entry_id="entry-1",
+        data=None,
+        options=None,
+        unique_id=ACCOUNT,
+        state=ConfigEntryState.NOT_LOADED,
+    ):
         self.entry_id = entry_id
         self.data = data or {"auth_value": "alice@example.com"}
         self.options = options or {}
         self.unique_id = unique_id
         self.domain = DOMAIN
         self.disabled_by = None
+        self.state = state
 
 
 class ConfigEntries:
@@ -133,6 +164,7 @@ def migrations():
     homeassistant = types.ModuleType("homeassistant")
     config_entries = types.ModuleType("homeassistant.config_entries")
     config_entries.ConfigEntry = Entry
+    config_entries.ConfigEntryState = ConfigEntryState
     core = types.ModuleType("homeassistant.core")
     core.HomeAssistant = Hass
     exceptions = types.ModuleType("homeassistant.exceptions")
@@ -168,8 +200,14 @@ def migrations():
     return module
 
 
-def record(domain, old, new, platform=DOMAIN):
-    return {"domain": domain, "platform": platform, "old": old, "new": new}
+def record(domain, old, new, platform=DOMAIN, role="primary"):
+    return {
+        "domain": domain,
+        "platform": platform,
+        "old": old,
+        "new": new,
+        "role": role,
+    }
 
 
 def test_duplicate_bed_detection_does_not_need_other_runtime_data(migrations):
@@ -216,27 +254,59 @@ def test_fresh_v3_rows_are_journalled_without_waiting_for_a_restart(migrations):
     ]
 
 
-def test_new_mappings_merge_with_a_removed_partners_journal(migrations):
+def test_a_partner_record_is_dropped_once_that_partner_is_unverifiable(migrations):
+    """The reverse rename would hand 2.x the wrong person's entities.
+
+    2.x has one role-keyed partner row and feeds it from whichever partner
+    account is linked at the time. So a record naming a partner this pass
+    cannot verify must not survive: reverting it would put the previous
+    partner's sleep, heart rate and apnea entities on the id that 2.x then
+    writes the CURRENT partner's readings to. One transient fetch failure
+    is enough to reach this, so the eviction is unconditional.
+    """
     old = f"{DEVICE}_sleep_score"
     new = f"{DEVICE}_user_{ACCOUNT}_sleep_score"
-    removed = record(
+    stale_partner = record(
         "sensor",
         f"{DEVICE}_partner_sleep_score",
         f"{DEVICE}_user_{PARTNER}_sleep_score",
+        role="partner",
     )
     row = Row("sensor.sleep_score", "sensor", old)
     entry = Entry(
         data={
             "auth_value": "alice@example.com",
             "_device_ids_v3": [DEVICE],
-            "_uid_migration_v3": [removed],
+            "_uid_migration_v3": [stale_partner],
         }
     )
     hass = Hass([entry], EntityRegistry([row]))
 
     assert migrations.async_migrate_unique_ids(hass, entry, Coordinator()) == 1
-    assert removed in entry.data["_uid_migration_v3"]
-    assert record("sensor", old, new) in entry.data["_uid_migration_v3"]
+    journal = entry.data["_uid_migration_v3"]
+    assert stale_partner not in journal
+    assert record("sensor", old, new) in journal
+
+
+def test_a_legacy_partner_record_without_a_role_is_still_recognised(migrations):
+    """Journals written before `role` existed must not slip past the guard."""
+    legacy = {
+        "domain": "sensor",
+        "platform": DOMAIN,
+        "old": f"{DEVICE}_partner_sleep_score",
+        "new": f"{DEVICE}_user_{PARTNER}_sleep_score",
+    }
+    entry = Entry(
+        data={
+            "auth_value": "alice@example.com",
+            "_device_ids_v3": [DEVICE],
+            "_uid_migration_v3": [legacy],
+        }
+    )
+    hass = Hass([entry], EntityRegistry())
+
+    migrations.async_migrate_unique_ids(hass, entry, Coordinator())
+    assert "_uid_migration_v3" not in entry.data
 
 
 def test_partial_revert_keeps_only_the_mapping_that_failed(migrations):
@@ -287,7 +357,7 @@ def test_complete_revert_restores_the_2x_config_entry_identity(migrations):
     assert result.complete
     assert entry.unique_id == "alice@example.com"
     assert "_uid_migration_v3" not in entry.data
-    assert row.unique_id == old
+    assert hass.entity_registry.entities["sensor.score"].unique_id == old
 
 
 def test_deleted_entity_does_not_block_downgrade_forever(migrations):
@@ -337,7 +407,7 @@ def test_declined_entity_rename_aborts_before_platform_setup(migrations):
     source = Row("sensor.source", "sensor", old)
     blocker = Row("sensor.blocker", "sensor", new, config_entry_id="other")
     hass = Hass([entry], EntityRegistry([source, blocker]))
-    with pytest.raises(Exception, match="migration was incomplete"):
+    with pytest.raises(Exception, match="already held elsewhere"):
         migrations.async_migrate_unique_ids(hass, entry, Coordinator())
 
 
@@ -351,7 +421,7 @@ def test_ambiguous_legacy_partner_history_is_never_auto_assigned(migrations):
     coordinator.has_partner_for_device = lambda _device_id: True
 
     assert migrations.async_migrate_unique_ids(hass, entry, coordinator) == 0
-    assert row.unique_id == old
+    assert hass.entity_registry.entities["sensor.partner_score"].unique_id == old
 
 
 def test_fresh_v3_partner_row_is_still_recoverable_for_downgrade(migrations):
@@ -365,7 +435,7 @@ def test_fresh_v3_partner_row_is_still_recoverable_for_downgrade(migrations):
     coordinator.has_partner_for_device = lambda _device_id: True
 
     migrations.async_migrate_unique_ids(hass, entry, coordinator)
-    assert record("sensor", old, new) in entry.data["_uid_migration_v3"]
+    assert record("sensor", old, new, role="partner") in entry.data["_uid_migration_v3"]
 
 
 def test_original_pair_journal_is_upgraded_out_of_options(migrations):

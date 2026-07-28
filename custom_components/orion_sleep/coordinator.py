@@ -94,6 +94,7 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
         )
         self.partner_device_serial = str(config_entry.data.get(CONF_PARTNER_DEVICE_SERIAL, ""))
         self.partner_mapping_valid = bool(self.partner_device_serial)
+        self._warned_partner_topology = False
 
         # Maps device serial_number -> UUID so the WS message handler
         # (which only knows the serial) can key into live_devices.
@@ -151,11 +152,18 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
                 and self.devices[0].get("serial_number") == self.partner_device_serial
                 and self.partner_devices[0].get("serial_number") == self.partner_device_serial
             )
+            # Latched. This runs on every poll, so an unlatched warning
+            # repeated once per scan interval forever for any household
+            # whose topology genuinely will not resolve on its own.
             if not self.partner_mapping_valid:
-                _LOGGER.warning(
-                    "Partner device topology changed. Partner insights are disabled "
-                    "until the account is relinked"
-                )
+                if not self._warned_partner_topology:
+                    self._warned_partner_topology = True
+                    _LOGGER.warning(
+                        "Partner device topology changed. Partner insights are "
+                        "disabled until the account is relinked"
+                    )
+            else:
+                self._warned_partner_topology = False
         except OrionAuthError as err:
             self.partner_update_ok = False
             self.partner_mapping_valid = False
@@ -603,18 +611,12 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
         # Stash the timeline (today's scheduled actions) on the coordinator
         # data so sensors can read it without polling /v1/sleep-schedules
         # more aggressively. Only live_device.update carries this field.
+        data = dict(self.data or {})
         if msg_type == "live_device.update" and "timeline" in payload:
-            data = dict(self.data or {})
             timelines = dict(data.get("ws_timelines", {}))
             timelines[dev_id] = payload.get("timeline") or []
             data["ws_timelines"] = timelines
-            self.async_set_updated_data(data)
-        else:
-            # Snapshot — no timeline, still push so entities re-render.
-            # async_set_updated_data is a no-op if called with the same
-            # dict reference, so build a shallow copy.
-            data = dict(self.data or {})
-            self.async_set_updated_data(data)
+        self._async_push_without_rescheduling(data)
 
     @callback
     def apply_live_device(self, serial: str, payload: object) -> None:
@@ -632,7 +634,26 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
             return
         previous = self.live_devices.get(dev_id, {})
         self.live_devices[dev_id] = {**previous, **payload}
-        self.async_set_updated_data(dict(self.data or {}))
+        self._async_push_without_rescheduling(dict(self.data or {}))
+
+    @callback
+    def _async_push_without_rescheduling(self, data: dict) -> None:
+        """Publish pushed state without moving the next poll.
+
+        `async_set_updated_data` is documented as resetting the refresh
+        interval, and it does: it unsubscribes the pending refresh and
+        schedules a fresh one. The bed pushes a frame roughly every two
+        seconds and the default scan interval is ten minutes, so calling
+        it per frame meant `_async_update_data` never ran at all while a
+        socket was healthy. Insights, schedules, the live session and the
+        device list all froze at whatever the first poll returned, and the
+        REST fallback this integration relies on became unreachable
+        precisely when the socket was working.
+
+        Publishing directly keeps the poll on its own clock.
+        """
+        self.data = data
+        self.async_update_listeners()
 
     @callback
     def _handle_ws_state(self, serial: str, state: str) -> None:

@@ -190,8 +190,14 @@ class OrionSleepConfigFlow(ConfigFlow, domain=DOMAIN):
         )
         return profile, device_ids
 
-    async def _async_send_code(self, auth_value: str) -> ConfigFlowResult | None:
-        """Send verification code. Returns None on success, or a step result with errors."""
+    async def _async_send_code(self, auth_value: str) -> None:
+        """Send a verification code, or raise.
+
+        Every failure path here raises, so callers proceed to the next
+        step unconditionally. It previously claimed to return a step
+        result and never did, which left both callers branching on a
+        condition that was always true.
+        """
         self._auth_value = auth_value.strip()
 
         unique_id = self._auth_value.lower()
@@ -206,7 +212,6 @@ class OrionSleepConfigFlow(ConfigFlow, domain=DOMAIN):
         success = await client.request_auth_code(email=email, phone=phone)
         if not success:
             raise OrionConnectionError("API returned success=false")
-        return None
 
     async def async_step_email(
         self, user_input: dict[str, Any] | None = None
@@ -216,9 +221,8 @@ class OrionSleepConfigFlow(ConfigFlow, domain=DOMAIN):
 
         if user_input is not None:
             try:
-                result = await self._async_send_code(user_input["email"])
-                if result is None:
-                    return await self.async_step_verify()
+                await self._async_send_code(user_input["email"])
+                return await self.async_step_verify()
             except OrionConnectionError:
                 errors["base"] = "cannot_connect"
             except OrionApiError:
@@ -251,9 +255,8 @@ class OrionSleepConfigFlow(ConfigFlow, domain=DOMAIN):
                 errors["base"] = "invalid_phone"
             else:
                 try:
-                    result = await self._async_send_code(phone)
-                    if result is None:
-                        return await self.async_step_verify()
+                    await self._async_send_code(phone)
+                    return await self.async_step_verify()
                 except OrionConnectionError:
                     errors["base"] = "cannot_connect"
                 except OrionApiError:
@@ -307,12 +310,11 @@ class OrionSleepConfigFlow(ConfigFlow, domain=DOMAIN):
                 # after the code has been accepted.
                 identity = await self._async_account_identity(tokens)
                 if identity is None:
-                    errors["base"] = "cannot_connect"
-                    return self.async_show_form(
-                        step_id="verify",
-                        data_schema=vol.Schema({vol.Required("code"): str}),
-                        errors=errors,
-                    )
+                    # Abort rather than re-showing the code form. The code
+                    # was already spent by verify_auth_code above, so the
+                    # form would invite a retry that can only ever return
+                    # invalid_code.
+                    return self.async_abort(reason="identity_unavailable")
                 profile, device_ids = identity
                 account_id = profile["id"]
                 from .migrations import overlapping_entry_ids
@@ -715,12 +717,10 @@ class OrionSleepOptionsFlow(OptionsFlow):
                     else:
                         partner_id = partner_profile.get("id")
                     if not isinstance(partner_id, str) or not partner_id:
-                        errors["base"] = "cannot_connect"
-                        return self.async_show_form(
-                            step_id="partner_verify",
-                            data_schema=vol.Schema({vol.Required("code"): str}),
-                            errors=errors,
-                        )
+                        # Same reasoning as the primary flow. The partner's
+                        # code has been spent, so offering the form again
+                        # only produces invalid_code.
+                        return self.async_abort(reason="identity_unavailable")
                     coordinator = getattr(self._config_entry, "runtime_data", None)
                     primary_devices = getattr(coordinator, "devices", [])
                     primary_id = getattr(coordinator, "user_id", "")

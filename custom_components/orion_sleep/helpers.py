@@ -78,46 +78,6 @@ def nested_mapping(container: object, *keys: str) -> dict:
     return current if isinstance(current, dict) else {}
 
 
-def renames_to_apply(
-    pairs: list[tuple[str, str]],
-    on_this_entry: set[str],
-    already_in_use: set[str],
-) -> list[tuple[str, str]]:
-    """Which of `pairs` are safe to rename, and in what order.
-
-    Split out of the migration so it can be tested without Home
-    Assistant. The decisions here are the whole risk of the migration,
-    and the module that performs them cannot be imported in this suite.
-
-    `on_this_entry` is what this config entry owns. `already_in_use` must
-    be every unique_id the ENTITY REGISTRY holds for this platform, not
-    just this entry's. Home Assistant's uniqueness check is registry-wide
-    per platform, so an entry-local view will happily approve a rename
-    that `async_update_entity` then refuses with a ValueError. Two config
-    entries for one household reach that: both see the same device, and
-    one entry's partner is the other's primary, so both compute the same
-    target id.
-    """
-    out: list[tuple[str, str]] = []
-    # Seeded with BOTH, because an id this entry currently holds is just
-    # as occupied as one another entry holds. Seeding only from
-    # `already_in_use` (which the caller builds by excluding this entry's
-    # own ids) meant a rename onto a live id was approved and then refused
-    # by the registry. `taken.discard(old)` below is what makes a chain
-    # work: the rename that vacates an id has to come first, and one that
-    # does not is deferred to the next startup rather than attempted.
-    taken = set(already_in_use) | set(on_this_entry)
-    for old, new in pairs:
-        if not new or old == new or old not in on_this_entry:
-            continue
-        if new in taken:
-            continue
-        out.append((old, new))
-        taken.add(new)
-        taken.discard(old)
-    return out
-
-
 def person_unique_id(
     device_id: str, key: str, user_id: str | None, *, legacy: str
 ) -> str:

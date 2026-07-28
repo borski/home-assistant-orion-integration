@@ -44,6 +44,12 @@ _LOGGER = logging.getLogger(__name__)
 
 SERVICE_REVERT_UNIQUE_IDS = "revert_unique_ids"
 SERVICE_RESUME_UNIQUE_IDS = "resume_unique_ids"
+# States Home Assistant will accept an unload from.
+_UNLOADABLE_STATES = (
+    ConfigEntryState.LOADED,
+    ConfigEntryState.SETUP_RETRY,
+    ConfigEntryState.SETUP_ERROR,
+)
 SERVICE_REVERT_SCHEMA = vol.Schema(
     {
         vol.Required("config_entry_id"): str,
@@ -152,6 +158,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # a backoff forever with no config entry left to own them. A reauth
     # loop would stack a fresh set on every attempt.
     platforms_loaded = False
+    completed = False
     try:
         await coordinator.async_config_entry_first_refresh()
         entry.runtime_data = coordinator
@@ -174,36 +181,35 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         unresolved = unresolved_device_entries(hass, entry.entry_id)
         if unresolved:
             raise ConfigEntryNotReady(
-                "Waiting for every legacy Orion entry to identify its beds before "
-                "any history is migrated"
+                "Waiting for every Orion entry that is still starting to name "
+                "its beds before any history is migrated"
             )
-        conflicts = overlapping_entry_ids(hass, entry.entry_id, set(device_ids))
-        if conflicts:
-            raise ConfigEntryError(
-                "Another Orion config entry covers the same bed. Remove the "
-                "duplicate entry before loading either account"
-            )
-        if entry_identity_conflict(hass, entry, coordinator.user_id):
-            raise ConfigEntryError(
-                "Another Orion config entry owns this account. Remove the "
-                "duplicate entry before migrating history"
-            )
-        # Must run after the refresh, which is what resolves who the two
-        # accounts actually are, and before the platforms build entities
-        # against the new scheme. In between is the only correct window.
-        async_migrate_unique_ids(hass, entry, coordinator)
+        # Identity first, then entities. Both refuse to run into another
+        # entry, but only this order fails before anything is renamed: the
+        # account collision used to be discovered after every entity had
+        # already moved. The two are independent, so ordering is free.
+        # `async_migrate_unique_ids` opens with its own bed-overlap check,
+        # which is why there is no third copy of either here.
         async_migrate_entry_identity(hass, entry, coordinator)
+        async_migrate_unique_ids(hass, entry, coordinator)
         await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
         platforms_loaded = True
         # A fresh 3.0 install had no registry rows during the first pass.
         # Record the rows the platforms just created so downgrade recovery
         # works immediately rather than only after another restart.
         async_migrate_unique_ids(hass, entry, coordinator)
-    except Exception:
-        if platforms_loaded:
-            await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
-        await coordinator.async_shutdown()
-        raise
+        completed = True
+    finally:
+        # NOT `except Exception`. CancelledError inherits from
+        # BaseException, and Home Assistant cancels in-flight setup on
+        # shutdown. The first refresh above is where the per-device sockets
+        # start, so a cancellation there is exactly the leak this block
+        # exists to prevent: sockets reconnecting on a backoff forever with
+        # no config entry left to own them.
+        if not completed:
+            if platforms_loaded:
+                await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+            await coordinator.async_shutdown()
 
     # Reload on options change
     # Registered AFTER the migration, deliberately. The migration records
@@ -281,7 +287,10 @@ def _async_register_recovery_service(hass: HomeAssistant) -> None:
             entry,
             data={**entry.data, CONF_UID_RECOVERY_ACTIVE: True},
         )
-        if entry.state is ConfigEntryState.LOADED:
+        # Also unload from SETUP_RETRY and SETUP_ERROR. Guarding on LOADED
+        # alone left a pending retry timer armed and running against the
+        # registry while the reverse transaction was in flight.
+        if entry.state in _UNLOADABLE_STATES:
             unloaded = await hass.config_entries.async_unload(entry.entry_id)
             if not unloaded:
                 raise HomeAssistantError("Could not unload Orion before recovery")
@@ -289,9 +298,18 @@ def _async_register_recovery_service(hass: HomeAssistant) -> None:
         result = async_revert_unique_ids(hass, entry)
         if not result.complete:
             raise HomeAssistantError(
-                "Orion recovery is incomplete: "
-                f"{result.remaining} entity mappings remain and "
-                f"config identity restored={result.identity_restored}"
+                f"Orion recovery is incomplete: {result.remaining} entity "
+                "mappings could not be returned to their pre-3.0 ids. Resolve "
+                "the conflicting entity registry rows and run this again "
+                "before installing 2.x"
+            )
+        if not result.identity_restored:
+            # Cosmetic to 2.x, so it does not fail the run. Worth saying,
+            # because the entry will not be recognised by its typed address.
+            _LOGGER.warning(
+                "Orion entities are ready for downgrade, but this entry kept "
+                "its account-based identity because another entry already "
+                "holds the address it was set up with"
             )
         _LOGGER.info(
             "Reverted %d Orion entities to their pre-3.0 ids. The entry is "
@@ -314,9 +332,14 @@ def _async_register_recovery_service(hass: HomeAssistant) -> None:
         data = dict(entry.data)
         data.pop(CONF_UID_RECOVERY_ACTIVE, None)
         hass.config_entries.async_update_entry(entry, data=data)
+        # Reload, not setup. `async_setup` refuses anything that is not
+        # NOT_LOADED, and the likeliest way to reach this action is to
+        # prepare a downgrade, restart Home Assistant, and change your
+        # mind. That restart leaves the entry in SETUP_ERROR, where the
+        # documented escape hatch used to raise OperationNotAllowed and
+        # strand the entry with no supported way back.
         if entry.state is not ConfigEntryState.LOADED:
-            loaded = await hass.config_entries.async_setup(entry.entry_id)
-            if not loaded:
+            if not await hass.config_entries.async_reload(entry.entry_id):
                 raise HomeAssistantError("Orion could not resume 3.x setup")
 
     if not hass.services.has_service(DOMAIN, SERVICE_REVERT_UNIQUE_IDS):
