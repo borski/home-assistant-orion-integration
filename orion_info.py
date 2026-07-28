@@ -4,7 +4,7 @@ Orion Sleep mattress topper — login and info retrieval.
 
 Usage:
     python orion_info.py --email you@example.com
-    python orion_info.py --phone 15132015808
+    python orion_info.py --phone 15555550100
 
 Tokens are cached to ~/.orion_tokens.json.  On subsequent runs the script
 reuses the cached access token (or refreshes it automatically) so you don't

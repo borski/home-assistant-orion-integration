@@ -31,6 +31,11 @@ TO_REDACT = {
     "device_id",
     "workflow_id",
     "invite_id",
+    # The aliases are user-typed household names. `redact_identifier_keys`
+    # scrubs the uuid KEYS of this map and leaves the names sitting in the
+    # values, which is the same personal data `name` and `first_name`
+    # above are already redacted for.
+    "display_aliases",
     "name",
     "first_name",
     "last_name",

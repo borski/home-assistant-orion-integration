@@ -26,6 +26,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
 
 from . import helpers
+from .const import DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -59,9 +60,11 @@ def _planned_renames(entry: ConfigEntry, coordinator) -> list[tuple[str, str]]:
 
         if primary:
             # These three read the AUTHENTICATED user's session, so they
-            # were always one person's entities. They shipped keyed on
-            # the bed, which is why a second bed would have produced a
-            # duplicate of each showing identical data.
+            # were always one person's readings, not the bed's. They are
+            # still built inside the per-device loop, so a second bed
+            # would still duplicate them. Keying them on the person is
+            # the half of that fix which does not need a device to test
+            # against, and the naming no longer lies about whose they are.
             own = insight_keys + ["session_active", "server_in_bed", "current_phase"]
             pairs += _person_renames(device_id, primary, own, "")
 
@@ -119,25 +122,31 @@ def async_migrate_unique_ids(
     registry = er.async_get(hass)
     known = er.async_entries_for_config_entry(registry, entry.entry_id)
     by_unique_id = {e.unique_id: e for e in known}
-    taken = set(by_unique_id)
+
+    # Registry-wide, not entry-local. Home Assistant enforces uniqueness
+    # per (domain, platform) across every config entry, so asking only
+    # what THIS entry owns approves renames it then refuses.
+    in_use = {
+        e.unique_id
+        for e in registry.entities.values()
+        if e.platform == DOMAIN and e.unique_id not in by_unique_id
+    }
 
     migrated = 0
-    for old, new in _planned_renames(entry, coordinator):
-        if not new or old == new or old not in by_unique_id:
+    for old, new in helpers.renames_to_apply(
+        _planned_renames(entry, coordinator), set(by_unique_id), in_use
+    ):
+        entity_id = by_unique_id[old].entity_id
+        try:
+            registry.async_update_entity(entity_id, new_unique_id=new)
+        except ValueError:
+            # Belt and braces. The plan above already excludes ids the
+            # registry holds, so reaching this means the registry changed
+            # underneath us. A rename losing a race is not a reason to
+            # fail setup: the entity keeps the id it has, still works,
+            # and the next start tries again.
+            _LOGGER.warning("Could not re-key %s, leaving it as it is", entity_id)
             continue
-        if new in taken:
-            # Both ids present. A previous run migrated this one and the
-            # old entity was recreated, or the user added the same bed
-            # twice. Renaming onto a live id raises, so leave it alone
-            # and say so rather than taking the integration down.
-            _LOGGER.warning(
-                "Not re-keying %s: an entity already holds the new id",
-                by_unique_id[old].entity_id,
-            )
-            continue
-        registry.async_update_entity(by_unique_id[old].entity_id, new_unique_id=new)
-        taken.discard(old)
-        taken.add(new)
         migrated += 1
 
     if migrated:

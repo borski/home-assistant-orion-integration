@@ -185,7 +185,7 @@ are not, move them instead:
 action: orion_sleep.edit_sleep_session
 data:
   entity_id: sensor.sleepy_alex_sleep_score
-  session_id: 0584dd36-e364-477b-a3f3-20964e26c700
+  session_id: 00000000-0000-0000-0000-000000000000
   fell_asleep: "2026-07-27 03:30:00"
   woke_up: "2026-07-27 07:23:00"
 ```

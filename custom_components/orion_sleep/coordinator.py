@@ -111,6 +111,19 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
         try:
             self.user = await self.api_client.get_current_user()
             self.user_id = self.user.get("id", "")
+            if not self.user_id:
+                # Refuse to set up rather than proceed anonymously. Every
+                # person-scoped entity is keyed on this id, and without
+                # it they fall back to the pre-3.0 ids, which no longer
+                # exist in the registry. Home Assistant would build a
+                # second entity for each person, and once both ids exist
+                # the migration can never merge them again. One bad
+                # profile response would permanently split a household's
+                # sleep history in two.
+                #
+                # Orion has been measured returning {"response": null}
+                # here, so this is an observed shape, not a hypothetical.
+                raise UpdateFailed("Orion returned a profile with no account id")
             self.devices = util.dedupe_devices_by_id(await self.api_client.list_devices())
         except OrionAuthError as err:
             raise ConfigEntryAuthFailed(str(err)) from err

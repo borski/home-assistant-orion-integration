@@ -429,7 +429,7 @@ that has never been seen to fail is not a guard.
 Run `orion_info.py` to verify API connectivity and response shapes:
 ```bash
 python orion_info.py --email user@example.com
-python orion_info.py --phone 15132015808
+python orion_info.py --phone 15555550100
 ```
 Tokens cache to `~/.orion_tokens.json`. Use `--relogin` to force fresh auth.
 

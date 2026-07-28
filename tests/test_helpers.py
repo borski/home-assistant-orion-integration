@@ -273,6 +273,9 @@ _DELIBERATELY_CLEAR = {
     # Zones are "zone_a" and "zone_b", not UUIDs. Redacting them makes a
     # zone-level bug report unreadable and protects nothing.
     "zone_id",
+    # Home Assistant's own random local id for the config entry. It
+    # identifies the install to itself and says nothing about a person.
+    "entry_id",
 }
 
 
@@ -281,11 +284,19 @@ def test_every_identifier_the_code_reads_is_redacted_or_excused():
     import pathlib
     import re
 
+    # Both access forms. Scanning only `.get("x")` made this pass while
+    # covering two fields, because most identifier reads in this codebase
+    # are plain subscripts.
     fields: set[str] = set()
     for path in pathlib.Path("custom_components/orion_sleep").glob("*.py"):
-        fields |= set(re.findall(r'\.get\("([a-z_]+_ids?)"', path.read_text()))
+        src = path.read_text()
+        fields |= set(re.findall(r'\.get\(\s*"([a-z_]+_ids?)"', src))
+        fields |= set(re.findall(r'\[\s*"([a-z_]+_ids?)"\s*\]', src))
 
-    assert fields, "the scan found nothing, so it is not guarding anything"
+    assert len(fields) >= 4, (
+        "the scan found only " + str(sorted(fields)) + ", which is too few to "
+        "be guarding anything. It previously passed while seeing two."
+    )
     missed = fields - _to_redact() - _DELIBERATELY_CLEAR
     assert not missed, (
         f"identifier fields read from payloads but never redacted: {sorted(missed)}. "
@@ -350,3 +361,73 @@ def test_no_entity_is_keyed_on_a_role_literal():
     assert not offenders, (
         "unique_id built from a role instead of an account id: " + str(offenders)
     )
+
+
+# ── The migration's decisions ─────────────────────────────────────────
+#
+# `migrations.py` imports Home Assistant and cannot run here, so the part
+# that carries all the risk lives in `helpers.renames_to_apply` and is
+# tested directly. Getting this wrong does not raise a type error. It
+# either drops a person's history on the floor or takes setup down on
+# every retry with no way out.
+
+OLD_A, NEW_A = "dev_sleep_score", "dev_user_aaa_sleep_score"
+OLD_B, NEW_B = "dev_partner_sleep_score", "dev_user_bbb_sleep_score"
+
+
+def test_the_happy_path_renames_both_people():
+    got = helpers.renames_to_apply(
+        [(OLD_A, NEW_A), (OLD_B, NEW_B)], {OLD_A, OLD_B}, set()
+    )
+    assert got == [(OLD_A, NEW_A), (OLD_B, NEW_B)]
+
+
+def test_running_it_twice_does_nothing_the_second_time():
+    """Setup runs on every restart. A second pass must be a no-op."""
+    pairs = [(OLD_A, NEW_A), (OLD_B, NEW_B)]
+    after_first = {NEW_A, NEW_B}
+    assert helpers.renames_to_apply(pairs, after_first, set()) == []
+
+
+def test_a_fresh_install_renames_nothing():
+    assert helpers.renames_to_apply([(OLD_A, NEW_A)], set(), set()) == []
+
+
+def test_an_id_held_elsewhere_in_the_registry_is_skipped_not_attempted():
+    """The blocker this exists for.
+
+    Home Assistant enforces unique_id per (domain, platform) across EVERY
+    config entry, and `async_update_entity` raises ValueError on a clash.
+    That exception escapes setup, so the entry fails, and fails the same
+    way on every retry with no path out. Two entries for one household
+    reach it: both see the same bed, and one entry's partner is the
+    other's primary, so both compute the same target id.
+    """
+    got = helpers.renames_to_apply(
+        [(OLD_A, NEW_A), (OLD_B, NEW_B)],
+        {OLD_A, OLD_B},
+        already_in_use={NEW_A},  # another config entry already holds it
+    )
+    assert got == [(OLD_B, NEW_B)], "must skip the clash and keep going"
+
+
+def test_two_sources_cannot_both_claim_one_target():
+    """Two beds both mapping the account-level select onto one id."""
+    got = helpers.renames_to_apply(
+        [("bed1_scale", "entry_scale"), ("bed2_scale", "entry_scale")],
+        {"bed1_scale", "bed2_scale"},
+        set(),
+    )
+    assert got == [("bed1_scale", "entry_scale")]
+
+
+def test_a_rename_onto_an_id_this_entry_is_freeing_is_allowed():
+    """Chained renames must not deadlock on ids that are about to move."""
+    got = helpers.renames_to_apply(
+        [("a", "b"), ("b", "c")], {"a", "b"}, set()
+    )
+    assert ("a", "b") in got
+
+
+def test_nothing_is_renamed_onto_an_empty_id():
+    assert helpers.renames_to_apply([(OLD_A, "")], {OLD_A}, set()) == []
