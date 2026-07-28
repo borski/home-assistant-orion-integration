@@ -651,8 +651,17 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
         precisely when the socket was working.
 
         Publishing directly keeps the poll on its own clock.
+
+        `last_update_success` is still set, because `CoordinatorEntity`
+        resolves `available` from it. Dropping it meant one failed poll
+        marked every entity unavailable and a socket delivering a full
+        snapshot every two seconds could no longer bring them back, for
+        up to a whole scan interval. That inverts the failure this method
+        was written to fix.
         """
         self.data = data
+        self.last_update_success = True
+        self.last_exception = None
         self.async_update_listeners()
 
     @callback

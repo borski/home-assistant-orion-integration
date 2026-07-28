@@ -20,6 +20,8 @@ DOMAIN = "orion_sleep"
 ACCOUNT = "11111111-1111-4111-8111-111111111111"
 PARTNER = "22222222-2222-4222-8222-222222222222"
 DEVICE = "bed-1"
+BED_A = "bed-aaa"
+BED_B = "bed-bbb"
 
 
 @dataclass(frozen=True)
@@ -407,8 +409,11 @@ def test_declined_entity_rename_aborts_before_platform_setup(migrations):
     source = Row("sensor.source", "sensor", old)
     blocker = Row("sensor.blocker", "sensor", new, config_entry_id="other")
     hass = Hass([entry], EntityRegistry([source, blocker]))
-    with pytest.raises(Exception, match="already held elsewhere"):
+    with pytest.raises(Exception, match="already holds the id they need") as err:
         migrations.async_migrate_unique_ids(hass, entry, Coordinator())
+    # Names the blocker, not just the row being moved. Reporting only the
+    # source sent users to delete the entity that still worked.
+    assert "sensor.blocker" in str(err.value)
 
 
 def test_ambiguous_legacy_partner_history_is_never_auto_assigned(migrations):
@@ -451,3 +456,113 @@ def test_original_pair_journal_is_upgraded_out_of_options(migrations):
     migrations.async_migrate_unique_ids(hass, entry, Coordinator())
     assert entry.data["_uid_migration_v3"] == [record("sensor", old, new)]
     assert entry.options == {"scan_interval": 600}
+
+
+# ── Two beds on one account ───────────────────────────────────────────
+#
+# There was no two-device fixture in this suite, and that absence is
+# exactly why a permanent multi-bed lockout survived three review rounds.
+# In 2.x the account-level temperature select was built inside the
+# per-device loop, so a two-bed account has two registry rows for one
+# value. Only one can move onto the account-keyed id.
+
+
+def two_beds(*ids):
+    return [{"id": i, "serial_number": f"SER-{i}"} for i in ids]
+
+
+def scale_rows(*ids):
+    return [Row(f"select.scale_{i}", "select", f"{i}_temperature_display_unit") for i in ids]
+
+
+def test_a_two_bed_account_migrates_instead_of_locking_itself_out(migrations):
+    entry = Entry(data={"auth_value": "a@b.c", "_device_ids_v3": [BED_A, BED_B]})
+    hass = Hass([entry], EntityRegistry(scale_rows(BED_A, BED_B)))
+    coordinator = Coordinator()
+    coordinator.devices = two_beds(BED_A, BED_B)
+
+    assert migrations.async_migrate_unique_ids(hass, entry, coordinator) == 1
+    ids = {r.unique_id for r in hass.entity_registry.entities.values()}
+    assert f"{entry.entry_id}_temperature_display_unit" in ids
+    # The surplus copy of one account value is left alone, never declined.
+    assert f"{BED_B}_temperature_display_unit" in ids
+
+
+def test_a_reordered_device_list_does_not_brick_the_entry(migrations):
+    """`dedupe_devices_by_id` preserves vendor response order.
+
+    Keying the rename on that list's first element meant the vendor
+    returning the beds the other way round planned a rename onto an id the
+    surviving row already held, and a declined rename is fatal.
+    """
+    entry = Entry(data={"auth_value": "a@b.c", "_device_ids_v3": [BED_A, BED_B]})
+    hass = Hass([entry], EntityRegistry(scale_rows(BED_A, BED_B)))
+    coordinator = Coordinator()
+
+    coordinator.devices = two_beds(BED_A, BED_B)
+    migrations.async_migrate_unique_ids(hass, entry, coordinator)
+    coordinator.devices = two_beds(BED_B, BED_A)
+    assert migrations.async_migrate_unique_ids(hass, entry, coordinator) == 0
+
+
+def test_selling_the_first_bed_does_not_brick_the_entry(migrations):
+    """Removing a bed is a supported user action, not an error."""
+    entry = Entry(data={"auth_value": "a@b.c", "_device_ids_v3": [BED_A, BED_B]})
+    hass = Hass([entry], EntityRegistry(scale_rows(BED_A, BED_B)))
+    coordinator = Coordinator()
+
+    coordinator.devices = two_beds(BED_A, BED_B)
+    migrations.async_migrate_unique_ids(hass, entry, coordinator)
+
+    coordinator.devices = two_beds(BED_B)
+    entry.data = {**entry.data, "_device_ids_v3": [BED_B]}
+    assert migrations.async_migrate_unique_ids(hass, entry, coordinator) == 0
+
+
+def test_a_legacy_options_partner_pair_is_still_evicted(migrations):
+    """The pair format is the one this project shipped WITH partner renames.
+
+    Labelling it "primary" let every legacy partner record past the
+    eviction, so a downgrade handed the previous partner's entities to
+    2.x, which then wrote the current partner's readings onto them.
+    """
+    old = f"{DEVICE}_partner_sleep_score"
+    new = f"{DEVICE}_user_{PARTNER}_sleep_score"
+    row = Row("sensor.partner_score", "sensor", new)
+    entry = Entry(
+        data={"auth_value": "a@b.c", "_device_ids_v3": [DEVICE]},
+        options={"_uid_migration_v3": [[old, new]]},
+    )
+    hass = Hass([entry], EntityRegistry([row]))
+
+    migrations.async_migrate_unique_ids(hass, entry, Coordinator())
+    assert "_uid_migration_v3" not in entry.data
+
+
+def test_the_plan_does_not_depend_on_vendor_response_order(migrations):
+    """`dedupe_devices_by_id` preserves the vendor's array order verbatim.
+
+    Two runs that see the same beds in a different order must plan the
+    same rename, or which bed owns the account-level id is decided by
+    whatever the API happened to return first. `select.py` documents
+    escaping that exact dependency, and the migration reintroduced it.
+    """
+    entry = Entry()
+    forward, backward = Coordinator(), Coordinator()
+    forward.devices = two_beds(BED_A, BED_B)
+    backward.devices = two_beds(BED_B, BED_A)
+
+    a = migrations._planned_renames(entry, forward)
+    b = migrations._planned_renames(entry, backward)
+
+    # Per-person renames legitimately come out in device order, and the
+    # rename loop is order-insensitive, so compare the content.
+    assert set(a) == set(b)
+
+    # The account-level pair is the one that must not drift. There is a
+    # single target per entry, so choosing its source by response order is
+    # what let a reordered array plan a rename onto an occupied id.
+    def account_pair(pairs):
+        return [p for p in pairs if p[1].endswith("_temperature_display_unit")]
+
+    assert account_pair(a) == account_pair(b)

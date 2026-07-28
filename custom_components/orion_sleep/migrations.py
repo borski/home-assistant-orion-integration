@@ -154,6 +154,17 @@ def _record_key(record: dict[str, str]) -> tuple[str, str, str]:
     return record["domain"], record["platform"], record["new"]
 
 
+def _role_for(old: str) -> str:
+    """Label an already recorded pair whose journal predates `role`.
+
+    The only place a `_partner_` substring is consulted, and it decides a
+    label rather than a rename. Both journal readers share it, because
+    having one reader apply the rule and the other default to "primary"
+    is precisely how legacy partner records slipped past the eviction.
+    """
+    return "partner" if "_partner_" in old else "primary"
+
+
 def _read_journal(entry: ConfigEntry, rows: list[Any]) -> list[dict[str, str]]:
     """Read the structured journal and upgrade the original pair format."""
     records: list[dict[str, str]] = []
@@ -167,12 +178,7 @@ def _read_journal(entry: ConfigEntry, rows: list[Any]) -> list[dict[str, str]]:
         }
         if not all(record.values()) or record["old"] == record["new"]:
             continue
-        role = str(value.get("role") or "")
-        # Journals written before `role` existed. Labelling a pair that is
-        # already recorded, not deciding a rename from its shape.
-        record["role"] = role or (
-            "partner" if "_partner_" in record["old"] else "primary"
-        )
+        record["role"] = str(value.get("role") or "") or _role_for(record["old"])
         records.append(record)
 
     # The first implementation stored [old, new] pairs in user options.
@@ -184,7 +190,14 @@ def _read_journal(entry: ConfigEntry, rows: list[Any]) -> list[dict[str, str]]:
         old, new = str(value[0]), str(value[1])
         for row in rows:
             if row.unique_id == new:
-                records.append(_journal_record(row, old, new))
+                # Same provenance rule the structured reader above uses.
+                # Defaulting to "primary" here let every legacy partner
+                # pair past the eviction that exists to stop a downgrade
+                # handing the previous partner's entities to the current
+                # one. The pair format is the ONE this project shipped
+                # while partner renames were still being planned, so it is
+                # the reader most likely to be holding partner data.
+                records.append(_journal_record(row, old, new, _role_for(old)))
 
     deduped: dict[tuple[str, str, str], dict[str, str]] = {}
     for record in records:
@@ -266,17 +279,22 @@ def _planned_renames(entry: ConfigEntry, coordinator) -> list[tuple[str, str]]:
 
     # Account-level, and previously built INSIDE the per-device loop, so a
     # two-bed account has two rows for one setting. Only one can move onto
-    # the account-keyed id. Planning both made every rename after the first
-    # collide, and since a declined rename is now fatal, every multi-bed
-    # household was permanently locked out of setup. The surplus rows are
-    # redundant copies of one account value, so they are left where they
-    # are. `select.py` keys its single entity on the first device, so this
-    # migrates exactly the row that entity will look for.
-    first = next((d.get("id") for d in coordinator.devices if d.get("id")), None)
-    if first:
+    # the account-keyed id, and the surplus copies are redundant views of
+    # the same value, so they are left where they are.
+    #
+    # Sorted, not `coordinator.devices` order. That list is whatever the
+    # vendor's array happened to contain, which `dedupe_devices_by_id`
+    # preserves verbatim. Keying on its first element meant a reordered
+    # response, or selling the bed that happened to be listed first,
+    # planned a rename onto an id the surviving row already held. A
+    # declined rename is fatal, so a supported user action permanently
+    # bricked the entry on its NEXT start rather than its first. That is
+    # the same ordering dependency `select.py` documents escaping from.
+    device_ids = sorted(str(d["id"]) for d in coordinator.devices if d.get("id"))
+    if device_ids:
         pairs.append(
             (
-                f"{first}_temperature_display_unit",
+                f"{device_ids[0]}_temperature_display_unit",
                 f"{entry.entry_id}_temperature_display_unit",
             )
         )
@@ -360,6 +378,11 @@ def async_migrate_unique_ids(
         (row.domain, row.platform, row.unique_id): row.id
         for row in registry.entities.values()
     }
+    # Who holds an id, so a decline can name the row that is actually in
+    # the way. Reporting only the row being moved sent users to delete the
+    # wrong entity, taking its history with it.
+    holder_entity_ids = {row.id: row.entity_id for row in registry.entities.values()}
+    owned_row_ids = {row.id for row in known}
     pending: list[tuple[Any, str, str]] = []
     seen_sources: set[tuple[str, str, str]] = set()
     for old, new in planned:
@@ -384,12 +407,20 @@ def async_migrate_unique_ids(
                 if holder in pending_source_ids:
                     deferred.append((row, old, new))
                     continue
-                declined.append(row.entity_id)
+                if holder in owned_row_ids:
+                    # Our own row already sits on the target, so the work
+                    # this rename exists to do is done. The only plan that
+                    # reaches here is the account-level one, where a
+                    # multi-bed account has surplus 2.x rows for a single
+                    # value. Treating that as a conflict made removing a
+                    # bed a permanent, unretryable setup failure.
+                    continue
+                declined.append((row.entity_id, holder_entity_ids.get(holder, new)))
                 continue
             try:
                 registry.async_update_entity(row.entity_id, new_unique_id=new)
             except ValueError:
-                declined.append(row.entity_id)
+                declined.append((row.entity_id, new))
                 continue
             occupied.pop((row.domain, row.platform, old), None)
             occupied[target] = row.id
@@ -398,7 +429,7 @@ def async_migrate_unique_ids(
             migrated += 1
             progressed = True
         if not progressed:
-            declined.extend(row.entity_id for row, _old, _new in deferred)
+            declined.extend((row.entity_id, new) for row, _old, new in deferred)
             break
         pending = deferred
 
@@ -434,19 +465,24 @@ def async_migrate_unique_ids(
     _write_journal(hass, entry, list(journal.values()))
 
     if declined:
+        # Name the BLOCKER, not just the row being moved. Reporting only
+        # the source told users to delete the entity that still worked,
+        # taking its history with it, while the actual squatter stayed.
+        detail = sorted({f"{source} (blocked by {blocker})" for source, blocker in declined})
         _LOGGER.warning(
-            "Left %d Orion entities on their previous ids: %s. They will keep "
-            "working but their history is not attached to an account",
-            len(declined),
-            sorted(set(declined)),
+            "Left %d Orion entities on their previous ids: %s. They keep "
+            "working, but their history is not attached to an account",
+            len(detail),
+            detail,
         )
         raise ConfigEntryError(
-            "Orion could not re-key these entities because their new ids are "
-            f"already held elsewhere in the entity registry: {sorted(set(declined))}. "
-            "Delete those stale registry rows and reload, or run the "
-            "orion_sleep.revert_unique_ids action to return to 2.x ids. "
-            "No platforms were loaded, so nothing is running against a "
-            "half-migrated registry"
+            "Orion could not re-key these entities because something else "
+            f"already holds the id they need: {detail}. Delete the blocking "
+            "entity, then reload. If you would rather go back to 2.x ids, run "
+            "the orion_sleep.revert_unique_ids action, and orion_sleep."
+            "resume_unique_ids if you change your mind. No platforms were "
+            "loaded, though the renames that did succeed are recorded and "
+            "reversible"
         )
     if migrated:
         _LOGGER.info(
