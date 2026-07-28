@@ -24,6 +24,7 @@ from orion_sleep_api import (
 
 from . import helpers
 from .const import (
+    CONF_DEVICE_IDS,
     CONF_DISPLAY_ALIASES,
     CONF_INSIGHTS_DAYS,
     CONF_PARTNER_DEVICE_SERIAL,
@@ -141,8 +142,11 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
             self.partner_devices = util.dedupe_devices_by_id(
                 await self.partner_api_client.list_devices()
             )
+            partner_id = self.partner_user.get("id")
             self.partner_mapping_valid = (
-                len(self.devices) == 1
+                isinstance(partner_id, str)
+                and bool(partner_id)
+                and len(self.devices) == 1
                 and len(self.partner_devices) == 1
                 and self.devices[0].get("serial_number") == self.partner_device_serial
                 and self.partner_devices[0].get("serial_number") == self.partner_device_serial
@@ -188,12 +192,37 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
         }
 
         # Re-fetch devices each poll so zone/user changes surface.
+        topology_changed = False
         try:
-            self.devices = util.dedupe_devices_by_id(await self.api_client.list_devices())
+            refreshed_devices = util.dedupe_devices_by_id(
+                await self.api_client.list_devices()
+            )
         except OrionAuthError as err:
             raise ConfigEntryAuthFailed(str(err)) from err
         except (OrionApiError, OrionConnectionError) as err:
             _LOGGER.warning("Failed to refresh device list: %s", err)
+        else:
+            refreshed_ids = sorted(
+                str(device["id"])
+                for device in refreshed_devices
+                if isinstance(device.get("id"), str) and device["id"]
+            )
+            recorded_ids = list(self.config_entry.data.get(CONF_DEVICE_IDS) or [])
+            from .migrations import overlapping_entry_ids
+
+            if overlapping_entry_ids(
+                self.hass, self.config_entry.entry_id, set(refreshed_ids)
+            ):
+                raise UpdateFailed(
+                    "Orion device ownership now overlaps another config entry"
+                )
+            if refreshed_ids != recorded_ids:
+                self.hass.config_entries.async_update_entry(
+                    self.config_entry,
+                    data={**self.config_entry.data, CONF_DEVICE_IDS: refreshed_ids},
+                )
+                topology_changed = True
+            self.devices = refreshed_devices
 
         # Rebuild the serial -> UUID map and sync the WS connections to
         # the current device list. Starting the WS manager here (rather
@@ -251,7 +280,9 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
 
         try:
             insights_days = self.config_entry.options.get(CONF_INSIGHTS_DAYS, DEFAULT_INSIGHTS_DAYS)
-            data["insights"] = await self.api_client.get_insights(days=insights_days)
+            data["insights"] = await self.api_client.get_insights(
+                days=insights_days, expected_user_id=self.user_id
+            )
         except OrionAuthError as err:
             raise ConfigEntryAuthFailed(str(err)) from err
         except (OrionApiError, OrionConnectionError) as err:
@@ -277,20 +308,43 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
 
         if self.partner_api_client is not None:
             await self._async_refresh_partner_identity()
-            try:
-                data["partner_insights"] = await self.partner_api_client.get_insights(
-                    days=insights_days
-                )
-                self.partner_update_ok = True
-            except OrionAuthError as err:
-                self.partner_update_ok = False
-                _LOGGER.warning(
-                    "Partner authentication failed. Replace it in Orion options: %s",
-                    err,
-                )
-            except (OrionApiError, OrionConnectionError) as err:
-                self.partner_update_ok = False
-                _LOGGER.warning("Failed to fetch partner insights: %s", err)
+            partner_id = self.partner_user.get("id")
+            if self.partner_mapping_valid and isinstance(partner_id, str):
+                try:
+                    data["partner_insights"] = (
+                        await self.partner_api_client.get_insights(
+                            days=insights_days,
+                            expected_user_id=partner_id,
+                        )
+                    )
+                    self.partner_update_ok = True
+                except OrionAuthError as err:
+                    self.partner_update_ok = False
+                    _LOGGER.warning(
+                        "Partner authentication failed. Replace it in Orion options: %s",
+                        err,
+                    )
+                except (OrionApiError, OrionConnectionError) as err:
+                    self.partner_update_ok = False
+                    _LOGGER.warning("Failed to fetch partner insights: %s", err)
+
+        if topology_changed and not self.reload_started:
+            self.reload_started = True
+
+            async def _reload_for_topology() -> None:
+                try:
+                    reloaded = await self.hass.config_entries.async_reload(
+                        self.config_entry.entry_id
+                    )
+                    if not reloaded:
+                        self.reload_started = False
+                except Exception:
+                    self.reload_started = False
+                    _LOGGER.exception("Could not reload Orion after its bed set changed")
+
+            self.hass.async_create_task(
+                _reload_for_topology(), "reload Orion after bed topology change"
+            )
 
         return data
 
@@ -378,7 +432,11 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
 
     def has_partner_for_device(self, device_id: str) -> bool:
         """Return whether the partner account was verified for this bed."""
-        if self.partner_api_client is None or not self.partner_device_serial:
+        if (
+            self.partner_api_client is None
+            or not self.partner_device_serial
+            or not self.partner_mapping_valid
+        ):
             return False
         # An account linked as its own partner is one person, not two.
         # `schedule_user_ids` has always guarded this and this did not,
@@ -387,7 +445,9 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
         # copies then wanted the same account-keyed id, one of them lost,
         # and the loser sat on a dead id nothing would ever claim again.
         partner_id = (self.partner_user or {}).get("id")
-        if partner_id and self.user_id and partner_id == self.user_id:
+        if not isinstance(partner_id, str) or not partner_id:
+            return False
+        if self.user_id and partner_id == self.user_id:
             return False
         primary = next((d for d in self.devices if d.get("id") == device_id), None)
         if not primary:
@@ -517,19 +577,19 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
         schedule timeline when present, since it arrives only via WS.
         """
         if msg_type not in ("live_device.snapshot", "live_device.update"):
-            # Any new event type we haven't accounted for — log once so
-            # we know to update openapi.yaml / AGENTS.md.
+            # Do not log vendor-controlled event names or payload keys.
             _LOGGER.debug(
-                "Orion WS unexpected event type=%s serial=%s keys=%s",
-                msg_type,
-                serial,
-                list(payload.keys()),
+                "Orion WS received an unsupported event for %s",
+                helpers.short_id(serial),
             )
             return
 
         dev_id = self._serial_to_id.get(serial)
         if not dev_id:
-            _LOGGER.debug("Orion WS message for unknown serial %s; ignoring", serial)
+            _LOGGER.debug(
+                "Orion WS message for unknown serial %s; ignoring",
+                helpers.short_id(serial),
+            )
             return
 
         # Merge in place so any fields present in the prior snapshot that
@@ -577,7 +637,7 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
     @callback
     def _handle_ws_state(self, serial: str, state: str) -> None:
         """Log WS connection-state transitions for diagnostics."""
-        _LOGGER.debug("Orion WS %s -> %s", serial, state)
+        _LOGGER.debug("Orion WS %s -> %s", helpers.short_id(serial), state)
 
     def ws_state(self, serial: str) -> str:
         """Return the current WS state for a device (for diagnostics)."""

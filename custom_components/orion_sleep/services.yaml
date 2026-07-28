@@ -314,6 +314,13 @@ assign_zones:
       example: "[zone_a]"
       selector:
         object:
+    confirm:
+      name: Confirm
+      description: Must be true. Assigning an occupied zone displaces its sleeper.
+      required: true
+      default: false
+      selector:
+        boolean:
 
 set_device_name:
   target:
@@ -339,4 +346,42 @@ set_device_timezone:
         text:
 
 revert_unique_ids:
-  fields: {}
+  name: Prepare entity ids for a 2.x downgrade
+  description: >-
+    Unload one Orion entry, restore its pre-3.0 entity and config-entry
+    identities, and leave it unloaded. Run this while 3.x is still
+    installed, then install 2.x before restarting Home Assistant.
+  fields:
+    config_entry_id:
+      name: Config entry
+      required: true
+      selector:
+        config_entry:
+          integration: orion_sleep
+    confirm:
+      name: Confirm
+      description: Must be true. The entry remains unloaded for downgrade.
+      required: true
+      default: false
+      selector:
+        boolean:
+
+resume_unique_ids:
+  name: Resume Orion 3.x after downgrade preparation
+  description: >-
+    Cancel recovery mode and load the entry under 3.x again. The forward
+    migration reapplies account-keyed identities after collision checks.
+  fields:
+    config_entry_id:
+      name: Config entry
+      required: true
+      selector:
+        config_entry:
+          integration: orion_sleep
+    confirm:
+      name: Confirm
+      description: Must be true. Account-keyed identities will be restored.
+      required: true
+      default: false
+      selector:
+        boolean:

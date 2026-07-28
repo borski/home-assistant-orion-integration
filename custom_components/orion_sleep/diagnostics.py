@@ -17,6 +17,7 @@ TO_REDACT = {
     "refresh_token",
     "email",
     "phone",
+    "phone_number",
     "auth_value",
     "user_id",
     "session_id",
@@ -60,6 +61,13 @@ TO_REDACT = {
     "partner_refresh_token",
     "partner_auth_value",
     "partner_device_serial",
+    # Internal migration state embeds complete account and device UUIDs
+    # inside longer unique-id strings. UUID-value redaction cannot see
+    # those substrings, so omit the fields as a whole.
+    "_device_ids_v3",
+    "_account_id_v3",
+    "_uid_migration_v3",
+    "_uid_recovery_active_v3",
     # Network PII from the live-device WS payload.
     "ip",
     "mac",

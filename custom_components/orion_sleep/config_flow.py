@@ -26,8 +26,10 @@ from orion_sleep_api import (
 from . import helpers
 from .const import (
     CONF_ACCESS_TOKEN,
+    CONF_ACCOUNT_ID,
     CONF_AUTH_METHOD,
     CONF_AUTH_VALUE,
+    CONF_DEVICE_IDS,
     CONF_DISPLAY_ALIASES,
     CONF_EXPIRES_AT,
     CONF_INSIGHTS_DAYS,
@@ -110,13 +112,13 @@ class OrionSleepConfigFlow(ConfigFlow, domain=DOMAIN):
         own email and phone, so match those against the address the entry
         was set up with.
 
-        Permissive only where the answer is genuinely unknowable: no
-        profile, or a profile carrying neither field. Never permissive
-        because comparing was inconvenient.
+        Identity must be positively established. A timeout after Orion
+        accepts the verification code cannot be treated as permission to
+        replace another account's credentials.
         """
         entry = self._reauth_entry
         if entry is None or not isinstance(profile, dict) or not profile:
-            return True
+            return False
 
         account_id = profile.get("id")
         existing = entry.unique_id
@@ -133,20 +135,21 @@ class OrionSleepConfigFlow(ConfigFlow, domain=DOMAIN):
         }
         known.discard("")
         if not known:
-            return True
+            return False
         return typed in known
 
-    async def _async_account_profile(self, tokens: dict) -> dict | None:
-        """The Orion profile behind the tokens we just received.
+    async def _async_account_identity(
+        self, tokens: dict
+    ) -> tuple[dict, list[str]] | None:
+        """The Orion profile and beds behind newly issued tokens.
 
         The whole profile, not just the id. The reauth check needs the
         email and phone to compare against an entry that predates
         account-keyed unique ids.
 
-        Returns None rather than raising. A profile fetch failing is not
-        a reason to refuse a set of credentials Orion just accepted. The
-        entry keeps the typed-value unique id in that case, which is what
-        every entry created before this shipped already has.
+        Verification proves the code was valid. It does not prove which
+        account issued it. Neither creation nor reauthentication persists
+        tokens until this second request provides a stable account id.
         """
         session = async_get_clientsession(self.hass)
         client = OrionApiClient(
@@ -169,9 +172,23 @@ class OrionSleepConfigFlow(ConfigFlow, domain=DOMAIN):
         )
         try:
             profile = await client.get_current_user()
+            devices = await client.list_devices()
         except (OrionApiError, OrionConnectionError, OrionAuthError):
             return None
-        return profile if isinstance(profile, dict) else None
+        if (
+            not isinstance(profile, dict)
+            or not isinstance(profile.get("id"), str)
+            or not profile["id"]
+        ):
+            return None
+        device_ids = sorted(
+            {
+                str(device["id"])
+                for device in devices
+                if isinstance(device, dict) and device.get("id")
+            }
+        )
+        return profile, device_ids
 
     async def _async_send_code(self, auth_value: str) -> ConfigFlowResult | None:
         """Send verification code. Returns None on success, or a step result with errors."""
@@ -281,14 +298,6 @@ class OrionSleepConfigFlow(ConfigFlow, domain=DOMAIN):
             except OrionApiError:
                 errors["base"] = "unknown"
             else:
-                data = {
-                    CONF_AUTH_METHOD: self._auth_method,
-                    CONF_AUTH_VALUE: self._auth_value,
-                    CONF_ACCESS_TOKEN: tokens["access_token"],
-                    CONF_REFRESH_TOKEN: tokens["refresh_token"],
-                    CONF_EXPIRES_AT: tokens["expires_at"],
-                }
-
                 # Identify the entry by the ACCOUNT, not by the string
                 # that was typed. One Orion account reached by email and
                 # by phone is still one account, and keying on the typed
@@ -296,10 +305,17 @@ class OrionSleepConfigFlow(ConfigFlow, domain=DOMAIN):
                 # WebSockets, and two sets of entities fighting over the
                 # same unique ids. The account id is only knowable here,
                 # after the code has been accepted.
-                profile = await self._async_account_profile(tokens)
-                account_id = (
-                    profile.get("id") if isinstance(profile, dict) else None
-                )
+                identity = await self._async_account_identity(tokens)
+                if identity is None:
+                    errors["base"] = "cannot_connect"
+                    return self.async_show_form(
+                        step_id="verify",
+                        data_schema=vol.Schema({vol.Required("code"): str}),
+                        errors=errors,
+                    )
+                profile, device_ids = identity
+                account_id = profile["id"]
+                from .migrations import overlapping_entry_ids
 
                 if self._reauth_entry:
                     # Reauth was the one door into this flow with no
@@ -313,9 +329,36 @@ class OrionSleepConfigFlow(ConfigFlow, domain=DOMAIN):
                     # error anywhere, because both renames succeed.
                     if not self._async_reauth_account_matches(profile):
                         return self.async_abort(reason="reauth_account_mismatch")
-                elif account_id:
+                    recorded_devices = self._reauth_entry.data.get(CONF_DEVICE_IDS)
+                    if recorded_devices is not None and set(device_ids) != {
+                        str(value) for value in recorded_devices
+                    }:
+                        return self.async_abort(reason="reauth_bed_mismatch")
+                    if overlapping_entry_ids(
+                        self.hass,
+                        self._reauth_entry.entry_id,
+                        set(device_ids),
+                    ):
+                        return self.async_abort(reason="bed_already_configured")
+                else:
                     await self.async_set_unique_id(account_id)
                     self._abort_if_unique_id_configured()
+
+                    if overlapping_entry_ids(self.hass, None, set(device_ids)):
+                        return self.async_abort(reason="bed_already_configured")
+
+                # `_async_account_identity` can rotate an expiry-less token.
+                # Build this only after that call so the fresh refresh token,
+                # not the one the probe just spent, is persisted.
+                data = {
+                    CONF_AUTH_METHOD: self._auth_method,
+                    CONF_AUTH_VALUE: self._auth_value,
+                    CONF_ACCESS_TOKEN: tokens["access_token"],
+                    CONF_REFRESH_TOKEN: tokens["refresh_token"],
+                    CONF_EXPIRES_AT: tokens["expires_at"],
+                    CONF_ACCOUNT_ID: account_id,
+                    CONF_DEVICE_IDS: device_ids,
+                }
 
                 if self._reauth_entry:
                     self.hass.config_entries.async_update_entry(
@@ -658,6 +701,7 @@ class OrionSleepOptionsFlow(OptionsFlow):
                     )
                 )
                 try:
+                    partner_profile = await authenticated_client.get_current_user()
                     partner_devices = util.dedupe_devices_by_id(
                         await authenticated_client.list_devices()
                     )
@@ -666,12 +710,26 @@ class OrionSleepOptionsFlow(OptionsFlow):
                 except (OrionApiError, OrionConnectionError):
                     errors["base"] = "cannot_connect"
                 else:
+                    if not isinstance(partner_profile, dict):
+                        partner_id = None
+                    else:
+                        partner_id = partner_profile.get("id")
+                    if not isinstance(partner_id, str) or not partner_id:
+                        errors["base"] = "cannot_connect"
+                        return self.async_show_form(
+                            step_id="partner_verify",
+                            data_schema=vol.Schema({vol.Required("code"): str}),
+                            errors=errors,
+                        )
                     coordinator = getattr(self._config_entry, "runtime_data", None)
                     primary_devices = getattr(coordinator, "devices", [])
+                    primary_id = getattr(coordinator, "user_id", "")
                     shared_serials = util.shared_device_serials(
                         primary_devices, partner_devices
                     )
-                    if (
+                    if partner_id == primary_id:
+                        errors["base"] = "partner_same_account"
+                    elif (
                         len(primary_devices) != 1
                         or len(partner_devices) != 1
                         or len(shared_serials) != 1

@@ -819,6 +819,7 @@ async def async_setup_entry(
         {
             vol.Required("user_id"): cv.string,
             vol.Required("zone_ids"): vol.All(cv.ensure_list, [cv.string]),
+            vol.Required("confirm"): vol.All(cv.boolean, vol.Equal(True)),
         },
         "async_assign_zones",
     )
@@ -920,16 +921,19 @@ class OrionSensorEntity(OrionBaseEntity, SensorEntity):
         attached here where the timezone is actually known, rather than
         guessed at deeper down.
         """
-        known = {
-            row["session_id"]
-            for row in util.summarize_sessions(self._sessions_insights(), 200)
-        }
-        if session_id not in known:
+        selected = next(
+            (
+                row
+                for row in util.summarize_sessions(self._sessions_insights(), 200)
+                if row["session_id"] == session_id
+            ),
+            None,
+        )
+        if selected is None:
             raise HomeAssistantError(
                 f"No session {session_id} belongs to {self._sessions_owner()}. "
                 "Run orion_sleep.list_sleep_sessions against this entity first."
             )
-
         local = dt_util.DEFAULT_TIME_ZONE
         aware = []
         for value in (fell_asleep, woke_up):
@@ -1004,14 +1008,23 @@ class OrionSensorEntity(OrionBaseEntity, SensorEntity):
         person's own sessions. Unlike delete this is recoverable, so the
         check is about catching a typo rather than preventing loss.
         """
-        known = {
-            row["session_id"]
-            for row in util.summarize_sessions(self._sessions_insights(), 200)
-        }
-        if session_id not in known:
+        selected = next(
+            (
+                row
+                for row in util.summarize_sessions(self._sessions_insights(), 200)
+                if row["session_id"] == session_id
+            ),
+            None,
+        )
+        if selected is None:
             raise HomeAssistantError(
                 f"No session {session_id} belongs to {self._sessions_owner()}. "
                 "Run orion_sleep.list_sleep_sessions against this entity first."
+            )
+        if selected.get("needs_confirmation") is not True:
+            raise HomeAssistantError(
+                "Orion is not asking for manual ownership confirmation on "
+                "that session"
             )
 
         own_id = self._sessions_user_id()
@@ -1022,6 +1035,15 @@ class OrionSensorEntity(OrionBaseEntity, SensorEntity):
 
         user_ids = [own_id]
         if claim == "both":
+            if (
+                not self.coordinator.partner_mapping_valid
+                or not self.coordinator.partner_update_ok
+                or not self.coordinator.has_partner_for_device(self._device_id)
+            ):
+                raise HomeAssistantError(
+                    "Cannot claim a session for both sleepers until the linked "
+                    "partner is verified for this bed"
+                )
             other = self.coordinator.user_id
             partner = (self.coordinator.partner_user or {}).get("id")
             for candidate in (other, partner):
@@ -1665,6 +1687,10 @@ class OrionAccessSensor(OrionBaseEntity, SensorEntity):
         self._attr_unique_id = f"{device_id}_access"
         self._attr_name = "Bed Access"
 
+    def _access_entries(self) -> list[dict]:
+        """Unrecorded access rows used to validate destructive services."""
+        return util.access_entries(self.coordinator.devices, self._device_id)
+
     def _people(self) -> list[dict]:
         """Who has access, named the way this household names people.
 
@@ -1678,7 +1704,7 @@ class OrionAccessSensor(OrionBaseEntity, SensorEntity):
         name, and this ends up in an entity attribute.
         """
         people = []
-        for entry in util.access_entries(self.coordinator.devices, self._device_id):
+        for entry in self._access_entries():
             user_id = entry["user_id"]
             people.append(
                 {
@@ -1811,7 +1837,7 @@ class OrionAccessSensor(OrionBaseEntity, SensorEntity):
         """
         if not confirm:
             raise HomeAssistantError("Set confirm to true to revoke access")
-        known = {p["user_id"] for p in self._people()}
+        known = {entry["user_id"] for entry in self._access_entries()}
         if user_id not in known:
             raise HomeAssistantError(
                 f"{user_id} does not currently have access to this bed. "
@@ -1856,7 +1882,9 @@ class OrionAccessSensor(OrionBaseEntity, SensorEntity):
         await self.coordinator.async_request_refresh()
 
 
-    async def async_assign_zones(self, user_id: str, zone_ids: list[str]) -> None:
+    async def async_assign_zones(
+        self, user_id: str, zone_ids: list[str], confirm: bool
+    ) -> None:
         """Put somebody on one or more zones of this bed.
 
         The app calls this "Replace {name}". It is how a spare-room bed
@@ -1867,7 +1895,11 @@ class OrionAccessSensor(OrionBaseEntity, SensorEntity):
         there. That is deliberate on Orion's side and is what the
         `push_away_behavior` the app always sends governs.
         """
-        known = {p["user_id"] for p in self._people()}
+        if not confirm:
+            raise HomeAssistantError(
+                "Set confirm to true to replace the current zone assignment"
+            )
+        known = {entry["user_id"] for entry in self._access_entries()}
         primary = self.coordinator.user_id
         if primary:
             known.add(primary)

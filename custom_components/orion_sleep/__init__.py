@@ -3,20 +3,31 @@
 from __future__ import annotations
 
 import logging
+from typing import Any
 
-from homeassistant.config_entries import ConfigEntry
+import voluptuous as vol
+from homeassistant.config_entries import ConfigEntry, ConfigEntryState
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant, ServiceCall
+from homeassistant.exceptions import (
+    ConfigEntryError,
+    ConfigEntryNotReady,
+    HomeAssistantError,
+    Unauthorized,
+)
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from orion_sleep_api import OrionApiClient
 
 from .const import (
     CONF_ACCESS_TOKEN,
+    CONF_ACCOUNT_ID,
+    CONF_DEVICE_IDS,
     CONF_EXPIRES_AT,
     CONF_PARTNER_ACCESS_TOKEN,
     CONF_PARTNER_EXPIRES_AT,
     CONF_PARTNER_REFRESH_TOKEN,
     CONF_REFRESH_TOKEN,
+    CONF_UID_RECOVERY_ACTIVE,
     DOMAIN,
 )
 from .coordinator import OrionDataUpdateCoordinator
@@ -24,11 +35,21 @@ from .migrations import (
     async_migrate_entry_identity,
     async_migrate_unique_ids,
     async_revert_unique_ids,
+    entry_identity_conflict,
+    overlapping_entry_ids,
+    unresolved_device_entries,
 )
 
 _LOGGER = logging.getLogger(__name__)
 
 SERVICE_REVERT_UNIQUE_IDS = "revert_unique_ids"
+SERVICE_RESUME_UNIQUE_IDS = "resume_unique_ids"
+SERVICE_REVERT_SCHEMA = vol.Schema(
+    {
+        vol.Required("config_entry_id"): str,
+        vol.Required("confirm"): vol.All(bool, vol.In([True])),
+    }
+)
 
 PLATFORMS: list[Platform] = [
     Platform.BUTTON,
@@ -43,8 +64,19 @@ PLATFORMS: list[Platform] = [
 ]
 
 
+async def async_setup(hass: HomeAssistant, _config: dict[str, Any]) -> bool:
+    """Register recovery independently of any entry's health."""
+    _async_register_recovery_service(hass)
+    return True
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Orion Sleep from a config entry."""
+    if entry.data.get(CONF_UID_RECOVERY_ACTIVE):
+        raise ConfigEntryError(
+            "Orion entity ids were prepared for a downgrade. Install 2.x, or "
+            "clear recovery mode before loading 3.x again"
+        )
     session = async_get_clientsession(hass)
     api_client = OrionApiClient(
         session=session,
@@ -119,16 +151,57 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # succeeded. Nothing would stop those sockets, and they reconnect on
     # a backoff forever with no config entry left to own them. A reauth
     # loop would stack a fresh set on every attempt.
+    platforms_loaded = False
     try:
         await coordinator.async_config_entry_first_refresh()
         entry.runtime_data = coordinator
+        device_ids = sorted(
+            {
+                str(device["id"])
+                for device in coordinator.devices
+                if isinstance(device, dict) and device.get("id")
+            }
+        )
+        identity_data = {
+            CONF_DEVICE_IDS: device_ids,
+            CONF_ACCOUNT_ID: coordinator.user_id,
+        }
+        if any(entry.data.get(key) != value for key, value in identity_data.items()):
+            hass.config_entries.async_update_entry(
+                entry,
+                data={**entry.data, **identity_data},
+            )
+        unresolved = unresolved_device_entries(hass, entry.entry_id)
+        if unresolved:
+            raise ConfigEntryNotReady(
+                "Waiting for every legacy Orion entry to identify its beds before "
+                "any history is migrated"
+            )
+        conflicts = overlapping_entry_ids(hass, entry.entry_id, set(device_ids))
+        if conflicts:
+            raise ConfigEntryError(
+                "Another Orion config entry covers the same bed. Remove the "
+                "duplicate entry before loading either account"
+            )
+        if entry_identity_conflict(hass, entry, coordinator.user_id):
+            raise ConfigEntryError(
+                "Another Orion config entry owns this account. Remove the "
+                "duplicate entry before migrating history"
+            )
         # Must run after the refresh, which is what resolves who the two
         # accounts actually are, and before the platforms build entities
         # against the new scheme. In between is the only correct window.
         async_migrate_unique_ids(hass, entry, coordinator)
         async_migrate_entry_identity(hass, entry, coordinator)
         await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+        platforms_loaded = True
+        # A fresh 3.0 install had no registry rows during the first pass.
+        # Record the rows the platforms just created so downgrade recovery
+        # works immediately rather than only after another restart.
+        async_migrate_unique_ids(hass, entry, coordinator)
     except Exception:
+        if platforms_loaded:
+            await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
         await coordinator.async_shutdown()
         raise
 
@@ -138,8 +211,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # would see the write as a user options change and reload the entry
     # mid-setup.
     entry.async_on_unload(entry.add_update_listener(_async_options_updated))
-
-    _async_register_recovery_service(hass)
 
     return True
 
@@ -184,16 +255,81 @@ def _async_register_recovery_service(hass: HomeAssistant) -> None:
 
     Domain-level and idempotent. Rolling back to 2.x leaves every re-keyed
     entity unavailable with its history stranded on it, because 2.x asks
-    for ids that no longer exist and builds fresh ones instead. Run this
-    before downgrading, or after, to put them back.
+    for ids that no longer exist and builds fresh ones instead. It must run
+    under 3.x before Home Assistant is restarted into 2.x.
     """
-    if hass.services.has_service(DOMAIN, SERVICE_REVERT_UNIQUE_IDS):
-        return
+    async def _admin_entry(call: ServiceCall) -> ConfigEntry:
+        user = (
+            await hass.auth.async_get_user(call.context.user_id)
+            if call.context.user_id
+            else None
+        )
+        if user is None or not user.is_admin:
+            raise Unauthorized(call.context)
 
-    async def _handle(call: ServiceCall) -> None:
-        total = 0
-        for entry in hass.config_entries.async_entries(DOMAIN):
-            total += async_revert_unique_ids(hass, entry)
-        _LOGGER.info("Reverted %d Orion entities to their pre-3.0 ids", total)
+        entry = hass.config_entries.async_get_entry(call.data["config_entry_id"])
+        if entry is None or entry.domain != DOMAIN:
+            raise HomeAssistantError("Orion config entry not found")
+        return entry
 
-    hass.services.async_register(DOMAIN, SERVICE_REVERT_UNIQUE_IDS, _handle)
+    async def _handle_revert(call: ServiceCall) -> None:
+        entry = await _admin_entry(call)
+        # Set the guard before unloading. A pending retry or an update
+        # listener must not start the forward migration between unload and
+        # the reverse registry transaction.
+        hass.config_entries.async_update_entry(
+            entry,
+            data={**entry.data, CONF_UID_RECOVERY_ACTIVE: True},
+        )
+        if entry.state is ConfigEntryState.LOADED:
+            unloaded = await hass.config_entries.async_unload(entry.entry_id)
+            if not unloaded:
+                raise HomeAssistantError("Could not unload Orion before recovery")
+
+        result = async_revert_unique_ids(hass, entry)
+        if not result.complete:
+            raise HomeAssistantError(
+                "Orion recovery is incomplete: "
+                f"{result.remaining} entity mappings remain and "
+                f"config identity restored={result.identity_restored}"
+            )
+        _LOGGER.info(
+            "Reverted %d Orion entities to their pre-3.0 ids. The entry is "
+            "unloaded and ready for downgrade",
+            result.reverted,
+        )
+
+    async def _handle_resume(call: ServiceCall) -> None:
+        entry = await _admin_entry(call)
+        device_ids = {str(value) for value in entry.data.get(CONF_DEVICE_IDS) or []}
+        if overlapping_entry_ids(hass, entry.entry_id, device_ids):
+            raise HomeAssistantError(
+                "Cannot resume Orion 3.x while another entry owns the same bed"
+            )
+        account_id = str(entry.data.get(CONF_ACCOUNT_ID) or "")
+        if account_id and entry_identity_conflict(hass, entry, account_id):
+            raise HomeAssistantError(
+                "Cannot resume Orion 3.x while another entry owns this account"
+            )
+        data = dict(entry.data)
+        data.pop(CONF_UID_RECOVERY_ACTIVE, None)
+        hass.config_entries.async_update_entry(entry, data=data)
+        if entry.state is not ConfigEntryState.LOADED:
+            loaded = await hass.config_entries.async_setup(entry.entry_id)
+            if not loaded:
+                raise HomeAssistantError("Orion could not resume 3.x setup")
+
+    if not hass.services.has_service(DOMAIN, SERVICE_REVERT_UNIQUE_IDS):
+        hass.services.async_register(
+            DOMAIN,
+            SERVICE_REVERT_UNIQUE_IDS,
+            _handle_revert,
+            schema=SERVICE_REVERT_SCHEMA,
+        )
+    if not hass.services.has_service(DOMAIN, SERVICE_RESUME_UNIQUE_IDS):
+        hass.services.async_register(
+            DOMAIN,
+            SERVICE_RESUME_UNIQUE_IDS,
+            _handle_resume,
+            schema=SERVICE_REVERT_SCHEMA,
+        )

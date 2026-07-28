@@ -20,18 +20,172 @@ happily rename the wrong one.
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
+from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import ConfigEntryError
+from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 
 from . import helpers
-from .const import DOMAIN
+from .const import (
+    CONF_AUTH_VALUE,
+    CONF_DEVICE_IDS,
+    CONF_UID_MIGRATION,
+    CONF_UID_RECOVERY_ACTIVE,
+    DOMAIN,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
-# Where the applied old -> new pairs are kept so the rename can be undone.
-UID_MIGRATION_KEY = "_uid_migration_v3"
+# Backward compatible name used by the first recovery implementation.
+UID_MIGRATION_KEY = CONF_UID_MIGRATION
+
+
+@dataclass(frozen=True)
+class RevertResult:
+    """Outcome of one downgrade preparation pass."""
+
+    reverted: int
+    remaining: int
+    identity_restored: bool
+
+    @property
+    def complete(self) -> bool:
+        return self.remaining == 0 and self.identity_restored
+
+
+def overlapping_entry_ids(
+    hass: HomeAssistant, entry_id: str | None, device_ids: set[str]
+) -> set[str]:
+    """Other Orion entries already attached to one of these beds.
+
+    This deliberately does not inspect ``runtime_data``. During startup,
+    the entry that loads first otherwise sees every later entry as empty
+    and wins ownership of the shared registry rows by boot order.
+    """
+    if not device_ids:
+        return set()
+
+    overlapping: set[str] = set()
+    for other in hass.config_entries.async_entries(DOMAIN):
+        if other.entry_id == entry_id:
+            continue
+        recorded = other.data.get(CONF_DEVICE_IDS) or []
+        if device_ids & {str(value) for value in recorded}:
+            overlapping.add(other.entry_id)
+
+    registry = dr.async_get(hass)
+    for device_id in device_ids:
+        device = registry.async_get_device(identifiers={(DOMAIN, device_id)})
+        if device is None:
+            continue
+        for configured in device.config_entries:
+            if configured == entry_id:
+                continue
+            other = hass.config_entries.async_get_entry(configured)
+            if other is not None and other.domain == DOMAIN:
+                overlapping.add(configured)
+    return overlapping
+
+
+def unresolved_device_entries(hass: HomeAssistant, entry_id: str) -> set[str]:
+    """Enabled legacy entries that have not captured their bed set yet."""
+    return {
+        other.entry_id
+        for other in hass.config_entries.async_entries(DOMAIN)
+        if other.entry_id != entry_id
+        and getattr(other, "disabled_by", None) is None
+        and CONF_DEVICE_IDS not in other.data
+    }
+
+
+def entry_identity_conflict(
+    hass: HomeAssistant, entry: ConfigEntry, account_id: str
+) -> bool:
+    """Whether another entry already owns this immutable Orion account."""
+    return any(
+        other.entry_id != entry.entry_id and other.unique_id == account_id
+        for other in hass.config_entries.async_entries(DOMAIN)
+    )
+
+
+def _journal_record(
+    row: Any, old: str, new: str
+) -> dict[str, str]:
+    return {
+        "domain": row.domain,
+        "platform": row.platform,
+        "old": old,
+        "new": new,
+    }
+
+
+def _record_key(record: dict[str, str]) -> tuple[str, str, str]:
+    return record["domain"], record["platform"], record["new"]
+
+
+def _read_journal(entry: ConfigEntry, rows: list[Any]) -> list[dict[str, str]]:
+    """Read the structured journal and upgrade the original pair format."""
+    records: list[dict[str, str]] = []
+    raw = entry.data.get(CONF_UID_MIGRATION) or []
+    for value in raw if isinstance(raw, list) else []:
+        if not isinstance(value, dict):
+            continue
+        record = {
+            key: str(value.get(key) or "")
+            for key in ("domain", "platform", "old", "new")
+        }
+        if all(record.values()) and record["old"] != record["new"]:
+            records.append(record)
+
+    # The first implementation stored [old, new] pairs in user options.
+    # Expand them using the actual registry row before removing that copy.
+    legacy = entry.options.get(CONF_UID_MIGRATION) or []
+    for value in legacy if isinstance(legacy, list) else []:
+        if not isinstance(value, (list, tuple)) or len(value) != 2:
+            continue
+        old, new = str(value[0]), str(value[1])
+        for row in rows:
+            if row.unique_id == new:
+                records.append(_journal_record(row, old, new))
+
+    deduped: dict[tuple[str, str, str], dict[str, str]] = {}
+    for record in records:
+        deduped.setdefault(_record_key(record), record)
+    return list(deduped.values())
+
+
+def _write_journal(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    records: list[dict[str, str]],
+    *,
+    recovery_active: bool | None = None,
+) -> None:
+    """Persist internal recovery state without firing options reloads."""
+    data = dict(entry.data)
+    if records:
+        data[CONF_UID_MIGRATION] = records
+    else:
+        data.pop(CONF_UID_MIGRATION, None)
+    if recovery_active is not None:
+        if recovery_active:
+            data[CONF_UID_RECOVERY_ACTIVE] = True
+        else:
+            data.pop(CONF_UID_RECOVERY_ACTIVE, None)
+
+    options = dict(entry.options)
+    options.pop(CONF_UID_MIGRATION, None)
+    changes: dict[str, Any] = {}
+    if data != entry.data:
+        changes["data"] = data
+    if options != entry.options:
+        changes["options"] = options
+    if changes:
+        hass.config_entries.async_update_entry(entry, **changes)
 
 
 def _person_renames(
@@ -53,7 +207,6 @@ def _planned_renames(entry: ConfigEntry, coordinator) -> list[tuple[str, str]]:
 
     insight_keys = [d.key for d in INSIGHT_SENSOR_DESCRIPTIONS]
     primary = coordinator.user_id
-    partner = (coordinator.partner_user or {}).get("id")
 
     pairs: list[tuple[str, str]] = []
     for device in coordinator.devices:
@@ -71,21 +224,11 @@ def _planned_renames(entry: ConfigEntry, coordinator) -> list[tuple[str, str]]:
             own = insight_keys + ["session_active", "server_in_bed", "current_phase"]
             pairs += _person_renames(device_id, primary, own, "")
 
-        # Same predicate the platforms use. `partner_user` being populated
-        # is not enough: `has_partner_for_device` also needs the serial to
-        # match and (coordinator.py) a single device on the account, so on
-        # a two-bed account no partner entity is ever built. Renaming on
-        # the strength of the profile alone would re-key her entities onto
-        # ids nothing claims, and the legacy ids they could be recovered
-        # from would be gone. This migration is one-way.
-        if partner and coordinator.has_partner_for_device(device_id):
-            # The reason this migration exists. Keyed on the literal role
-            # "partner", replacing the linked account handed the new
-            # person the previous person's entity, and with it their
-            # recorder history and long-term statistics. Sleep scores,
-            # heart rates and apnea counts, attributed to the wrong human.
-            partner_keys = insight_keys + ["session_active"]
-            pairs += _person_renames(device_id, partner, partner_keys, "partner_")
+        # Legacy partner rows do not say which partner owns their history.
+        # If the account was ever replaced, assigning the row to today's
+        # partner would expose the previous person's health data under the
+        # wrong identity. Leave it intact and let the account-keyed entity
+        # start fresh beside it.
 
         # Account-level, and previously keyed on whichever device sorted
         # first. Removing that bed orphaned the entity.
@@ -96,6 +239,27 @@ def _planned_renames(entry: ConfigEntry, coordinator) -> list[tuple[str, str]]:
             )
         )
 
+    return pairs
+
+
+def _partner_recovery_renames(coordinator) -> list[tuple[str, str]]:
+    """How 2.x would name a verified partner created fresh under 3.x.
+
+    These pairs are for downgrade journalling only. They must never drive
+    the forward migration because a pre-3.0 role-keyed row cannot prove
+    which historical partner owns it.
+    """
+    from .sensor import INSIGHT_SENSOR_DESCRIPTIONS
+
+    partner = (coordinator.partner_user or {}).get("id")
+    if not isinstance(partner, str) or not partner:
+        return []
+    keys = [d.key for d in INSIGHT_SENSOR_DESCRIPTIONS] + ["session_active"]
+    pairs: list[tuple[str, str]] = []
+    for device in coordinator.devices:
+        device_id = device.get("id")
+        if device_id and coordinator.has_partner_for_device(device_id):
+            pairs += _person_renames(device_id, partner, keys, "partner_")
     return pairs
 
 
@@ -112,16 +276,11 @@ def async_migrate_entry_identity(
     account_id = coordinator.user_id
     if not account_id or entry.unique_id == account_id:
         return False
-    for other in hass.config_entries.async_entries(DOMAIN):
-        if other.entry_id != entry.entry_id and other.unique_id == account_id:
-            # Two entries sharing a unique_id makes every future
-            # _abort_if_unique_id_configured unreliable, and Home Assistant
-            # currently only logs it.
-            _LOGGER.warning(
-                "Not re-identifying this entry: another entry is already "
-                "configured for the same Orion account"
-            )
-            return False
+    if entry_identity_conflict(hass, entry, account_id):
+        raise ConfigEntryError(
+            "Another Orion entry already owns this account id. Remove the "
+            "duplicate entry before migration"
+        )
     hass.config_entries.async_update_entry(entry, unique_id=account_id)
     _LOGGER.info(
         "Config entry is now identified by its Orion account rather than "
@@ -139,98 +298,96 @@ def async_migrate_unique_ids(
     because the old ids are gone by then. Safe to run before the identity
     is known: nothing is renamed without a user id to rename it onto.
     """
-    # Before 3.0 the duplicate check was on the typed address, so one
-    # household could add two accounts for the same bed and get two
-    # entries. Their device-scoped ids are identical, the registry row is
-    # shared, and which entry owns it is decided by boot order. Migrating
-    # in that state keys one person's entire history to the other and
-    # leaves the loser building a fresh, empty `_2` entity. There is no
-    # safe plan here, so decline and say why.
     device_ids = {d.get("id") for d in coordinator.devices if d.get("id")}
-    for other in hass.config_entries.async_entries(DOMAIN):
-        if other.entry_id == entry.entry_id:
-            continue
-        other_coordinator = getattr(other, "runtime_data", None)
-        other_devices = {
-            d.get("id") for d in getattr(other_coordinator, "devices", []) or []
-        }
-        if device_ids & other_devices:
-            _LOGGER.warning(
-                "Not re-keying Orion entities: another config entry covers the "
-                "same bed, so there is no way to tell whose history is whose. "
-                "Remove the duplicate entry and restart Home Assistant"
-            )
-            return 0
+    if overlapping_entry_ids(hass, entry.entry_id, device_ids):
+        raise ConfigEntryError(
+            "another Orion config entry covers the same bed; refusing to assign "
+            "shared history by startup order"
+        )
 
     registry = er.async_get(hass)
     known = er.async_entries_for_config_entry(registry, entry.entry_id)
-    # Keyed on (domain, unique_id) because that is what Home Assistant
-    # enforces. A sensor and a binary_sensor may legitimately share a
-    # unique_id, and a flat dict would keep one and rename the wrong one.
-    by_unique_id = {(e.domain, e.unique_id): e for e in known}
-
-    # Registry-wide, not entry-local. Home Assistant enforces uniqueness
-    # per (domain, platform) across every config entry, so asking only
-    # what THIS entry owns approves renames it then refuses.
-    owned = {unique_id for _domain, unique_id in by_unique_id}
-    in_use = {
-        e.unique_id
-        for e in registry.entities.values()
-        if e.platform == DOMAIN and e.unique_id not in owned
-    }
-    # unique_id -> the registry row, for the rename itself. The plan works
-    # in unique_ids because that is what the entities are keyed on.
-    rows = {unique_id: row for (_d, unique_id), row in by_unique_id.items()}
-
     planned = _planned_renames(entry, coordinator)
-    applying = helpers.renames_to_apply(planned, owned, in_use)
+    existing_journal = _read_journal(entry, known)
+    journal = {_record_key(record): record for record in existing_journal}
 
-    # Anything planned, present, and NOT applied was declined. Silence
-    # here is how a run that stranded twenty-eight entities on dead ids
-    # still logged "Entity ids and history are unchanged".
-    declined = [
-        rows[old].entity_id
-        for old, _new in planned
-        if old in rows and (old, _new) not in applying
-    ]
-
-    migrated = 0
-    for old, new in applying:
-        entity_id = rows[old].entity_id
-        try:
-            registry.async_update_entity(entity_id, new_unique_id=new)
-        except ValueError:
-            # Belt and braces. The plan above already excludes ids the
-            # registry holds, so reaching this means the registry changed
-            # underneath us. A rename losing a race is not a reason to
-            # fail setup: the entity keeps the id it has, still works,
-            # and the next start tries again.
-            _LOGGER.warning("Could not re-key %s, leaving it as it is", entity_id)
-            declined.append(entity_id)
+    # Registry uniqueness is (domain, platform, unique_id). Work with the
+    # exact row rather than flattening on unique_id, because a sensor and a
+    # binary sensor may legitimately use the same id.
+    occupied = {
+        (row.domain, row.platform, row.unique_id): row.id
+        for row in registry.entities.values()
+    }
+    pending: list[tuple[Any, str, str]] = []
+    seen_sources: set[tuple[str, str, str]] = set()
+    for old, new in planned:
+        if not old or not new or old == new:
             continue
-        migrated += 1
+        for row in known:
+            source = (row.domain, row.platform, old)
+            if row.unique_id == old and source not in seen_sources:
+                pending.append((row, old, new))
+                seen_sources.add(source)
 
-    # The map that makes this a two-way door. Rolling back to 2.x asks the
-    # registry for ids that no longer exist, builds a second entity for
-    # each person, and leaves the original permanently unavailable with
-    # every reading on it. That is the failure this module exists to
-    # prevent, produced by this module in reverse.
-    #
-    # Includes pairs already applied on an earlier start, recognised by
-    # the new id being present while the old one is gone. Without that, an
-    # install that migrated before this recording existed would have no
-    # way back, and neither would one that migrated across two restarts.
-    already = [
-        (old, new)
-        for old, new in planned
-        if new in owned and old not in owned and old != new
-    ]
-    recoverable = [list(pair) for pair in applying] + [list(pair) for pair in already]
-    if recoverable and entry.options.get(UID_MIGRATION_KEY) != recoverable:
-        hass.config_entries.async_update_entry(
-            entry,
-            options={**entry.options, UID_MIGRATION_KEY: recoverable},
-        )
+    declined: list[str] = []
+    migrated = 0
+    while pending:
+        progressed = False
+        deferred: list[tuple[Any, str, str]] = []
+        pending_source_ids = {row.id for row, _old, _new in pending}
+        for row, old, new in pending:
+            target = (row.domain, row.platform, new)
+            holder = occupied.get(target)
+            if holder is not None and holder != row.id:
+                if holder in pending_source_ids:
+                    deferred.append((row, old, new))
+                    continue
+                declined.append(row.entity_id)
+                continue
+            try:
+                registry.async_update_entity(row.entity_id, new_unique_id=new)
+            except ValueError:
+                declined.append(row.entity_id)
+                continue
+            occupied.pop((row.domain, row.platform, old), None)
+            occupied[target] = row.id
+            record = _journal_record(row, old, new)
+            journal.setdefault(_record_key(record), record)
+            migrated += 1
+            progressed = True
+        if not progressed:
+            declined.extend(row.entity_id for row, _old, _new in deferred)
+            break
+        pending = deferred
+
+    # A clean 3.0 install creates the new ids after the first migration
+    # pass. The second pass after platform setup reaches this branch and
+    # records how 2.x would have named each row. Existing installs whose
+    # first migration predated journalling self-heal here too.
+    current = er.async_entries_for_config_entry(registry, entry.entry_id)
+    recovery_planned = planned + _partner_recovery_renames(coordinator)
+    for old, new in recovery_planned:
+        for row in current:
+            if row.unique_id != new:
+                continue
+            key = (row.domain, row.platform, new)
+            old_exists = (row.domain, row.platform, old) in occupied
+            if not old_exists and key not in journal:
+                record = _journal_record(row, old, new)
+                if "_partner_" in old:
+                    # 2.x has one role-keyed partner row. If the partner
+                    # changed entirely within 3.x, only the currently
+                    # verified partner can be represented on downgrade.
+                    for existing_key, existing in list(journal.items()):
+                        if (
+                            existing["domain"] == row.domain
+                            and existing["platform"] == row.platform
+                            and existing["old"] == old
+                        ):
+                            journal.pop(existing_key)
+                journal[key] = record
+
+    _write_journal(hass, entry, list(journal.values()))
 
     if declined:
         _LOGGER.warning(
@@ -239,26 +396,20 @@ def async_migrate_unique_ids(
             len(declined),
             sorted(set(declined)),
         )
+        raise ConfigEntryError(
+            "Orion entity migration was incomplete because registry ids are "
+            "occupied. No platforms were loaded"
+        )
     if migrated:
         _LOGGER.info(
             "Re-keyed %d Orion entities onto their owner's account id. "
             "Entity ids and history are unchanged",
             migrated,
         )
-        if any(old.startswith(tuple(f"{d}_partner_" for d in device_ids)) for old, _ in applying):
-            # The pre-3.0 ids recorded nothing about who owned the row, so
-            # if the partner account was ever replaced, these carry the
-            # PREVIOUS partner's readings. This migration cannot know, and
-            # cementing that silently would be worse than saying so.
-            _LOGGER.warning(
-                "If you have ever used 'Replace partner account', the partner "
-                "entities carry the previous person's sleep history. Delete "
-                "and re-add them to start clean"
-            )
     return migrated
 
 
-def async_revert_unique_ids(hass: HomeAssistant, entry: ConfigEntry) -> int:
+def async_revert_unique_ids(hass: HomeAssistant, entry: ConfigEntry) -> RevertResult:
     """Put every re-keyed entity back on the id it had before 3.0.
 
     For someone rolling back to 2.x, and for anyone who discovers after
@@ -267,37 +418,69 @@ def async_revert_unique_ids(hass: HomeAssistant, entry: ConfigEntry) -> int:
     same ordering rules, so it is as safe as the forward pass and just as
     happy to defer a rename it cannot make yet.
     """
-    recorded = entry.options.get(UID_MIGRATION_KEY) or []
-    pairs = [
-        (str(new), str(old))
-        for old, new in (p for p in recorded if isinstance(p, list | tuple) and len(p) == 2)
-    ]
-    if not pairs:
-        return 0
-
     registry = er.async_get(hass)
     known = er.async_entries_for_config_entry(registry, entry.entry_id)
-    rows = {e.unique_id: e for e in known}
-    owned = set(rows)
-    in_use = {
-        e.unique_id
-        for e in registry.entities.values()
-        if e.platform == DOMAIN and e.unique_id not in owned
-    }
+    recorded = _read_journal(entry, known)
 
     reverted = 0
-    for old, new in helpers.renames_to_apply(pairs, owned, in_use):
+    remaining: list[dict[str, str]] = []
+    for record in recorded:
+        domain = record["domain"]
+        platform = record["platform"]
+        old = record["old"]
+        new = record["new"]
+        source = next(
+            (
+                row
+                for row in er.async_entries_for_config_entry(registry, entry.entry_id)
+                if row.domain == domain
+                and row.platform == platform
+                and row.unique_id == new
+            ),
+            None,
+        )
+        old_row = next(
+            (
+                row
+                for row in registry.entities.values()
+                if row.domain == domain
+                and row.platform == platform
+                and row.unique_id == old
+            ),
+            None,
+        )
+        if source is None:
+            if old_row is not None and old_row.config_entry_id != entry.entry_id:
+                remaining.append(record)
+            continue
+        if old_row is not None and old_row.id != source.id:
+            remaining.append(record)
+            continue
         try:
-            registry.async_update_entity(rows[old].entity_id, new_unique_id=new)
+            registry.async_update_entity(source.entity_id, new_unique_id=old)
         except ValueError:
-            _LOGGER.warning("Could not revert %s", rows[old].entity_id)
+            _LOGGER.warning("Could not revert %s", source.entity_id)
+            remaining.append(record)
             continue
         reverted += 1
 
-    if reverted:
-        hass.config_entries.async_update_entry(
-            entry,
-            options={k: v for k, v in entry.options.items() if k != UID_MIGRATION_KEY},
+    auth_value = str(entry.data.get(CONF_AUTH_VALUE) or "").strip().lower()
+    identity_restored = entry.unique_id == auth_value
+    if not remaining and auth_value and not identity_restored:
+        collision = any(
+            other.entry_id != entry.entry_id and other.unique_id == auth_value
+            for other in hass.config_entries.async_entries(DOMAIN)
         )
+        if not collision:
+            hass.config_entries.async_update_entry(entry, unique_id=auth_value)
+            identity_restored = True
+
+    _write_journal(
+        hass,
+        entry,
+        remaining,
+        recovery_active=True,
+    )
+    if reverted:
         _LOGGER.info("Reverted %d Orion entities to their pre-3.0 ids", reverted)
-    return reverted
+    return RevertResult(reverted, len(remaining), identity_restored)

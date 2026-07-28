@@ -21,6 +21,7 @@ import ast
 import _orion
 
 SENSOR_TREE = _orion.tree("sensor")
+SENSOR_SOURCE = _orion.source("sensor")
 
 # Handlers that must live on the device-level access sensor. These are
 # the ones that were misplaced, plus their siblings, because a service
@@ -106,3 +107,49 @@ def test_the_registration_list_has_not_silently_shrunk():
     handlers = _registered_handlers(SENSOR_TREE)
     assert len(handlers) >= 15, handlers
     assert len(set(handlers)) == len(handlers), "a service is registered twice"
+
+
+def test_destructive_access_handlers_validate_against_unrecorded_rows():
+    methods = {
+        node.name: ast.unparse(node)
+        for node in ast.walk(SENSOR_TREE)
+        if isinstance(node, ast.AsyncFunctionDef)
+    }
+    for name in ("async_remove_user_access", "async_assign_zones"):
+        assert "self._access_entries()" in methods[name]
+        assert "self._people()" not in methods[name]
+
+
+def test_zone_assignment_requires_explicit_confirmation():
+    registration = SENSOR_SOURCE[SENSOR_SOURCE.index("SERVICE_ASSIGN_ZONES,") :]
+    registration = registration[: registration.index("SERVICE_SET_DEVICE_NAME,")]
+    assert 'vol.Required("confirm")' in registration
+    body = next(
+        ast.unparse(node)
+        for node in ast.walk(SENSOR_TREE)
+        if isinstance(node, ast.AsyncFunctionDef)
+        and node.name == "async_assign_zones"
+    )
+    assert "if not confirm" in body
+
+
+def test_session_confirmation_requires_a_vendor_prompt_and_verified_partner():
+    body = next(
+        ast.unparse(node)
+        for node in ast.walk(SENSOR_TREE)
+        if isinstance(node, ast.AsyncFunctionDef)
+        and node.name == "async_confirm_sleep_session"
+    )
+    assert "needs_confirmation" in body and "is not True" in body
+    assert "partner_mapping_valid" in body
+    assert "partner_update_ok" in body
+    assert "has_partner_for_device" in body
+
+
+def test_recovery_guard_is_set_before_the_entry_is_unloaded():
+    source = _orion.source("__init__")
+    handler = source[source.index("async def _handle_revert") :]
+    handler = handler[: handler.index("async def _handle_resume")]
+    assert handler.index("CONF_UID_RECOVERY_ACTIVE: True") < handler.index(
+        "async_unload(entry.entry_id)"
+    )

@@ -513,14 +513,28 @@ Not affiliated with or endorsed by Orion Longevity Inc.
 
 Version 3.0 re-keys every person's entities onto their Orion account id so
 that replacing a linked partner can no longer hand one person's sleep
-history to another. Entity ids, recorder history and dashboards are
-unaffected by the upgrade.
+history to another. Primary-account entity ids, recorder history and
+dashboards are unaffected by the upgrade.
+
+Pre-3.0 partner history is ambiguous because its registry rows record only
+the role `partner`, not the account that produced the readings. Version 3.0
+does not assign those rows to the currently linked partner. It keeps them as
+legacy history and creates fresh account-keyed partner entities. This can
+produce `_2` entity ids for partner sensors until the old rows are renamed or
+removed manually. That inconvenience is deliberate. Guessing would file one
+person's health history under another person's identity.
 
 Rolling back to 2.x is the direction that hurts. 2.x looks for the ids it
 used to write, does not find them, and builds a second set of entities.
 The originals stay in the registry holding all the history, permanently
 unavailable.
 
-Run the `orion_sleep.revert_unique_ids` action before downgrading. It
-replays the recorded rename map backwards and puts everything back. Take a
-Home Assistant backup first regardless.
+While 3.x is still installed, run `orion_sleep.revert_unique_ids` for the
+entry you plan to downgrade and set `confirm` to true. The action unloads
+the entry, restores its entity ids and config entry identity, and leaves it
+unloaded. Install 2.x before restarting Home Assistant. Version 2.x does not
+contain this recovery action. Take a Home Assistant backup first regardless.
+
+If you change your mind before installing 2.x, run
+`orion_sleep.resume_unique_ids` for the same entry with `confirm` set to true.
+It checks account and bed ownership, clears recovery mode, and loads 3.x again.

@@ -8,6 +8,10 @@ CONF_AUTH_VALUE = "auth_value"  # the email address or phone number
 CONF_ACCESS_TOKEN = "access_token"
 CONF_REFRESH_TOKEN = "refresh_token"
 CONF_EXPIRES_AT = "expires_at"  # Unix timestamp
+CONF_ACCOUNT_ID = "_account_id_v3"
+CONF_DEVICE_IDS = "_device_ids_v3"
+CONF_UID_MIGRATION = "_uid_migration_v3"
+CONF_UID_RECOVERY_ACTIVE = "_uid_recovery_active_v3"
 
 # Optional partner account. Tokens live in config entry data. The configured
 # flag lives in options so adding or removing a partner triggers one reload.

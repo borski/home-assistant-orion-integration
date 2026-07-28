@@ -276,6 +276,9 @@ _DELIBERATELY_CLEAR = {
     # Home Assistant's own random local id for the config entry. It
     # identifies the install to itself and says nothing about a person.
     "entry_id",
+    # Local Home Assistant config-entry id accepted by the recovery
+    # service. It identifies this installation, not a vendor account.
+    "config_entry_id",
 }
 
 
@@ -308,6 +311,18 @@ def test_the_excuse_list_does_not_rot():
     """An excused field that is now redacted anyway is a stale excuse."""
     both = _DELIBERATELY_CLEAR & _to_redact()
     assert not both, f"listed as deliberately clear but also redacted: {sorted(both)}"
+
+
+def test_recovery_journal_and_every_phone_spelling_are_redacted():
+    redacted = _to_redact()
+    assert {
+        "phone",
+        "phone_number",
+        "_account_id_v3",
+        "_device_ids_v3",
+        "_uid_migration_v3",
+        "_uid_recovery_active_v3",
+    } <= redacted
 
 
 # ── Whose entity is this ──────────────────────────────────────────────
@@ -570,7 +585,7 @@ class _Entry:
 def _matches(entry, profile):
     """The logic of ConfigFlow._async_reauth_account_matches."""
     if entry is None or not isinstance(profile, dict) or not profile:
-        return True
+        return False
     account_id = profile.get("id")
     existing = entry.unique_id
     typed = (entry.data.get("auth_value") or "").strip().lower()
@@ -582,7 +597,7 @@ def _matches(entry, profile):
     }
     known.discard("")
     if not known:
-        return True
+        return False
     return typed in known
 
 
@@ -607,11 +622,11 @@ def test_a_phone_entry_matches_on_phone():
     assert _matches(phone, {"id": USER_B, "phone": "15555550199"}) is False
 
 
-def test_it_abstains_only_when_the_answer_is_unknowable():
-    """Never permissive because comparing was inconvenient."""
-    assert _matches(LEGACY, None) is True, "no profile"
-    assert _matches(LEGACY, {}) is True, "empty profile"
-    assert _matches(LEGACY, {"id": USER_B}) is True, "profile carries no address"
+def test_reauth_fails_closed_when_identity_is_unknowable():
+    """Accepted credentials are not proof they belong to this entry."""
+    assert _matches(LEGACY, None) is False, "no profile"
+    assert _matches(LEGACY, {}) is False, "empty profile"
+    assert _matches(LEGACY, {"id": USER_B}) is False, "profile carries no address"
 
 
 def test_the_stand_in_matches_the_real_implementation():
@@ -631,6 +646,33 @@ def test_the_stand_in_matches_the_real_implementation():
         "return typed in known",
     ):
         assert marker in body, "stand-in has drifted from config_flow: " + marker
+
+
+def test_rotated_verification_tokens_are_copied_only_after_identity_probe():
+    import pathlib
+
+    src = pathlib.Path("custom_components/orion_sleep/config_flow.py").read_text()
+    body = src[src.index("async def async_step_verify") :]
+    body = body[: body.index("async def async_step_reauth")]
+    assert body.index("identity = await self._async_account_identity(tokens)") < body.index(
+        "data = {"
+    )
+    assert 'CONF_REFRESH_TOKEN: tokens["refresh_token"]' in body
+
+
+def test_reauth_checks_both_account_and_bed_before_persisting_tokens():
+    import pathlib
+
+    src = pathlib.Path("custom_components/orion_sleep/config_flow.py").read_text()
+    body = src[src.index("async def async_step_verify") :]
+    body = body[: body.index("async def async_step_reauth")]
+    persist = body.index("self.hass.config_entries.async_update_entry")
+    for marker in (
+        "_async_reauth_account_matches(profile)",
+        "recorded_devices",
+        "overlapping_entry_ids(",
+    ):
+        assert body.index(marker) < persist
 
 
 # ── Every write into the client is translated ─────────────────────────

@@ -117,6 +117,38 @@ def test_partner_failure_records_state_instead_of_raising():
     assert "partner_update_ok = False" in COORD_SOURCE
 
 
+def test_topology_overlap_is_checked_every_poll_before_ids_are_persisted():
+    update = _orion.function(COORD, "_async_update_data")
+    overlap = next(
+        node
+        for node in ast.walk(update)
+        if isinstance(node, ast.Call)
+        and getattr(node.func, "id", None) == "overlapping_entry_ids"
+    )
+    changed_if = next(
+        node
+        for node in ast.walk(update)
+        if isinstance(node, ast.If)
+        and "refreshed_ids != recorded_ids" in ast.unparse(node.test)
+    )
+    persist = next(
+        node
+        for node in ast.walk(changed_if)
+        if isinstance(node, ast.Call)
+        and getattr(node.func, "attr", None) == "async_update_entry"
+    )
+    assert overlap.lineno < changed_if.lineno < persist.lineno
+
+
+def test_websocket_logs_use_short_ids_and_no_vendor_controlled_metadata():
+    handler = ast.unparse(_orion.function(COORD, "_handle_ws_message"))
+    state = ast.unparse(_orion.function(COORD, "_handle_ws_state"))
+    assert "helpers.short_id(serial)" in handler
+    assert "helpers.short_id(serial)" in state
+    assert "payload.keys" not in handler
+    assert "unexpected event type=%s" not in handler
+
+
 # ── Invariant 3: a transient fetch failure must not blank entities ────
 #
 # `_async_update_data` builds a fresh dict every poll. Initialising a key to

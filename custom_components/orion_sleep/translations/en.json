@@ -39,11 +39,14 @@
       "invalid_code": "Invalid verification code",
       "invalid_auth": "Authentication failed",
       "invalid_phone": "Phone number must include the leading 1 country code and be 11 digits total (e.g. 15551234567).",
+      "partner_same_account": "The partner login belongs to the primary account. Link the other sleeper's Orion account.",
       "unknown": "An unexpected error occurred"
     },
     "abort": {
       "already_configured": "This account is already configured",
+      "bed_already_configured": "Another Orion entry already controls this bed. Remove the duplicate entry before adding this account.",
       "reauth_account_mismatch": "Those credentials are for a different Orion account. Reauthenticate with the account this entry was set up with, or remove the entry and add the other account separately.",
+      "reauth_bed_mismatch": "This account now exposes a different set of Orion beds. The existing entry was left unchanged so its history cannot move to another bed.",
       "reauth_successful": "Re-authentication successful"
     }
   },
@@ -96,6 +99,7 @@
       "invalid_code": "Invalid verification code",
       "invalid_phone": "Phone number must include the leading 1 country code and be 11 digits total.",
       "partner_device_ambiguous": "Partner linking requires both accounts to contain exactly one matching Orion bed.",
+      "partner_same_account": "The partner login belongs to the primary account. Link the other sleeper's Orion account.",
       "unknown": "An unexpected error occurred"
     }
   },
@@ -267,11 +271,15 @@
       "fields": {
         "user_id": {
           "name": "User ID",
-          "description": "From the people attribute on the Bed Access sensor."
+          "description": "From the List access action response."
         },
         "zone_ids": {
           "name": "Zone IDs",
           "description": "A list, usually [zone_a] or [zone_b]."
+        },
+        "confirm": {
+          "name": "Confirm",
+          "description": "Must be on. Assigning an occupied zone displaces its sleeper."
         }
       }
     },
@@ -443,9 +451,32 @@
       }
     },
     "revert_unique_ids": {
-      "name": "Revert entity ids to pre-3.0",
-      "description": "Undo the 3.0 entity re-key. Version 3.0 moved every person's entities onto their Orion account id. Rolling back to 2.x leaves those entities unavailable with all their history stranded, because 2.x looks for ids that no longer exist. Run this before or after downgrading to put them back.",
-      "fields": {}
+      "name": "Prepare entity ids for a 2.x downgrade",
+      "description": "Unload one Orion entry and restore its pre-3.0 entity and config-entry identities. Run this while 3.x is installed, then install 2.x before restarting Home Assistant.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Config entry",
+          "description": "The Orion entry to prepare."
+        },
+        "confirm": {
+          "name": "Confirm",
+          "description": "Must be on. The entry remains unloaded for downgrade."
+        }
+      }
+    },
+    "resume_unique_ids": {
+      "name": "Resume Orion 3.x after downgrade preparation",
+      "description": "Cancel recovery mode and load the entry under 3.x again. The forward migration restores account-keyed identities after collision checks.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Config entry",
+          "description": "The Orion entry to resume."
+        },
+        "confirm": {
+          "name": "Confirm",
+          "description": "Must be on. Account-keyed identities will be restored."
+        }
+      }
     },
     "set_device_name": {
       "name": "Set device name",
