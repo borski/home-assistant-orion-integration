@@ -47,6 +47,7 @@ from custom_components.orion_sleep.const import (
 from tests_ha.conftest import (
     ACCOUNT,
     BED_A,
+    ENTRY,
     PARTNER,
     SERIAL_A,
     FakeClient,
@@ -132,7 +133,7 @@ def partner_record(user_id: str, key: str = "sleep_score") -> dict[str, Any]:
         "domain": "sensor",
         "platform": DOMAIN,
         "old": f"{BED_A}_partner_{key}",
-        "new": f"{BED_A}_user_{user_id}_{key}",
+        "new": f"{ENTRY}_user_{user_id}_{key}",
         "role": "partner",
     }
 

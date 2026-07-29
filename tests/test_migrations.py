@@ -40,6 +40,9 @@ DOMAIN = "orion_sleep"
 ACCOUNT = "11111111-1111-4111-8111-111111111111"
 PARTNER = "22222222-2222-4222-8222-222222222222"
 DEVICE = "bed-1"
+# The config entry now owns the identity of every account-scoped entity,
+# so the expected ids below are keyed on it rather than on a bed.
+ENTRY = "entry-1"
 BED_A = "bed-aaa"
 BED_B = "bed-bbb"
 
@@ -241,7 +244,7 @@ def test_device_registry_owners_from_other_domains_are_ignored(migrations):
 
 
 def test_fresh_v3_rows_are_journalled_without_waiting_for_a_restart(migrations):
-    new = f"{DEVICE}_user_{ACCOUNT}_sleep_score"
+    new = f"{ENTRY}_user_{ACCOUNT}_sleep_score"
     row = Row("sensor.sleep_score", "sensor", new)
     entry = Entry(data={"auth_value": "alice@example.com", "_device_ids_v3": [DEVICE]})
     hass = Hass([entry], EntityRegistry([row]))
@@ -269,11 +272,11 @@ def test_a_partner_record_is_distrusted_once_that_partner_is_unverifiable(migrat
     withholding the data. `async_revert_unique_ids` refuses on the flag.
     """
     old = f"{DEVICE}_sleep_score"
-    new = f"{DEVICE}_user_{ACCOUNT}_sleep_score"
+    new = f"{ENTRY}_user_{ACCOUNT}_sleep_score"
     partner_record = record(
         "sensor",
         f"{DEVICE}_partner_sleep_score",
-        f"{DEVICE}_user_{PARTNER}_sleep_score",
+        f"{ENTRY}_user_{PARTNER}_sleep_score",
         role="partner",
     )
     row = Row("sensor.sleep_score", "sensor", old)
@@ -310,7 +313,7 @@ def test_a_legacy_partner_record_without_a_role_is_still_recognised(migrations):
         "domain": "sensor",
         "platform": DOMAIN,
         "old": f"{DEVICE}_partner_sleep_score",
-        "new": f"{DEVICE}_user_{PARTNER}_sleep_score",
+        "new": f"{ENTRY}_user_{PARTNER}_sleep_score",
     }
     entry = Entry(
         data={
@@ -328,8 +331,8 @@ def test_a_legacy_partner_record_without_a_role_is_still_recognised(migrations):
 
 
 def test_partial_revert_keeps_only_the_mapping_that_failed(migrations):
-    new_one = f"{DEVICE}_user_{ACCOUNT}_sleep_score"
-    new_two = f"{DEVICE}_user_{ACCOUNT}_session_active"
+    new_one = f"{ENTRY}_user_{ACCOUNT}_sleep_score"
+    new_two = f"{ENTRY}_user_{ACCOUNT}_session_active"
     old_one = f"{DEVICE}_sleep_score"
     old_two = f"{DEVICE}_session_active"
     records = [
@@ -360,7 +363,7 @@ def test_partial_revert_keeps_only_the_mapping_that_failed(migrations):
 
 def test_complete_revert_restores_the_2x_config_entry_identity(migrations):
     old = f"{DEVICE}_sleep_score"
-    new = f"{DEVICE}_user_{ACCOUNT}_sleep_score"
+    new = f"{ENTRY}_user_{ACCOUNT}_sleep_score"
     entry = Entry(
         data={
             "auth_value": "Alice@Example.com",
@@ -380,7 +383,7 @@ def test_complete_revert_restores_the_2x_config_entry_identity(migrations):
 
 def test_deleted_entity_does_not_block_downgrade_forever(migrations):
     old = f"{DEVICE}_sleep_score"
-    new = f"{DEVICE}_user_{ACCOUNT}_sleep_score"
+    new = f"{ENTRY}_user_{ACCOUNT}_sleep_score"
     entry = Entry(
         data={
             "auth_value": "alice@example.com",
@@ -404,7 +407,7 @@ def test_a_foreign_owner_of_a_legacy_id_does_not_block_recovery(migrations):
     this entry can fix by trying again.
     """
     old = f"{DEVICE}_sleep_score"
-    new_id = f"{DEVICE}_user_{ACCOUNT}_sleep_score"
+    new_id = f"{ENTRY}_user_{ACCOUNT}_sleep_score"
     entry = Entry(
         data={
             "auth_value": "alice@example.com",
@@ -429,7 +432,7 @@ def test_account_identity_collision_is_fatal(migrations):
 
 def test_declined_entity_rename_aborts_before_platform_setup(migrations):
     old = f"{DEVICE}_sleep_score"
-    new = f"{DEVICE}_user_{ACCOUNT}_sleep_score"
+    new = f"{ENTRY}_user_{ACCOUNT}_sleep_score"
     entry = Entry(data={"auth_value": "alice@example.com", "_device_ids_v3": [DEVICE]})
     source = Row("sensor.source", "sensor", old)
     blocker = Row("sensor.blocker", "sensor", new, config_entry_id="other")
@@ -456,7 +459,7 @@ def test_ambiguous_legacy_partner_history_is_never_auto_assigned(migrations):
 
 def test_fresh_v3_partner_row_is_still_recoverable_for_downgrade(migrations):
     old = f"{DEVICE}_partner_sleep_score"
-    new = f"{DEVICE}_user_{PARTNER}_sleep_score"
+    new = f"{ENTRY}_user_{PARTNER}_sleep_score"
     row = Row("sensor.partner_score", "sensor", new)
     entry = Entry(data={"auth_value": "alice@example.com", "_device_ids_v3": [DEVICE]})
     hass = Hass([entry], EntityRegistry([row]))
@@ -476,7 +479,7 @@ def test_fresh_v3_partner_row_is_still_recoverable_for_downgrade(migrations):
 
 def test_original_pair_journal_is_upgraded_out_of_options(migrations):
     old = f"{DEVICE}_sleep_score"
-    new = f"{DEVICE}_user_{ACCOUNT}_sleep_score"
+    new = f"{ENTRY}_user_{ACCOUNT}_sleep_score"
     entry = Entry(
         data={"auth_value": "alice@example.com"},
         options={"_uid_migration_v3": [[old, new]], "scan_interval": 600},
@@ -562,7 +565,7 @@ def test_a_legacy_options_partner_pair_is_still_recognised(migrations):
     would arrive as "primary" with no flag and would be reverted.
     """
     old = f"{DEVICE}_partner_sleep_score"
-    new = f"{DEVICE}_user_{PARTNER}_sleep_score"
+    new = f"{ENTRY}_user_{PARTNER}_sleep_score"
     row = Row("sensor.partner_score", "sensor", new)
     entry = Entry(
         data={"auth_value": "a@b.c", "_device_ids_v3": [DEVICE]},
@@ -683,7 +686,7 @@ def test_the_partner_plan_covers_the_same_keys_plus_the_session_flag(migrations)
     coordinator.partner_user = {"id": PARTNER}
     coordinator.has_partner_for_device = lambda _device_id: True
 
-    planned = migrations._partner_recovery_renames(coordinator)
+    planned = migrations._partner_recovery_renames(Entry(), coordinator)
     assert planned, "no partner renames planned for a verified partner"
     covered = {
         key for key in expected if any(new.endswith(f"_{key}") for _old, new in planned)

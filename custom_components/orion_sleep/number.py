@@ -61,17 +61,22 @@ async def async_setup_entry(
     coordinator: OrionDataUpdateCoordinator = entry.runtime_data
     entities: list[NumberEntity] = []
 
-    for device in coordinator.devices:
-        device_id = device.get("id")
-        if not device_id:
-            continue
+    # The overnight temperature curve is stored on the schedule row, so it
+    # is per person and per account rather than per bed. See `time.py`.
+    account_device_id = coordinator.account_device_id()
+    if account_device_id:
         for user_id in coordinator.schedule_user_ids():
             for key, label, icon, field in OFFSET_NUMBER_DEFS:
                 entities.append(
                     OrionTempOffsetNumber(
-                        coordinator, device_id, key, label, icon, field, user_id
+                        coordinator, account_device_id, key, label, icon, field, user_id
                     )
                 )
+
+    for device in coordinator.devices:
+        device_id = device.get("id")
+        if not device_id:
+            continue
         for zone_id in coordinator.device_zone_ids(device_id):
             entities.append(
                 OrionRapidCoolDurationNumber(coordinator, device_id, zone_id)
@@ -115,7 +120,9 @@ class OrionTempOffsetNumber(OrionBaseEntity, NumberEntity):
         super().__init__(coordinator, device_id)
         self._user_id = user_id
         self._schedule_field = schedule_field
-        self._attr_unique_id = helpers.schedule_unique_id(device_id, key, user_id)
+        self._attr_unique_id = helpers.account_schedule_unique_id(
+            coordinator.config_entry.entry_id, key, user_id
+        )
         self._attr_icon = icon
         self._attr_name = f"{coordinator.display_name_for_user(user_id)} {label}"
 

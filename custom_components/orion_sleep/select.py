@@ -49,10 +49,13 @@ async def async_setup_entry(
     # whichever device happened to sort first meant removing that bed, or
     # the server returning them in a different order, silently minted a
     # replacement entity and orphaned the history of the old one.
-    # Sorted, matching `migrations._planned_renames`. The two have to
-    # agree about which bed is "first" or a reordered vendor response
-    # re-parents this entity to the other bed across a restart.
-    first = min((d["id"] for d in coordinator.devices if d.get("id")), default=None)
+    #
+    # `coordinator.account_device_id` is now the single definition of
+    # which bed that is, shared with every other account-scoped platform
+    # and with `migrations._planned_renames`. This used to be a local
+    # `min(...)` with a comment asking the migration to agree with it,
+    # which is the arrangement that drifts.
+    first = coordinator.account_device_id()
     if first:
         entities.append(
             OrionTemperatureDisplaySelect(coordinator, first, entry.entry_id)

@@ -51,6 +51,7 @@ from custom_components.orion_sleep.const import (
 from tests_ha.conftest import (
     ACCOUNT,
     BED_A,
+    ENTRY,
     PARTNER,
     SERIAL_A,
     FakeClient,
@@ -183,12 +184,12 @@ def options_journal(entry) -> list[Any]:
 
 def partner_pair(user_id: str = PARTNER, key: str = "efficiency") -> list[str]:
     """A partner rename in the original `[old, new]` options format."""
-    return [f"{BED_A}_partner_{key}", f"{BED_A}_user_{user_id}_{key}"]
+    return [f"{BED_A}_partner_{key}", f"{ENTRY}_user_{user_id}_{key}"]
 
 
 def primary_pair(key: str = "efficiency") -> list[str]:
     """A primary rename in the original `[old, new]` options format."""
-    return [f"{BED_A}_{key}", f"{BED_A}_user_{ACCOUNT}_{key}"]
+    return [f"{BED_A}_{key}", f"{ENTRY}_user_{ACCOUNT}_{key}"]
 
 
 # ── Replacing a partner, end to end ───────────────────────────────────

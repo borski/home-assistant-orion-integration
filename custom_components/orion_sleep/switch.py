@@ -42,6 +42,26 @@ async def async_setup_entry(
     coordinator: OrionDataUpdateCoordinator = entry.runtime_data
     entities: list[SwitchEntity] = []
 
+    # Schedule flags live on the account's schedule row, and away mode is
+    # a single value on `/v1/sleep-configurations`. Neither is per bed.
+    #
+    # Away mode used to be suppressed entirely on a multi-bed account
+    # rather than built once, because the only way to build it was inside
+    # the per-device loop and that produced one switch per bed for one
+    # setting. Now that account-scoped entities have somewhere to live,
+    # the household gets the control instead of a warning telling them
+    # why they cannot have it.
+    account_device_id = coordinator.account_device_id()
+    if account_device_id:
+        for user_id in coordinator.schedule_user_ids():
+            for field, label, icon in _SCHEDULE_FLAGS:
+                entities.append(
+                    OrionScheduleFlagSwitch(
+                        coordinator, account_device_id, user_id, field, label, icon
+                    )
+                )
+        entities.append(OrionAwayModeSwitch(coordinator, account_device_id))
+
     for device in coordinator.devices:
         device_id = device.get("id")
         if not device_id:
@@ -50,20 +70,6 @@ async def async_setup_entry(
         entities.append(OrionQuietModeSwitch(coordinator, device_id))
         for zone_id in coordinator.device_zone_ids(device_id):
             entities.append(OrionRapidCoolSwitch(coordinator, device_id, zone_id))
-        for user_id in coordinator.schedule_user_ids():
-            for field, label, icon in _SCHEDULE_FLAGS:
-                entities.append(
-                    OrionScheduleFlagSwitch(
-                        coordinator, device_id, user_id, field, label, icon
-                    )
-                )
-        if len(coordinator.devices) == 1:
-            entities.append(OrionAwayModeSwitch(coordinator, device_id))
-
-    if len(coordinator.devices) > 1:
-        _LOGGER.warning(
-            "Away Mode is unavailable because the Orion account has multiple devices"
-        )
 
     async_add_entities(entities)
 
@@ -160,7 +166,9 @@ class OrionAwayModeSwitch(OrionBaseEntity, SwitchEntity):
         device_id: str,
     ) -> None:
         super().__init__(coordinator, device_id)
-        self._attr_unique_id = f"{device_id}_away_mode"
+        self._attr_unique_id = helpers.account_unique_id(
+            coordinator.config_entry.entry_id, "away_mode"
+        )
 
     @property
     def is_on(self) -> bool | None:
@@ -383,7 +391,9 @@ class OrionScheduleFlagSwitch(OrionBaseEntity, SwitchEntity):
         super().__init__(coordinator, device_id)
         self._user_id = user_id
         self._field = field
-        self._attr_unique_id = helpers.schedule_unique_id(device_id, field, user_id)
+        self._attr_unique_id = helpers.account_schedule_unique_id(
+            coordinator.config_entry.entry_id, field, user_id
+        )
         self._attr_icon = icon
         self._attr_name = f"{coordinator.display_name_for_user(user_id)} {label}"
 

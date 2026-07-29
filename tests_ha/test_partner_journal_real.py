@@ -63,6 +63,7 @@ from custom_components.orion_sleep.migrations import evict_partner_journal
 from tests_ha.conftest import (
     ACCOUNT,
     BED_A,
+    ENTRY,
     PARTNER,
     SERIAL_A,
     FakeClient,
@@ -108,7 +109,7 @@ def partner_record(user_id: str = PARTNER, key: str = "sleep_score") -> dict[str
         "domain": "sensor",
         "platform": DOMAIN,
         "old": f"{BED_A}_partner_{key}",
-        "new": f"{BED_A}_user_{user_id}_{key}",
+        "new": f"{ENTRY}_user_{user_id}_{key}",
         "role": "partner",
     }
 
@@ -119,7 +120,7 @@ def role_less_partner_record(key: str = "sleep_latency") -> dict[str, str]:
         "domain": "sensor",
         "platform": DOMAIN,
         "old": f"{BED_A}_partner_{key}",
-        "new": f"{BED_A}_user_{PARTNER}_{key}",
+        "new": f"{ENTRY}_user_{PARTNER}_{key}",
     }
 
 
@@ -134,7 +135,7 @@ def empty_role_partner_record(key: str = "breath_rate") -> dict[str, str]:
         "domain": "sensor",
         "platform": DOMAIN,
         "old": f"{BED_A}_partner_{key}",
-        "new": f"{BED_A}_user_{PARTNER}_{key}",
+        "new": f"{ENTRY}_user_{PARTNER}_{key}",
         "role": "",
     }
 
@@ -145,19 +146,19 @@ def primary_record(key: str = "sleep_score") -> dict[str, str]:
         "domain": "sensor",
         "platform": DOMAIN,
         "old": f"{BED_A}_{key}",
-        "new": f"{BED_A}_user_{ACCOUNT}_{key}",
+        "new": f"{ENTRY}_user_{ACCOUNT}_{key}",
         "role": "primary",
     }
 
 
 def partner_pair(user_id: str = PARTNER, key: str = "efficiency") -> list[str]:
     """A partner rename in the original `[old, new]` options format."""
-    return [f"{BED_A}_partner_{key}", f"{BED_A}_user_{user_id}_{key}"]
+    return [f"{BED_A}_partner_{key}", f"{ENTRY}_user_{user_id}_{key}"]
 
 
 def primary_pair(key: str = "efficiency") -> list[str]:
     """A primary rename in the original `[old, new]` options format."""
-    return [f"{BED_A}_{key}", f"{BED_A}_user_{ACCOUNT}_{key}"]
+    return [f"{BED_A}_{key}", f"{ENTRY}_user_{ACCOUNT}_{key}"]
 
 
 def naive_explicit_role(record: dict[str, Any]) -> bool:

@@ -668,14 +668,31 @@ def _write_journal(
         hass.config_entries.async_update_entry(entry, **changes)
 
 
+# Single values on the account, not per bed and not per sleeper, and all
+# three were built inside the per-device loop at some point. Only one row
+# can move onto the account-keyed id; the surplus copies are redundant
+# views of the same value and are left where they are.
+_ACCOUNT_LEVEL_KEYS: tuple[str, ...] = (
+    "temperature_display_unit",
+    "zone_split_mode",
+    "away_mode",
+)
+
+
 def _person_renames(
-    device_id: str, user_id: str, keys: list[str], legacy_prefix: str
+    entry_id: str, device_id: str, user_id: str, keys: list[str], legacy_prefix: str
 ) -> list[tuple[str, str]]:
-    """Old to new ids for one person on one bed."""
+    """2.x ids to account-scoped ids for one person.
+
+    `device_id` still appears on the LEFT because that is where 2.x put
+    it. It is deliberately absent from the right: every key routed
+    through here reads an account-wide response, so the entity belongs to
+    the person and the entry rather than to a bed.
+    """
     return [
         (
             f"{device_id}_{legacy_prefix}{key}",
-            helpers.person_unique_id(device_id, key, user_id, legacy=""),
+            helpers.account_person_unique_id(entry_id, key, user_id, legacy=""),
         )
         for key in keys
     ]
@@ -693,14 +710,20 @@ def _planned_renames(entry: ConfigEntry, coordinator) -> list[tuple[str, str]]:
             continue
 
         if primary:
-            # These three read the AUTHENTICATED user's session, so they
-            # were always one person's readings, not the bed's. They are
-            # still built inside the per-device loop, so a second bed
-            # would still duplicate them. Keying them on the person is
-            # the half of that fix which does not need a device to test
-            # against, and the naming no longer lies about whose they are.
+            # These read the AUTHENTICATED user's account-wide session, so
+            # they were never the bed's. 3.0 keyed them on the person and
+            # left the device prefix in place, which was described here as
+            # "the half of that fix which does not need a device to test
+            # against". This is the other half.
+            #
+            # The device prefix was not cosmetic. These entities were built
+            # inside the per-device loop, so a two-bed account got two
+            # sleep scores, two HRVs and two apnea counts, each reading the
+            # same account-wide response. A night slept in one bed was
+            # recorded against both, which is a biometric attribution
+            # error rather than clutter.
             own = insight_keys + ["session_active", "server_in_bed", "current_phase"]
-            pairs += _person_renames(device_id, primary, own, "")
+            pairs += _person_renames(entry.entry_id, device_id, primary, own, "")
 
         # Legacy partner rows do not say which partner owns their history.
         # If the account was ever replaced, assigning the row to today's
@@ -723,17 +746,57 @@ def _planned_renames(entry: ConfigEntry, coordinator) -> list[tuple[str, str]]:
     # the same ordering dependency `select.py` documents escaping from.
     device_ids = sorted(str(d["id"]) for d in coordinator.devices if d.get("id"))
     if device_ids:
-        pairs.append(
+        pairs += [
             (
-                f"{device_ids[0]}_temperature_display_unit",
-                f"{entry.entry_id}_temperature_display_unit",
+                f"{device_ids[0]}_{key}",
+                helpers.account_unique_id(entry.entry_id, key),
             )
-        )
+            for key in _ACCOUNT_LEVEL_KEYS
+        ]
 
     return pairs
 
 
-def _partner_recovery_renames(coordinator) -> list[tuple[str, str]]:
+def _account_rekey_pairs(
+    entry: ConfigEntry, coordinator, known: list[Any]
+) -> list[tuple[Any, str, str]]:
+    """Rows still on 3.0's `{device}_user_{user}_{key}`, and where they go.
+
+    The 3.0 migration moved account-wide entities onto the person and
+    left the bed in the prefix, which it documented as half a fix. This
+    completes it, so the second half has to find rows that already made
+    the first hop.
+
+    Derived from the ROWS rather than from an enumerated key list, and
+    that is the important property. The account-scoped families are
+    spread across six platforms and keep growing, so any list written
+    here would be a list to forget to update, and a schedule entity left
+    behind on a bed-prefixed id is exactly the duplicate this is removing.
+
+    Safe as a prefix match because `_user_` is only ever produced by
+    `person_unique_id` and `schedule_unique_id`, and every entity built
+    through either reads an account-wide response. The device id on the
+    left is matched exactly against this entry's own beds rather than
+    pattern-guessed, so this is not the loose `_partner_` style matching
+    the module docstring warns about.
+    """
+    device_ids = sorted(str(d["id"]) for d in coordinator.devices if d.get("id"))
+    pairs: list[tuple[Any, str, str]] = []
+    for row in known:
+        for device_id in device_ids:
+            prefix = f"{device_id}_user_"
+            if not row.unique_id.startswith(prefix):
+                continue
+            # Everything from `user_` onwards is preserved verbatim, so
+            # the person and the key survive untouched and only the bed
+            # is dropped.
+            suffix = row.unique_id[len(device_id) + 1 :]
+            pairs.append((row, row.unique_id, f"{entry.entry_id}_{suffix}"))
+            break
+    return pairs
+
+
+def _partner_recovery_renames(entry: ConfigEntry, coordinator) -> list[tuple[str, str]]:
     """How 2.x would name a verified partner created fresh under 3.x.
 
     These pairs are for downgrade journalling only. They must never drive
@@ -779,10 +842,23 @@ def _partner_recovery_renames(coordinator) -> list[tuple[str, str]]:
         return []
     keys = [d.key for d in INSIGHT_SENSOR_DESCRIPTIONS] + ["session_active"]
     pairs: list[tuple[str, str]] = []
+    seen: set[str] = set()
     for device in coordinator.devices:
         device_id = device.get("id")
         if device_id and coordinator.has_partner_for_device(device_id):
-            pairs += _person_renames(device_id, partner, keys, "partner_")
+            for old, new in _person_renames(
+                entry.entry_id, device_id, partner, keys, "partner_"
+            ):
+                # Deduped on the TARGET, which only became possible to
+                # collide once the target stopped carrying the device id.
+                # `has_partner_for_device` already requires a single bed,
+                # so this cannot fire today. It is here because a pair
+                # list with two routes onto one id is the shape that makes
+                # a revert rename half a household and then refuse.
+                if new in seen:
+                    continue
+                seen.add(new)
+                pairs.append((old, new))
     return pairs
 
 
@@ -943,11 +1019,50 @@ def async_migrate_unique_ids(
     # wrong entity, taking its history with it.
     holder_entity_ids = {row.id: row.entity_id for row in registry.entities.values()}
     owned_row_ids = {row.id for row in known}
-    # Named, not pattern-matched. The account-level select is the only
-    # entity 2.x built once per device for a single account value, so it is
-    # the only target where a surplus row of ours is expected rather than a
-    # conflict worth refusing.
-    surplus_ok = {f"{entry.entry_id}_temperature_display_unit"}
+    # Named, not pattern-matched. These are the entities built once per
+    # device for a single ACCOUNT value, so they are the only targets
+    # where a surplus row of ours is expected rather than a conflict
+    # worth refusing.
+    surplus_ok = {
+        helpers.account_unique_id(entry.entry_id, key) for key in _ACCOUNT_LEVEL_KEYS
+    }
+
+    # The 3.0 to 3.1 hop, applied BEFORE the 2.x plan below so the targets
+    # it needs are free.
+    #
+    # The journal is rewritten in place rather than appended to. Its
+    # records exist to name a 2.x id for every row, and a downgrade has to
+    # be one hop: if this wrote a second record saying "3.1 came from 3.0"
+    # the revert would have to walk backwards through both, and a
+    # two-generation journal is documented below as the one registry shape
+    # revert cannot resolve. Rewriting `new` and leaving `old` alone keeps
+    # every record pointing at the id 2.x actually asks for.
+    rekeyed = 0
+    for row, old, new in _account_rekey_pairs(entry, coordinator, known):
+        target = (row.domain, row.platform, new)
+        holder = occupied.get(target)
+        if holder is not None and holder != row.id:
+            # A surplus copy from a second bed. The winner already moved,
+            # so this one keeps its bed-prefixed id and stops being read.
+            continue
+        try:
+            registry.async_update_entity(row.entity_id, new_unique_id=new)
+        except ValueError:
+            _LOGGER.debug(
+                "Could not move %s off its per-bed id; it keeps %s",
+                row.entity_id,
+                old,
+            )
+            continue
+        source_key = (row.domain, row.platform, old)
+        occupied.pop(source_key, None)
+        occupied[target] = row.id
+        record = journal.pop(source_key, None)
+        if record is not None:
+            record["new"] = new
+            journal[target] = record
+        rekeyed += 1
+
     pending: list[tuple[Any, str, str]] = []
     seen_sources: set[tuple[str, str, str]] = set()
     for old, new in planned:
@@ -960,7 +1075,7 @@ def async_migrate_unique_ids(
                 seen_sources.add(source)
 
     declined: list[tuple[str, str]] = []
-    migrated = 0
+    migrated = rekeyed
     while pending:
         progressed = False
         deferred: list[tuple[Any, str, str]] = []
@@ -1029,7 +1144,7 @@ def async_migrate_unique_ids(
     # records how 2.x would have named each row. Existing installs whose
     # first migration predated journalling self-heal here too.
     current = er.async_entries_for_config_entry(registry, entry.entry_id)
-    partner_planned = _partner_recovery_renames(coordinator)
+    partner_planned = _partner_recovery_renames(entry, coordinator)
 
     _reconcile_partner_journal(journal, partner_planned, coordinator)
 

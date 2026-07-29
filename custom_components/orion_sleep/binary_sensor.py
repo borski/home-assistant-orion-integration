@@ -38,11 +38,14 @@ async def async_setup_entry(
     coordinator: OrionDataUpdateCoordinator = entry.runtime_data
     entities: list[BinarySensorEntity] = []
 
-    for device in coordinator.devices:
-        device_id = device.get("id")
-        if not device_id:
-            continue
-        entities.append(OrionSessionActiveBinarySensor(coordinator, device_id))
+    # Account-scoped, so built ONCE. Session state comes from the
+    # account-wide insights response and the schedule flags come from
+    # `/v1/sleep-schedules`, which is keyed on user id with no device in
+    # it, so a per-bed copy was a second view of one value.
+    account_device_id = coordinator.account_device_id()
+    if account_device_id:
+        entities.append(OrionSessionActiveBinarySensor(coordinator, account_device_id))
+        entities.append(OrionServerOccupancyBinarySensor(coordinator, account_device_id))
         # CONFIGURED, not verified. Same split, same reasoning, as the
         # partner insight sensors in `sensor.py`. Gating CONSTRUCTION on the
         # trust predicate meant one failed partner fetch at cold start
@@ -51,8 +54,21 @@ async def async_setup_entry(
         # reload. `OrionPartnerSessionActiveBinarySensor.available` still
         # requires `has_partner_for_device`, so an unverified partner gets
         # an entity that exists and reports `unavailable`.
-        if coordinator.has_partner_configured_for_device(device_id):
-            entities.append(OrionPartnerSessionActiveBinarySensor(coordinator, device_id))
+        if coordinator.has_partner_configured_for_device(account_device_id):
+            entities.append(
+                OrionPartnerSessionActiveBinarySensor(coordinator, account_device_id)
+            )
+        for user_id in coordinator.schedule_user_ids():
+            entities.append(
+                OrionScheduleOverrideBinarySensor(
+                    coordinator, account_device_id, user_id
+                )
+            )
+
+    for device in coordinator.devices:
+        device_id = device.get("id")
+        if not device_id:
+            continue
         for sensor_name in _TOPPER_SENSORS:
             entities.append(OrionSensorOnBedBinarySensor(coordinator, device_id, sensor_name))
         for zone_id in coordinator.device_zone_ids(device_id):
@@ -61,11 +77,6 @@ async def async_setup_entry(
             )
         entities.append(OrionDeviceOnlineBinarySensor(coordinator, device_id))
         entities.append(OrionSafetyProblemBinarySensor(coordinator, device_id))
-        entities.append(OrionServerOccupancyBinarySensor(coordinator, device_id))
-        for user_id in coordinator.schedule_user_ids():
-            entities.append(
-                OrionScheduleOverrideBinarySensor(coordinator, device_id, user_id)
-            )
 
     async_add_entities(entities)
 
@@ -94,8 +105,8 @@ class OrionSessionActiveBinarySensor(OrionBaseEntity, BinarySensorEntity):
         device_id: str,
     ) -> None:
         super().__init__(coordinator, device_id)
-        self._attr_unique_id = helpers.person_unique_id(
-            device_id,
+        self._attr_unique_id = helpers.account_person_unique_id(
+            coordinator.config_entry.entry_id,
             "session_active",
             coordinator.user_id,
             legacy=f"{device_id}_session_active",
@@ -128,8 +139,8 @@ class OrionPartnerSessionActiveBinarySensor(OrionSessionActiveBinarySensor):
         # role-keyed legacy fallback, which the registry would then hold
         # forever while the account-keyed id got minted as a second entity
         # on the next healthy boot. See `coordinator.partner_entity_key_id`.
-        self._attr_unique_id = helpers.person_unique_id(
-            device_id,
+        self._attr_unique_id = helpers.account_person_unique_id(
+            coordinator.config_entry.entry_id,
             "session_active",
             coordinator.partner_entity_key_id(),
             legacy=f"{device_id}_partner_session_active",
@@ -378,8 +389,8 @@ class OrionScheduleOverrideBinarySensor(OrionBaseEntity, BinarySensorEntity):
     ) -> None:
         super().__init__(coordinator, device_id)
         self._user_id = user_id
-        self._attr_unique_id = helpers.schedule_unique_id(
-            device_id, "is_override_applied", user_id
+        self._attr_unique_id = helpers.account_schedule_unique_id(
+            coordinator.config_entry.entry_id, "is_override_applied", user_id
         )
         self._attr_icon = "mdi:calendar-edit"
         self._attr_name = (
@@ -489,8 +500,8 @@ class OrionServerOccupancyBinarySensor(OrionBaseEntity, BinarySensorEntity):
         super().__init__(coordinator, device_id)
         # `server_says_in_bed()` reads the authenticated user's session,
         # so this belongs to that person rather than to the bed.
-        self._attr_unique_id = helpers.person_unique_id(
-            device_id,
+        self._attr_unique_id = helpers.account_person_unique_id(
+            coordinator.config_entry.entry_id,
             "server_in_bed",
             coordinator.user_id,
             legacy=f"{device_id}_server_in_bed",

@@ -1308,6 +1308,27 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
         )
         return row if isinstance(row, dict) else None
 
+    def account_device_id(self) -> str | None:
+        """The bed that PRESENTS the account's own entities.
+
+        Insights, schedules, the live session and the account
+        configuration belong to the account, not to a bed, so their
+        identity is the config entry. They still need somewhere to live
+        in the device registry, and Home Assistant has no concept of an
+        entity that belongs to an entry alone.
+
+        Lowest id wins, deterministically. Using whatever the vendor
+        array happened to list first meant a reordered response re-parented
+        these entities to the other bed across a restart, and the
+        equivalent bug in `_planned_renames` planned a rename onto an id
+        the surviving row already held.
+
+        This is presentation only. Nothing here reaches a unique_id, which
+        is why selling this bed moves the entities to another one without
+        touching their history.
+        """
+        return min((str(d["id"]) for d in self.devices if d.get("id")), default=None)
+
     def schedule_user_ids(self) -> list[str]:
         """Orion user ids this integration owns a schedule for.
 

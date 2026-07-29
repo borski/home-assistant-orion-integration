@@ -79,15 +79,18 @@ async def async_setup_entry(
     coordinator: OrionDataUpdateCoordinator = entry.runtime_data
     entities: list[TimeEntity] = []
 
-    for device in coordinator.devices:
-        device_id = device.get("id")
-        if not device_id:
-            continue
+    # A schedule belongs to a person and an account, never to a bed.
+    # `PUT /v1/sleep-schedules` carries a user id and a weekday and no
+    # device at all, so a per-bed copy of these was two controls writing
+    # the same stored row, and whichever one the user did not touch went
+    # stale until the next poll.
+    account_device_id = coordinator.account_device_id()
+    if account_device_id:
         for user_id in coordinator.schedule_user_ids():
             for field, key, label, icon in _SCHEDULE_TIMES:
                 entities.append(
                     OrionScheduleTime(
-                        coordinator, device_id, user_id, field, key, label, icon
+                        coordinator, account_device_id, user_id, field, key, label, icon
                     )
                 )
 
@@ -175,7 +178,9 @@ class OrionScheduleTime(OrionBaseEntity, TimeEntity):
         super().__init__(coordinator, device_id)
         self._user_id = user_id
         self._field = field
-        self._attr_unique_id = helpers.schedule_unique_id(device_id, key, user_id)
+        self._attr_unique_id = helpers.account_schedule_unique_id(
+            coordinator.config_entry.entry_id, key, user_id
+        )
         self._attr_icon = icon
         self._attr_name = f"{coordinator.display_name_for_user(user_id)} {label}"
 

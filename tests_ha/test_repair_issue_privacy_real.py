@@ -60,8 +60,14 @@ PHONE = "+15551234567"
 # repair issue, so it has to be asserted against literally.
 TITLE_TEMPLATE = "Orion Sleep ({0})"
 
+# This file builds its own entry rather than using `conftest.make_entry`,
+# so it needs its own entry id. Account-scoped entities are keyed on the
+# ENTRY, so the 3.x id below has to match the entry this fixture creates
+# or the two rows never collide and the decline never happens.
+CONFLICTED_ENTRY_ID = "entry-titled"
+
 LEGACY_ID = f"{BED_A}_sleep_score"
-ACCOUNT_ID = f"{BED_A}_user_{ACCOUNT}_sleep_score"
+ACCOUNT_ID = f"{CONFLICTED_ENTRY_ID}_user_{ACCOUNT}_sleep_score"
 
 COMPONENT = Path(__file__).resolve().parents[1] / "custom_components" / "orion_sleep"
 
@@ -85,7 +91,7 @@ def conflicted_entry(hass, *, auth_value: str, auth_method: str = "email"):
     """
     entry = MockConfigEntry(
         domain=DOMAIN,
-        entry_id="entry-titled",
+        entry_id=CONFLICTED_ENTRY_ID,
         unique_id=ACCOUNT,
         title=TITLE_TEMPLATE.format(auth_value),
         data={

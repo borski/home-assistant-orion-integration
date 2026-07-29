@@ -53,6 +53,7 @@ from custom_components.orion_sleep.migrations import _partner_recovery_renames
 from tests_ha.conftest import (
     ACCOUNT,
     BED_A,
+    ENTRY,
     PARTNER,
     SERIAL_A,
     FakeClient,
@@ -147,7 +148,7 @@ def partner_record(user_id: str, key: str = "sleep_score") -> dict[str, Any]:
         "domain": "sensor",
         "platform": DOMAIN,
         "old": f"{BED_A}_partner_{key}",
-        "new": f"{BED_A}_user_{user_id}_{key}",
+        "new": f"{ENTRY}_user_{user_id}_{key}",
         "role": "partner",
     }
 
@@ -210,6 +211,8 @@ async def test_an_unconfirmed_partner_produces_no_rename_pairs_at_all(hass):
     fails here even if some future caller happens to compensate.
     """
 
+    entry = make_entry(hass)
+
     class Coordinator:
         partner_user = {"id": PARTNER}
         partner_identity_confirmed = False
@@ -218,7 +221,7 @@ async def test_an_unconfirmed_partner_produces_no_rename_pairs_at_all(hass):
         def has_partner_for_device(self, _device_id: str) -> bool:
             return True
 
-    assert _partner_recovery_renames(Coordinator()) == [], (
+    assert _partner_recovery_renames(entry, Coordinator()) == [], (
         "an unconfirmed partner emitted rename pairs. Every consumer of "
         "these pairs treats them as a claim about which partner owns an id, "
         "and this setup is not in a position to make that claim"
@@ -228,7 +231,7 @@ async def test_an_unconfirmed_partner_produces_no_rename_pairs_at_all(hass):
     # A veto that never lets anything through would pass the assertion
     # above while silently disabling the partner downgrade path entirely.
     Coordinator.partner_identity_confirmed = True
-    assert _partner_recovery_renames(Coordinator()), (
+    assert _partner_recovery_renames(entry, Coordinator()), (
         "a confirmed partner produced no pairs, so nothing is journalled "
         "for them and a downgrade strands their history"
     )
@@ -243,6 +246,8 @@ async def test_a_coordinator_that_cannot_answer_is_not_a_yes(hass):
     shape as the flag's own initial value.
     """
 
+    entry = make_entry(hass)
+
     class Coordinator:
         partner_user = {"id": PARTNER}
         devices = [{"id": BED_A, "serial_number": SERIAL_A}]
@@ -250,7 +255,7 @@ async def test_a_coordinator_that_cannot_answer_is_not_a_yes(hass):
         def has_partner_for_device(self, _device_id: str) -> bool:
             return True
 
-    assert _partner_recovery_renames(Coordinator()) == [], (
+    assert _partner_recovery_renames(entry, Coordinator()) == [], (
         "a coordinator that does not carry the identity flag was treated as "
         "having confirmed the partner"
     )

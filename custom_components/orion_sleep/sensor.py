@@ -88,17 +88,64 @@ async def async_setup_entry(
     coordinator: OrionDataUpdateCoordinator = entry.runtime_data
     entities: list[SensorEntity] = []
 
+    # Account-scoped, so built ONCE rather than once per bed.
+    #
+    # `/v2/insights` takes no device and `/v1/sleep-schedules` is keyed on
+    # user id alone, so every one of these reads the same account-wide
+    # response no matter which bed it is attached to. Building them inside
+    # the loop below gave a two-bed household two sleep scores, two HRVs
+    # and two of every schedule control, all reflecting one value, and it
+    # recorded a night slept in one bed against both of them.
+    #
+    # They hang off `account_device_id` so they have somewhere to live in
+    # the registry. That is presentation only and never reaches their
+    # unique_id.
+    account_device_id = coordinator.account_device_id()
+    if account_device_id:
+        for description in INSIGHT_SENSOR_DESCRIPTIONS:
+            entities.append(
+                OrionSensorEntity(coordinator, account_device_id, description)
+            )
+        for user_id in coordinator.schedule_user_ids():
+            for description in SCHEDULE_SENSOR_DESCRIPTIONS:
+                entities.append(
+                    OrionScheduleSensorEntity(
+                        coordinator, account_device_id, description, user_id
+                    )
+                )
+        entities.append(OrionSchedulePhaseSensor(coordinator, account_device_id))
+        entities.append(OrionZoneSplitModeSensor(coordinator, account_device_id))
+        # CONFIGURED, not verified. This gate decides whether the partner's
+        # entities EXIST, which is a fact about how this entry was set up,
+        # not about whether an HTTP request succeeded thirty seconds ago.
+        #
+        # It used to be `has_partner_for_device`, the trust predicate, and
+        # that was the bug. A single failed partner fetch at cold start left
+        # `partner_user` empty and `partner_mapping_valid` False, so this
+        # built nothing and the partner's sleep score, heart rate, HRV and
+        # apnea sensors did not exist in Home Assistant at all. Not
+        # unavailable. Absent. Every card and automation referencing them
+        # broke, and nothing in the log tied that to one dropped connection.
+        # There was no recovery short of reloading the entry by hand.
+        #
+        # Trust has not been weakened, it has been moved to where it can be
+        # revisited. `OrionPartnerInsightSensor.available` still requires
+        # `has_partner_for_device`, so an unverified partner's entities
+        # exist and report `unavailable`, and they go available on their own
+        # the moment a later poll verifies the partner. `available` is a
+        # property evaluated per state write, so that needs no reload.
+        if coordinator.has_partner_configured_for_device(account_device_id):
+            for description in INSIGHT_SENSOR_DESCRIPTIONS:
+                entities.append(
+                    OrionPartnerInsightSensor(
+                        coordinator, account_device_id, description
+                    )
+                )
+
     for device in coordinator.devices:
         device_id = device.get("id")
         if not device_id:
             continue
-        for description in INSIGHT_SENSOR_DESCRIPTIONS:
-            entities.append(OrionSensorEntity(coordinator, device_id, description))
-        for user_id in coordinator.schedule_user_ids():
-            for description in SCHEDULE_SENSOR_DESCRIPTIONS:
-                entities.append(
-                    OrionScheduleSensorEntity(coordinator, device_id, description, user_id)
-                )
         entities.append(OrionCurrentTempOffsetSensor(coordinator, device_id))
         entities.append(OrionWebSocketStateSensor(coordinator, device_id))
         for zone_id in coordinator.device_zone_ids(device_id):
@@ -113,30 +160,6 @@ async def async_setup_entry(
         entities.append(OrionFirmwareSensor(coordinator, device_id))
         entities.append(OrionWifiSignalSensor(coordinator, device_id))
         entities.append(OrionAccessSensor(coordinator, device_id))
-        entities.append(OrionSchedulePhaseSensor(coordinator, device_id))
-        entities.append(OrionZoneSplitModeSensor(coordinator, device_id))
-        # CONFIGURED, not verified. This gate decides whether the partner's
-        # entities EXIST, which is a fact about how this entry was set up,
-        # not about whether an HTTP request succeeded thirty seconds ago.
-        #
-        # It used to be `has_partner_for_device`, the trust predicate, and
-        # that was the bug. A single failed partner fetch at cold start left
-        # `partner_user` empty and `partner_mapping_valid` False, so this
-        # loop built nothing and the partner's sleep score, heart rate, HRV
-        # and apnea sensors did not exist in Home Assistant at all. Not
-        # unavailable. Absent. Every card and automation referencing them
-        # broke, and nothing in the log tied that to one dropped connection.
-        # There was no recovery short of reloading the entry by hand.
-        #
-        # Trust has not been weakened, it has been moved to where it can be
-        # revisited. `OrionPartnerInsightSensor.available` still requires
-        # `has_partner_for_device`, so an unverified partner's entities
-        # exist and report `unavailable`, and they go available on their own
-        # the moment a later poll verifies the partner. `available` is a
-        # property evaluated per state write, so that needs no reload.
-        if coordinator.has_partner_configured_for_device(device_id):
-            for description in INSIGHT_SENSOR_DESCRIPTIONS:
-                entities.append(OrionPartnerInsightSensor(coordinator, device_id, description))
 
     async_add_entities(entities)
 
@@ -349,8 +372,8 @@ class OrionSensorEntity(OrionBaseEntity, SensorEntity):
     ) -> None:
         super().__init__(coordinator, device_id)
         self.entity_description = description
-        self._attr_unique_id = helpers.person_unique_id(
-            device_id,
+        self._attr_unique_id = helpers.account_person_unique_id(
+            coordinator.config_entry.entry_id,
             description.key,
             coordinator.user_id,
             legacy=f"{device_id}_{description.key}",
@@ -666,8 +689,8 @@ class OrionPartnerInsightSensor(OrionSensorEntity):
         # across the pair. See `partner_entity_key_id` for why the recorded
         # id is the right durable answer and why it is preferred over the
         # fetched one.
-        self._attr_unique_id = helpers.person_unique_id(
-            device_id,
+        self._attr_unique_id = helpers.account_person_unique_id(
+            coordinator.config_entry.entry_id,
             description.key,
             coordinator.partner_entity_key_id(),
             legacy=f"{device_id}_partner_{description.key}",
@@ -751,8 +774,8 @@ class OrionScheduleSensorEntity(OrionBaseEntity, SensorEntity):
         super().__init__(coordinator, device_id)
         self.entity_description = description
         self._user_id = user_id
-        self._attr_unique_id = helpers.schedule_unique_id(
-            device_id, description.key, user_id
+        self._attr_unique_id = helpers.account_schedule_unique_id(
+            coordinator.config_entry.entry_id, description.key, user_id
         )
         self._attr_translation_key = None
         self._attr_name = (
@@ -1521,8 +1544,8 @@ class OrionSchedulePhaseSensor(OrionBaseEntity, SensorEntity):
         super().__init__(coordinator, device_id)
         # Reads `live_session()`, which is the AUTHENTICATED user's
         # session. This is one person's sensor, not the bed's.
-        self._attr_unique_id = helpers.person_unique_id(
-            device_id,
+        self._attr_unique_id = helpers.account_person_unique_id(
+            coordinator.config_entry.entry_id,
             "current_phase",
             coordinator.user_id,
             legacy=f"{device_id}_current_phase",
@@ -1578,7 +1601,9 @@ class OrionZoneSplitModeSensor(OrionBaseEntity, SensorEntity):
 
     def __init__(self, coordinator, device_id: str) -> None:
         super().__init__(coordinator, device_id)
-        self._attr_unique_id = f"{device_id}_zone_split_mode"
+        self._attr_unique_id = helpers.account_unique_id(
+            coordinator.config_entry.entry_id, "zone_split_mode"
+        )
         self._attr_name = "Zone Mode"
 
     @property

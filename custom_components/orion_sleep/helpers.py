@@ -305,6 +305,58 @@ def person_unique_id(
     return f"{device_id}_user_{user_id}_{key}"
 
 
+def account_person_unique_id(
+    entry_id: str, key: str, user_id: str | None, *, legacy: str
+) -> str:
+    """Stable unique_id for a person's ACCOUNT-scoped entity.
+
+    The difference from `person_unique_id` is the prefix, and the prefix
+    is the whole point. Insights, schedules, the live session and the
+    account configuration are all returned per ACCOUNT, not per bed.
+    `/v2/insights` takes no device. `/v1/sleep-schedules` is keyed on
+    user id alone. Building those inside the per-device loop gave a
+    two-bed account two entities per reading, both reading the same
+    account-wide value, and both writing the same vendor row.
+
+    A night slept in one bed was therefore recorded under both, which is
+    a real biometric attribution error and not just clutter. Two schedule
+    controls for one stored schedule is the write-side version of it.
+
+    `entry_id` rather than the account id, matching the account-level
+    select that already shipped this way. It is stable for the life of
+    the entry, it is what Home Assistant scopes a registry row by anyway,
+    and it does not change when a bed is added or sold.
+
+    `legacy` is returned when the Orion user id is not known yet, for the
+    same reason `person_unique_id` does it: inventing a placeholder mints
+    a second entity for somebody who already has one.
+    """
+    if not user_id:
+        return legacy
+    return f"{entry_id}_user_{user_id}_{key}"
+
+
+def account_schedule_unique_id(entry_id: str, key: str, user_id: str) -> str:
+    """Account-scoped id for one person's schedule entity.
+
+    Same output as `account_person_unique_id`, without the `legacy`
+    branch, because a schedule entity is only ever built for a user id
+    that `schedule_user_ids` has already produced. Kept as its own name
+    so the pair here mirrors the `person`/`schedule` pair it replaces.
+    """
+    return f"{entry_id}_user_{user_id}_{key}"
+
+
+def account_unique_id(entry_id: str, key: str) -> str:
+    """Stable unique_id for an entity that belongs to the whole account.
+
+    The no-person half of `account_person_unique_id`. Away mode, the
+    temperature display scale and the zone split mode are single values
+    on `/v1/sleep-configurations`, not per bed and not per sleeper.
+    """
+    return f"{entry_id}_{key}"
+
+
 def schedule_unique_id(device_id: str, key: str, user_id: str) -> str:
     """Stable unique_id for one person's schedule entity.
 

@@ -18,7 +18,15 @@ from custom_components.orion_sleep.const import (
     CONF_DEVICE_IDS,
     DOMAIN,
 )
-from tests_ha.conftest import ACCOUNT, BED_A, BED_B, SERIAL_B, device, make_entry
+from tests_ha.conftest import (
+    ACCOUNT,
+    BED_A,
+    BED_B,
+    ENTRY,
+    SERIAL_B,
+    device,
+    make_entry,
+)
 
 
 def row(hass, unique_id: str, entry, *, domain: str = "sensor"):
@@ -58,7 +66,7 @@ async def test_a_two_generation_registry_is_not_silently_accepted(hass, patched)
     """
     entry = make_entry(hass, data={CONF_DEVICE_IDS: [BED_A], CONF_ACCOUNT_ID: ACCOUNT})
     old_id = f"{BED_A}_sleep_score"
-    new_id = f"{BED_A}_user_{ACCOUNT}_sleep_score"
+    new_id = f"{ENTRY}_user_{ACCOUNT}_sleep_score"
     row(hass, new_id, entry)   # survived the upgrade
     row(hass, old_id, entry)   # minted by 2.x during the downgrade
 
@@ -171,7 +179,7 @@ async def test_migration_preserves_entity_ids_and_mints_no_duplicates(hass, patc
 
     registry = er.async_get(hass)
     rows = er.async_entries_for_config_entry(registry, entry.entry_id)
-    moved = [e for e in rows if e.unique_id == f"{BED_A}_user_{ACCOUNT}_sleep_score"]
+    moved = [e for e in rows if e.unique_id == f"{ENTRY}_user_{ACCOUNT}_sleep_score"]
     assert moved, "the legacy row was never re-keyed"
     assert moved[0].entity_id == before, "entity_id changed, history is detached"
     assert not [e for e in rows if e.entity_id.endswith("_2")], "a duplicate was minted"

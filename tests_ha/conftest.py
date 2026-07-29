@@ -187,7 +187,13 @@ def patched(client: FakeClient, ws_manager: FakeWebSocketManager):
         yield
 
 
-def make_entry(hass, *, entry_id="entry-1", unique_id=ACCOUNT, data=None) -> MockConfigEntry:
+# The default config entry id. Account-scoped entities are keyed on the
+# ENTRY rather than on a bed, so tests asserting their unique ids need
+# this rather than BED_A.
+ENTRY = "entry-1"
+
+
+def make_entry(hass, *, entry_id=ENTRY, unique_id=ACCOUNT, data=None) -> MockConfigEntry:
     entry = MockConfigEntry(
         domain=DOMAIN,
         entry_id=entry_id,

@@ -38,10 +38,10 @@ from custom_components.orion_sleep.const import (
     CONF_UID_RECOVERY_ACTIVE,
     DOMAIN,
 )
-from tests_ha.conftest import ACCOUNT, BED_A, make_entry
+from tests_ha.conftest import ACCOUNT, BED_A, ENTRY, make_entry
 
 LEGACY_ID = f"{BED_A}_sleep_score"
-ACCOUNT_ID = f"{BED_A}_user_{ACCOUNT}_sleep_score"
+ACCOUNT_ID = f"{ENTRY}_user_{ACCOUNT}_sleep_score"
 
 
 def issue_for(hass, entry) -> ir.IssueEntry | None:
@@ -217,8 +217,13 @@ async def test_resume_clears_the_latch_for_a_non_owner_entry(hass, patched):
         unique_id="acct-owner",
         data={CONF_DEVICE_IDS: [BED_A]},
     )
+    # A DEVICE-scoped row, because that is what ownership is read from.
+    # `bed_owner` counts rows whose unique_id starts with the bed, and
+    # account-scoped entities are keyed on the entry now, so seeding one
+    # of those marks nothing. Every real install has dozens of these:
+    # power, zones, topper sensors, firmware, wifi, access.
     er.async_get(hass).async_get_or_create(
-        "sensor", DOMAIN, ACCOUNT_ID, config_entry=owner
+        "switch", DOMAIN, f"{BED_A}_power", config_entry=owner
     )
     # The non-owner, latched for a downgrade it changed its mind about.
     # Already carries the account unique_id, so identity migration is a
