@@ -38,32 +38,22 @@ filterwarnings = [
 # `pytest-homeassistant-custom-component` pins the Home Assistant version
 # it was built against, and letting it resolve that is the whole point of
 # using it. Pinning both independently is how they drift.
+#
+# `orion-sleep-api` is pinned here to the exact version `manifest.json`
+# requires, and `tests/test_package_imports.py` asserts the two agree. It
+# used to be excluded, with a long comment explaining that the package was
+# on no index and its checkout had no remote and no tags, so listing it
+# would break `uv pip install --group test` everywhere but one machine.
+# That was true when it was written. The client is now published, tagged
+# v0.1.0, and resolves from PyPI, so the exclusion was documenting a
+# blocker that no longer exists and the comment said to delete it once
+# that happened.
 [dependency-groups]
 test = [
   "pytest==9.0.3",
   "pytest-homeassistant-custom-component==0.13.348",
+  "orion-sleep-api==0.1.0",
 ]
-
-# orion-sleep-api IS NOT LISTED ABOVE, AND THAT IS NOT AN OVERSIGHT.
-#
-# `manifest.json` pins `orion-sleep-api==0.1.0`, and that pin is currently
-# unsatisfiable from any network location. The package is not on PyPI at
-# any version, and the source checkout at ../orion-sleep-api has no git
-# remote and no tags, so there is nothing to install from either. The only
-# copy that exists anywhere is a local directory and the two wheels in its
-# `dist/`.
-#
-# Listing it here would make `uv pip install --group test` fail outright
-# on every machine except the one that already has the directory, which
-# turns a documented bootstrap into a trap. It is installed as a separate
-# documented step instead. See AGENTS.md.
-#
-# This is bigger than the test environment. Home Assistant installs
-# `manifest.json` requirements from PyPI when it sets up an integration,
-# so as things stand nobody can install this integration from HACS. The
-# fix is to publish the client. Once it is published, delete this comment
-# and move the pin into the group above, where
-# `tests/test_package_imports.py` already asserts it matches the manifest.
 
 [tool.ruff]
 line-length = 100

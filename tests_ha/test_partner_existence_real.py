@@ -105,6 +105,38 @@ def legacy_partner_rows(hass, entry) -> list[Any]:
     ]
 
 
+def partner_insight_rows(hass, entry) -> list[Any]:
+    """The partner rows whose availability depends on the PARTNER client.
+
+    Separate from `partner_rows` because the two families answer to
+    different things and only one of them is evidence about a partner
+    fetch.
+
+    Insight and session entities are fed by `get_insights` on the
+    partner's own token, so a partner the server will not speak about
+    goes unavailable. Schedule entities are not: `get_sleep_schedules`
+    runs on the PRIMARY token and returns a row for everyone on the bed,
+    which `has_schedule_for_user` documents as a deliberate asymmetry. A
+    partner whose own credentials are dead still has readable schedule
+    entities, by design.
+
+    Keyed off the same description list the platforms build from, so a
+    new insight cannot quietly fall out of this filter.
+    """
+    from custom_components.orion_sleep.descriptions import (
+        INSIGHT_SENSOR_DESCRIPTIONS,
+    )
+
+    keys = {description.key for description in INSIGHT_SENSOR_DESCRIPTIONS}
+    keys.add("session_active")
+    marker = f"user_{PARTNER}_"
+    return [
+        row
+        for row in partner_rows(hass, entry)
+        if row.unique_id.rsplit(marker, 1)[-1] in keys
+    ]
+
+
 class ColdFailPartnerClient(FakeClient):
     """A partner account the server does not answer about, until told to.
 
@@ -254,7 +286,19 @@ async def test_a_later_poll_makes_them_available_without_a_reload(hass, ws_manag
         assert await hass.config_entries.async_setup(entry.entry_id)
         await hass.async_block_till_done()
 
-        rows = partner_rows(hass, entry)
+        # The schedule family has to be built too, not just the insight
+        # sensors. A cold-start partner fetch failure used to leave
+        # `schedule_user_ids` empty, so the partner's bedtime, wake up,
+        # offsets, flags and override were never constructed at all while
+        # their insight sensors were. Absent, not unavailable, with no
+        # recovery short of reloading the entry by hand.
+        assert any("_bedtime" in row.unique_id for row in partner_rows(hass, entry)), (
+            "the partner's schedule entities were not built after a cold "
+            "start partner failure, so half the household is missing from "
+            "Home Assistant entirely"
+        )
+
+        rows = partner_insight_rows(hass, entry)
         assert rows, "nothing was built, so there is nothing to make available"
         assert all(
             hass.states.get(row.entity_id).state == "unavailable" for row in rows
@@ -281,7 +325,7 @@ async def test_a_later_poll_makes_them_available_without_a_reload(hass, ws_manag
 
     recovered = [
         hass.states.get(row.entity_id)
-        for row in partner_rows(hass, entry)
+        for row in partner_insight_rows(hass, entry)
     ]
     assert recovered and all(state.state != "unavailable" for state in recovered), (
         "the partner verified on a later poll and their entities stayed "

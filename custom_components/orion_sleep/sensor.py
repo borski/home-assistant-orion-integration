@@ -24,7 +24,7 @@ from homeassistant.helpers.entity_platform import (
     async_get_current_platform,
 )
 from homeassistant.util import dt as dt_util
-from orion_sleep_api import OrionApiError, util
+from orion_sleep_api import util
 
 from . import helpers
 from .coordinator import OrionDataUpdateCoordinator
@@ -453,10 +453,8 @@ class OrionSensorEntity(OrionBaseEntity, SensorEntity):
             "the night, so stages and vitals will change.",
             self._sessions_owner(),
         )
-        try:
+        async with orion_call("edit that session"):
             await client.edit_sleep_session(session_id, asleep_at, awake_at)
-        except OrionApiError as err:
-            raise HomeAssistantError(f"Orion refused the session edit: {err}") from err
         await self.coordinator.async_request_refresh()
 
     async def async_end_sleep_session(self, confirm: bool) -> None:
@@ -486,10 +484,8 @@ class OrionSensorEntity(OrionBaseEntity, SensorEntity):
             "Ending the in-progress Orion sleep session for %s",
             self._sessions_owner(),
         )
-        try:
+        async with orion_call("end that session"):
             await self._sessions_client().end_sleep_session()
-        except OrionApiError as err:
-            raise HomeAssistantError(f"Orion rejected ending the session: {err}") from err
         await self.coordinator.async_request_refresh()
 
     async def async_confirm_sleep_session(
@@ -1363,24 +1359,18 @@ class OrionAccessSensor(OrionBaseEntity, SensorEntity):
 
     async def async_list_invites(self) -> dict:
         """Pending invitations, as a service response."""
-        try:
+        async with orion_call("list the pending invites"):
             body = await self.coordinator.api_client.list_device_invites()
-        except OrionApiError as err:
-            raise HomeAssistantError(f"Orion could not list invites: {err}") from err
         response = body.get("response") if isinstance(body, dict) else None
         invites = response.get("invites") if isinstance(response, dict) else None
         return {"invites": invites if isinstance(invites, list) else []}
 
     async def async_invite_user(self, phone_number: str, role: str) -> None:
         """Invite somebody to this bed by phone number."""
-        try:
+        async with orion_call("send that invite"):
             await self.coordinator.api_client.invite_user(
                 [self._device_id], phone_number, role
             )
-        except ValueError as err:
-            raise HomeAssistantError(str(err)) from err
-        except OrionApiError as err:
-            raise HomeAssistantError(f"Orion rejected the invite: {err}") from err
         _LOGGER.info(
             "Sent an Orion %s invite for device %s",
             role,
@@ -1390,12 +1380,8 @@ class OrionAccessSensor(OrionBaseEntity, SensorEntity):
 
     async def async_cancel_invite(self, invite_id: str) -> None:
         """Withdraw an invitation that has not been accepted."""
-        try:
+        async with orion_call("cancel that invite"):
             await self.coordinator.api_client.cancel_device_invite(invite_id)
-        except ValueError as err:
-            raise HomeAssistantError(str(err)) from err
-        except OrionApiError as err:
-            raise HomeAssistantError(f"Orion could not cancel the invite: {err}") from err
 
     async def async_accept_invite(self, code: str) -> None:
         """Redeem an invite code for the account this integration uses.
@@ -1404,12 +1390,8 @@ class OrionAccessSensor(OrionBaseEntity, SensorEntity):
         adds *this* account to somebody else's bed, so nothing local
         changes until the next poll picks the new device up.
         """
-        try:
+        async with orion_call("redeem that invite code"):
             await self.coordinator.api_client.accept_device_invite(code)
-        except ValueError as err:
-            raise HomeAssistantError(str(err)) from err
-        except OrionApiError as err:
-            raise HomeAssistantError(f"Orion rejected the invite code: {err}") from err
         await self.coordinator.async_request_refresh()
 
     async def async_remove_user_access(self, user_id: str, confirm: bool) -> None:
@@ -1427,12 +1409,8 @@ class OrionAccessSensor(OrionBaseEntity, SensorEntity):
                 f"{user_id} does not currently have access to this bed. "
                 "Check the people attribute on this sensor."
             )
-        try:
+        async with orion_call("revoke that person's access"):
             await self.coordinator.api_client.remove_user_access(user_id)
-        except ValueError as err:
-            raise HomeAssistantError(str(err)) from err
-        except OrionApiError as err:
-            raise HomeAssistantError(f"Orion could not revoke access: {err}") from err
         _LOGGER.warning(
             "Revoked Orion access for user %s", helpers.short_id(user_id)
         )
@@ -1445,24 +1423,14 @@ class OrionAccessSensor(OrionBaseEntity, SensorEntity):
         does before it knows who is coming: it creates the guest, and a
         number gets attached afterwards with update_user_phone.
         """
-        try:
+        async with orion_call("add a guest"):
             await self.coordinator.api_client.create_guest(self._device_id)
-        except ValueError as err:
-            raise HomeAssistantError(str(err)) from err
-        except OrionApiError as err:
-            raise HomeAssistantError(f"Orion could not add a guest: {err}") from err
         await self.coordinator.async_request_refresh()
 
     async def async_update_user_phone(self, user_id: str, phone: str) -> None:
         """Attach or change a phone number for someone on this bed."""
-        try:
+        async with orion_call("update that phone number"):
             await self.coordinator.api_client.update_user_phone(user_id, phone)
-        except ValueError as err:
-            raise HomeAssistantError(str(err)) from err
-        except OrionApiError as err:
-            raise HomeAssistantError(
-                f"Orion could not update that phone number: {err}"
-            ) from err
         await self.coordinator.async_request_refresh()
 
 
@@ -1492,14 +1460,10 @@ class OrionAccessSensor(OrionBaseEntity, SensorEntity):
                 f"{user_id} is not on this bed. Invite them first, or check "
                 "the people attribute on this sensor."
             )
-        try:
+        async with orion_call("assign those zones"):
             await self.coordinator.api_client.assign_zones(
                 user_id, self._device_id, zone_ids
             )
-        except ValueError as err:
-            raise HomeAssistantError(str(err)) from err
-        except OrionApiError as err:
-            raise HomeAssistantError(f"Orion could not assign that zone: {err}") from err
         _LOGGER.info(
             "Assigned Orion zones %s to user %s",
             zone_ids,
@@ -1513,12 +1477,8 @@ class OrionAccessSensor(OrionBaseEntity, SensorEntity):
         Cosmetic on Orion's side. Home Assistant keeps its own device
         name, so this changes what the phone app shows and nothing here.
         """
-        try:
+        async with orion_call("rename the bed"):
             await self.coordinator.api_client.set_device_name(self._device_id, name)
-        except ValueError as err:
-            raise HomeAssistantError(str(err)) from err
-        except OrionApiError as err:
-            raise HomeAssistantError(f"Orion could not rename the bed: {err}") from err
         await self.coordinator.async_request_refresh()
 
     async def async_set_device_timezone(self, timezone: str) -> None:
@@ -1528,16 +1488,10 @@ class OrionAccessSensor(OrionBaseEntity, SensorEntity):
         out which day it is from this, so a wrong value moves bedtime
         rather than just relabelling it.
         """
-        try:
+        async with orion_call("set the bed timezone"):
             await self.coordinator.api_client.set_device_timezone(
                 self._device_id, timezone
             )
-        except ValueError as err:
-            raise HomeAssistantError(str(err)) from err
-        except OrionApiError as err:
-            raise HomeAssistantError(
-                f"Orion could not set the timezone: {err}"
-            ) from err
         _LOGGER.warning(
             "Changed the Orion bed timezone to %s. Schedules are stored per "
             "weekday, so check tonight's bedtime is still what you expect.",

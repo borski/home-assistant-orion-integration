@@ -398,11 +398,39 @@ class OrionSleepConfigFlow(ConfigFlow, domain=DOMAIN):
                     # error anywhere, because both renames succeed.
                     if not self._async_reauth_account_matches(profile):
                         return self.async_abort(reason="reauth_account_mismatch")
-                    recorded_devices = self._reauth_entry.data.get(CONF_DEVICE_IDS)
-                    if recorded_devices is not None and set(device_ids) != {
-                        str(value) for value in recorded_devices
-                    }:
-                        return self.async_abort(reason="reauth_bed_mismatch")
+                    # The bed set is CORROBORATING evidence, and only where
+                    # the identity proof is weak. When an account id is
+                    # recorded, the check above already proved the returned
+                    # id equals it, and no option can widen that branch. The
+                    # bed set adds nothing to a proof that is already exact.
+                    #
+                    # Requiring it anyway was a permanent lockout. Expired
+                    # tokens mean setup raises before any poll, and a poll is
+                    # the only thing that ever updates `CONF_DEVICE_IDS`
+                    # (`coordinator._async_update_data`, which rewrites it
+                    # without ceremony on every run). So an entry that dies
+                    # on its credentials and then loses, gains or replaces a
+                    # bed at the vendor can never satisfy this test again.
+                    # Reauth is the ONLY door once tokens are dead, and this
+                    # aborted it on every attempt, forever. The only exit was
+                    # delete-and-re-add, which discards options, aliases, the
+                    # partner link, the replacement marker and the downgrade
+                    # journal.
+                    #
+                    # Nothing is weakened by dropping it here. Unique ids
+                    # embed the device id, so history cannot follow the
+                    # account onto a different bed, and `overlapping_entry_ids`
+                    # below still refuses a bed another entry owns.
+                    #
+                    # Kept for the pre-3.0 branches. There the proof is a
+                    # typed address, or the unverified escape hatch, and the
+                    # bed set is the only other reference value in play.
+                    if recorded_account_id(self._reauth_entry) is None:
+                        recorded_devices = self._reauth_entry.data.get(CONF_DEVICE_IDS)
+                        if recorded_devices is not None and set(device_ids) != {
+                            str(value) for value in recorded_devices
+                        }:
+                            return self.async_abort(reason="reauth_bed_mismatch")
                     if overlapping_entry_ids(
                         self.hass,
                         self._reauth_entry.entry_id,
@@ -912,7 +940,39 @@ class OrionSleepOptionsFlow(OptionsFlow):
         the revert now tells the household to do.
         """
         if self._config_entry.data.get(CONF_PARTNER_ACCESS_TOKEN):
-            data = {**data, CONF_PARTNER_REPLACED: True}
+            # Record WHO filled the pre-3.0 `_partner_` rows, once.
+            #
+            # This used to store a bare `True` on every partner write while
+            # any partner tokens existed, which made it fire on the one
+            # remedy this integration prescribes. A partner refresh token
+            # rots, `coordinator` warns "replace it in Orion options", the
+            # household signs the SAME person back in, and the marker
+            # latched with no way to clear it. `revert_unique_ids` then read
+            # it as proof of a replacement, named that partner's own
+            # entities, and told the household to delete them and accept the
+            # loss. It was destroying real history to undo a change that had
+            # not happened, and the flow held the proof of that at this exact
+            # line: the new partner id was already known and already equal to
+            # the recorded one.
+            #
+            # Written once and never overwritten, because the rows do not
+            # change hands when the partner does. They still hold whoever
+            # was linked at upgrade time. Tracking the LATEST outgoing
+            # partner would call P to Q and back to P a mismatch, when the
+            # rows have belonged to P throughout.
+            #
+            # `True` remains the value when no partner id was ever recorded,
+            # which is an entry whose partner predates `CONF_PARTNER_ACCOUNT_ID`.
+            # A change happened and cannot be attributed, so it fails closed
+            # exactly as before.
+            if self._config_entry.data.get(CONF_PARTNER_REPLACED) is None:
+                outgoing = self._config_entry.data.get(CONF_PARTNER_ACCOUNT_ID)
+                data = {
+                    **data,
+                    CONF_PARTNER_REPLACED: (
+                        outgoing if isinstance(outgoing, str) and outgoing else True
+                    ),
+                }
         data, options = evict_partner_journal(data, self._config_entry.options)
         changes: dict[str, Any] = {"data": data}
         if options != self._config_entry.options:

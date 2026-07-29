@@ -44,6 +44,7 @@ from .const import (
     CONF_AUTH_VALUE,
     CONF_DEVICE_IDS,
     CONF_PARTNER_ACCESS_TOKEN,
+    CONF_PARTNER_ACCOUNT_ID,
     CONF_PARTNER_REPLACED,
     CONF_UID_MIGRATION,
     CONF_UID_RECOVERY_ACTIVE,
@@ -1168,11 +1169,20 @@ def partner_revert_blockers(
     # on a revert that had in fact completed.
     legacy_partner_row_ids = _legacy_partner_row_ids(registry, entry.entry_id)
     legacy_partner_rows = bool(legacy_partner_row_ids)
-    # Whether the partner has ever been changed on this entry. Written by
-    # the config flow at the moment of the change, because that is the only
-    # moment anything knows it happened. Nothing in the registry or the
-    # journal records it afterwards.
-    partner_replaced = bool(entry.data.get(CONF_PARTNER_REPLACED))
+    # Whether the partner linked NOW differs from the one those legacy rows
+    # hold. Written by the config flow at the moment of a change, because
+    # that is the only moment anything knows it happened. Nothing in the
+    # registry or the journal records it afterwards.
+    #
+    # Was `bool(entry.data.get(CONF_PARTNER_REPLACED))`, and a bare truth
+    # test could not tell a real replacement from a household relinking the
+    # same person after a token expiry, which is the fix this integration
+    # itself prescribes for that failure. The marker now names the partner
+    # whose history is in those rows, so the comparison can be made.
+    partner_replaced = helpers.partner_changed_since_legacy_rows(
+        entry.data.get(CONF_PARTNER_REPLACED),
+        entry.data.get(CONF_PARTNER_ACCOUNT_ID),
+    )
     # The suppression above is only sound while the legacy rows still hold
     # the CURRENT partner's history, and that is exactly what a replacement
     # ends.

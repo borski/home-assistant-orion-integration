@@ -40,6 +40,7 @@ from homeassistant.core import Context
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import entity_registry as er
 
+from custom_components.orion_sleep import helpers
 from custom_components.orion_sleep.const import (
     CONF_ACCOUNT_ID,
     CONF_DEVICE_IDS,
@@ -306,10 +307,115 @@ async def test_replacing_a_partner_records_that_it_happened(hass, ws_manager):
         }
     )
 
-    assert entry.data.get(CONF_PARTNER_REPLACED) is True, (
-        "a partner was replaced and nothing recorded it, so the revert has "
-        "no way to know the legacy rows hold somebody else's history"
+    # The marker names the OUTGOING partner, not a bare True. That is who
+    # the legacy rows hold, and it is the only thing that lets the revert
+    # tell a real replacement from a relink of the same person.
+    assert entry.data.get(CONF_PARTNER_REPLACED) == PARTNER, (
+        "a partner was replaced and nothing recorded WHO the legacy rows "
+        "belong to, so the revert cannot tell this apart from the same "
+        "person being signed back in after a token expiry"
     )
+    assert helpers.partner_changed_since_legacy_rows(
+        entry.data.get(CONF_PARTNER_REPLACED),
+        entry.data.get(CONF_PARTNER_ACCOUNT_ID),
+    ), "a genuine replacement must still read as a replacement"
+
+
+async def test_relinking_the_same_partner_is_not_a_replacement(hass, ws_manager):
+    """The bug the marker's old shape caused.
+
+    A partner's refresh token rots, which is routine. The only remedy this
+    integration offers is options -> replace the partner account, which is
+    what the coordinator's own warning tells the household to do. They sign
+    the SAME person back in.
+
+    The old marker was a bare `True` stamped on any partner write, so that
+    relink latched it forever with no way to clear it. The revert then read
+    it as proof of a replacement, named that partner's own pre-3.0
+    entities, and instructed the household to delete them and accept the
+    loss of their history. It was destroying real data to undo a change
+    that never happened, and the flow held the proof at the moment it
+    wrote: the incoming account id already equalled the recorded one.
+
+    Ends with a real revert rather than just the flag, because the flag is
+    only interesting for what it makes the revert do.
+    """
+    from custom_components.orion_sleep.config_flow import OrionSleepOptionsFlow
+
+    entry = partner_entry(hass, replaced=False)
+    seed_legacy_partner_rows(hass, entry)
+
+    flow = OrionSleepOptionsFlow(entry)
+    flow.hass = hass
+
+    # Same account id going back in. Only the tokens are new.
+    flow._write_partner_change(
+        {
+            **entry.data,
+            CONF_PARTNER_ACCESS_TOKEN: PARTNER_TOKEN,
+            CONF_PARTNER_REFRESH_TOKEN: "fresh-partner-rt",
+            CONF_PARTNER_ACCOUNT_ID: PARTNER,
+        }
+    )
+
+    assert not helpers.partner_changed_since_legacy_rows(
+        entry.data.get(CONF_PARTNER_REPLACED),
+        entry.data.get(CONF_PARTNER_ACCOUNT_ID),
+    ), (
+        "relinking the same partner was recorded as a replacement, so the "
+        "revert will tell this household to delete that partner's own "
+        "history"
+    )
+
+    api, ws = clients(FakeClient(), PartnerClient(), ws_manager)
+    with api, ws:
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+        assert entry.state is ConfigEntryState.LOADED
+
+        # No raise. The rows still hold this partner, so a downgrade is
+        # exactly as safe as it was before the token expired.
+        await revert(hass, entry)
+
+
+async def test_an_unattributable_change_still_fails_closed(hass, ws_manager):
+    """An entry whose partner predates `CONF_PARTNER_ACCOUNT_ID`.
+
+    There is no outgoing id to record, so the marker falls back to `True`
+    and the revert must keep refusing. Naming the partner is an
+    improvement on the old behaviour in the cases where a name exists. It
+    is not permission to assume safety where none does.
+
+    Also covers every entry already in the field carrying a boolean marker
+    written by a previous version.
+    """
+    entry = partner_entry(hass, replaced=False)
+    hass.config_entries.async_update_entry(
+        entry,
+        data={
+            key: value
+            for key, value in entry.data.items()
+            if key != CONF_PARTNER_ACCOUNT_ID
+        },
+    )
+    seed_legacy_partner_rows(hass, entry)
+
+    from custom_components.orion_sleep.config_flow import OrionSleepOptionsFlow
+
+    flow = OrionSleepOptionsFlow(entry)
+    flow.hass = hass
+    flow._write_partner_change(
+        {**entry.data, CONF_PARTNER_ACCESS_TOKEN: "new-partner-at"}
+    )
+
+    assert entry.data.get(CONF_PARTNER_REPLACED) is True, (
+        "a change that cannot name its outgoing partner must record the "
+        "fact that it happened"
+    )
+    assert helpers.partner_changed_since_legacy_rows(
+        entry.data.get(CONF_PARTNER_REPLACED),
+        entry.data.get(CONF_PARTNER_ACCOUNT_ID),
+    ), "an unattributable change must fail closed"
 
 
 async def test_a_first_time_partner_link_is_not_a_replacement(hass, ws_manager):

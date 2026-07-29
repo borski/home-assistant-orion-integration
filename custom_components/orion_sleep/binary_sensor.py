@@ -204,6 +204,12 @@ class OrionSensorOnBedBinarySensor(OrionBaseEntity, BinarySensorEntity):
     _attr_device_class = BinarySensorDeviceClass.OCCUPANCY
     _attr_icon = "mdi:bed-outline"
 
+    # Socket-fed, exactly like the heart rate and breath rate sensors that
+    # read the same frames. Without this the base class returns False the
+    # moment a poll fails, which would take occupancy down while the
+    # socket is still delivering it.
+    _live_fed = True
+
     def __init__(
         self,
         coordinator: OrionDataUpdateCoordinator,
@@ -274,9 +280,33 @@ class OrionSensorOnBedBinarySensor(OrionBaseEntity, BinarySensorEntity):
 
     @property
     def available(self) -> bool:
-        # Report available whenever we have a live payload at all,
-        # even if the individual sensor hasn't reported yet.
-        return self.coordinator.sensor_status_text(self._device_id, self._sensor_name) is not None
+        """A reading this sensor has actually delivered, and a live source.
+
+        The `super().available` half is the important one and it used to be
+        missing. `live_devices` is deliberately carried forward across a
+        failed poll, so the payload check alone is satisfied forever by one
+        frame received once. With the account logged out and the socket
+        unable to reconnect, this sensor kept publishing whatever the bed
+        last said, with no upper bound on how old that was.
+
+        Presence is the worst state to freeze. The biometric sensors on the
+        identical data already chain through the base class for this exact
+        reason, and this one being written as a bare payload check is what
+        left it out of that fix.
+
+        The comment this replaces claimed the check reported available
+        "even if the individual sensor hasn't reported yet". It never did:
+        `sensor_status_text` is per sensor, so an unreported sensor was
+        already unavailable. The code and the comment disagreed and the
+        code was right.
+        """
+        return (
+            super().available
+            and self.coordinator.sensor_status_text(
+                self._device_id, self._sensor_name
+            )
+            is not None
+        )
 
 
 class OrionThermalReliefBinarySensor(OrionBaseEntity, BinarySensorEntity):

@@ -39,6 +39,7 @@ from orion_sleep_api import OrionApiClient
 from . import helpers
 from .coordinator import OrionDataUpdateCoordinator
 from .entity import OrionBaseEntity
+from .errors import orion_call
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -156,5 +157,12 @@ class OrionActionButton(OrionBaseEntity, ButtonEntity):
             raise HomeAssistantError(
                 "Orion has not resolved the authenticated user yet"
             )
-        await self._def.call(self.coordinator.api_client, str(serial), user_id)
+        # This module was the one write surface with no handler at all. It
+        # never imported `errors`, so a vendor 500 or an expired refresh
+        # token came out of `async_press` as a raw `OrionApiError` and Home
+        # Assistant logged a traceback. `errors.py` documents itself as
+        # existing to remove exactly that, and every other write path
+        # already routes through it.
+        async with orion_call(f"run {self._def.name.lower()}"):
+            await self._def.call(self.coordinator.api_client, str(serial), user_id)
         await self.coordinator.async_request_refresh()

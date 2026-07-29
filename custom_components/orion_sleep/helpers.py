@@ -322,6 +322,61 @@ def schedule_unique_id(device_id: str, key: str, user_id: str) -> str:
     return f"{device_id}_user_{user_id}_{key}"
 
 
+def partner_changed_since_legacy_rows(
+    marker: object, current_partner_id: object
+) -> bool:
+    """Whether the linked partner differs from the one the 2.x rows hold.
+
+    Lives here because `migrations` may not import `coordinator` (that
+    direction is already taken) and `config_flow` writes the value this
+    reads. One rule, one copy, both ends.
+
+    Takes the two VALUES rather than the entry or its data, and that is
+    not squeamishness about types. This module imports nothing from the
+    package, which is what lets `tests/test_helpers.py` load it straight
+    off disk and exercise the redaction policy without Home Assistant
+    installed. A `from .const import` here fails that test at collection
+    with "attempted relative import with no known parent package", which
+    is how this signature was arrived at.
+
+    The question matters exactly once, in `partner_revert_blockers`. A
+    household that upgraded from 2.x keeps its `{device}_partner_{key}`
+    rows, holding whoever the partner was at upgrade time, and the forward
+    migration deliberately leaves them. When they still belong to the
+    current partner a downgrade is fine, because 2.x finds them where it
+    left them. When the partner has since changed they hold somebody else,
+    and letting 2.x write the new partner's readings into them merges two
+    people's biometric history.
+
+    `CONF_PARTNER_REPLACED` used to be a bare `True`, stamped on every
+    partner write while any partner tokens existed. That made it fire on
+    the one action the integration itself prescribes: a partner's refresh
+    token rots, the warning says to replace the partner account in
+    options, the household signs the SAME person back in, and the marker
+    latched forever. The revert then named that partner's own entities and
+    instructed the household to delete them, destroying genuine history to
+    fix a replacement that never happened.
+
+    So the marker now records WHO filled those rows: the partner account
+    id linked immediately before the first change, written once and never
+    overwritten. Never overwritten because the rows do not change hands
+    when the partner does. Through P to Q and back to P, the answer for
+    the rows is still P, and a marker that tracked the latest outgoing
+    partner would call that a mismatch.
+
+    Fails closed on anything it cannot read. A legacy boolean, or a change
+    made when no partner id had ever been recorded, both mean a change
+    happened that cannot be attributed, and refusing a downgrade costs a
+    delay where allowing one costs a merge.
+    """
+    if marker is None or marker is False:
+        return False
+    if isinstance(marker, str) and marker:
+        if isinstance(current_partner_id, str) and current_partner_id:
+            return current_partner_id != marker
+    return True
+
+
 def schedule_duration_text(schedule: object) -> str | None:
     """Human "Xh Ym" between a schedule's bedtime and wakeup.
 

@@ -10,10 +10,11 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from orion_sleep_api import OrionApiError
 
+from . import helpers
 from .coordinator import OrionDataUpdateCoordinator
 from .entity import OrionBaseEntity
+from .errors import orion_call
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -157,18 +158,21 @@ class OrionFirmwareUpdateEntity(OrionBaseEntity, UpdateEntity):
         if self.latest_version == self.installed_version:
             raise HomeAssistantError("Orion is not advertising a firmware update")
 
+        # `short_id`, not the whole serial. A warning-level line lands in
+        # every diagnostics download and support paste, and this module was
+        # the one place printing the full physical device identifier while
+        # the rest of the integration abbreviates it.
         _LOGGER.warning(
             "Triggering Orion firmware update on %s (installed %s). "
             "This cannot be undone.",
-            self._serial(),
+            helpers.short_id(self._serial()),
             self.installed_version,
         )
 
-        try:
+        # Was a bespoke `except OrionApiError` arm, which also swallowed
+        # `OrionAuthError` because it subclasses that. A logged-out account
+        # was reported as the vendor rejecting the flash.
+        async with orion_call("start the firmware update"):
             await self.coordinator.api_client.trigger_firmware_update(self._serial())
-        except OrionApiError as err:
-            raise HomeAssistantError(
-                "Orion rejected the firmware update request"
-            ) from err
 
         await self.coordinator.async_request_refresh()

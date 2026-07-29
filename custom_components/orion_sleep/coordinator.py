@@ -250,6 +250,22 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
         # Starts False. Nothing has been confirmed before the first fetch,
         # and an entry that never reaches one must not look confirmed.
         self.partner_identity_confirmed = False
+        # Whether a SUCCESSFUL fetch positively DISPROVED the partner's
+        # identity. Not the inverse of the flag above, and that is the
+        # whole point of it existing.
+        #
+        # `partner_identity_confirmed` goes false for two unrelated
+        # reasons: the server named a different account, and the server
+        # did not answer. Only the first is evidence. Entity CONSTRUCTION
+        # needs to tell them apart, because a household whose partner is
+        # configured must keep its partner entities through a dropped
+        # connection and must not get them for an account that has
+        # demonstrably been swapped.
+        #
+        # Set only in the branch that actually ran the check, and left
+        # alone by both failure handlers for the same reason
+        # `partner_mapping_valid` is.
+        self.partner_identity_rejected = False
         self._warned_partner_topology = False
         # Separate latch from the topology one on purpose. They are
         # different findings with different fixes, and sharing a latch
@@ -567,6 +583,9 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
             # that needs "do we know who this partner is" must not have to
             # infer it from a flag that also folds in bed topology.
             self.partner_identity_confirmed = identity_ok
+            # The one place this may be written. A fetch came back and the
+            # check ran, so its verdict is evidence either way.
+            self.partner_identity_rejected = not identity_ok
             self.partner_topology_ok = topology_ok
             self.partner_mapping_valid = topology_ok and identity_ok
             # Latched. This runs on every poll, so an unlatched warning
@@ -737,11 +756,18 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
         # async_set_updated_data from _handle_ws_message, so users don't
         # wait for the next poll to see their toggles reflected.
         new_live: dict[str, dict] = {}
+        # What each device's live state was when this loop decided what to
+        # do about it. Read again after the awaits, because both writers of
+        # `live_devices` REPLACE the per-device dict rather than mutating
+        # it, so object identity is a reliable "did something land while we
+        # were away".
+        before_fetch: dict[str, dict | None] = {}
         for device in self.devices:
             dev_id = device.get("id")
             serial = device.get("serial_number")
             if not dev_id or not serial:
                 continue
+            before_fetch[dev_id] = self.live_devices.get(dev_id)
             # Keep any WS-provided state until the REST fetch replaces it
             # — this avoids a flash of stale data between polls.
             if dev_id in self.live_devices and self._ws_manager.is_fresh(serial):
@@ -760,6 +786,30 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
                 # Preserve whatever we already had rather than blanking it.
                 if dev_id in self.live_devices:
                     new_live[dev_id] = self.live_devices[dev_id]
+
+        # Anything that changed WHILE the fetches were in flight wins.
+        #
+        # `new_live` is built across a series of awaits and then assigned
+        # wholesale, so it is a snapshot of a moment that has already
+        # passed. A successful `PUT .../live` landing inside that window
+        # calls `apply_live_device`, and a socket frame calls
+        # `_handle_ws_message`, and both wrote into `self.live_devices`
+        # only for the assignment below to throw the result away.
+        #
+        # The socket case self-heals, because a healthy socket sends
+        # another frame about two seconds later. The write case does not.
+        # `OrionLiveSettingMixin` deliberately does not refresh after a
+        # successful write, on the correct grounds that the PUT echo is
+        # authoritative, so with a stale socket the only thing that ever
+        # corrected the reverted value was the NEXT poll, up to
+        # `DEFAULT_SCAN_INTERVAL` away. Ten minutes of a control showing
+        # the opposite of what the bed was actually doing, after the server
+        # had already acknowledged the change. The mixin's five second
+        # optimistic lock hid it and then expired.
+        for dev_id, before in before_fetch.items():
+            current = self.live_devices.get(dev_id)
+            if current is not None and current is not before:
+                new_live[dev_id] = current
         self.live_devices = new_live
 
         try:
@@ -1269,17 +1319,53 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
         Deliberately an allowlist. If the server ever returns a third id
         (a guest, or a stale ex-partner) we do not spawn a full entity
         family for someone we can neither name nor reliably write to.
+
+        The partner half reads CONFIGURATION, not this session's trust
+        verdict, and that is the same split `sensor.py` and
+        `binary_sensor.py` already make when they decide whether a
+        partner's entities EXIST.
+
+        This function was left out of that fix and kept gating on
+        `partner_mapping_valid` and the FETCHED `partner_user`. Both are
+        empty on a cold start whose first partner request failed, so a
+        single dropped connection at boot built no partner bedtime, wake
+        up, temperature offset, schedule flag or override entities at all.
+        Not unavailable. Absent, with every card and automation naming
+        them broken, and no recovery short of reloading the entry by hand.
+        The insight sensors survived that exact failure and the schedule
+        entities did not, which is not a distinction anyone designed.
+
+        `partner_entity_key_id` prefers the RECORDED partner account id,
+        so the entities are keyed on durable configuration rather than on
+        whatever the last response happened to say. Writes carry that same
+        recorded id and travel on the PRIMARY token, so nothing here
+        depends on the partner's own credentials working.
+
+        What is NOT relaxed: a partner the server has positively named as
+        a different account is still excluded. That is
+        `partner_identity_rejected`, which only a completed check can set,
+        so it separates "we were told this is someone else" from "we could
+        not ask". Availability stays gated on `has_schedule_for_user`, so
+        a person the bed does not return a row for reports unavailable and
+        cannot be written to.
         """
         ids: list[str] = []
         if self.user_id:
             ids.append(self.user_id)
 
-        partner_id = self.partner_user.get("id")
+        partner_id = self.partner_entity_key_id()
         if (
             isinstance(partner_id, str)
             and partner_id
             and partner_id != self.user_id
-            and self.partner_mapping_valid
+            and self.partner_api_client is not None
+            and self.partner_device_serial
+            and not self.partner_identity_rejected
+            # Same single-bed requirement the configuration predicate
+            # applies. A partner is only ever linked against one shared
+            # bed, and building their schedule against a second one would
+            # mint entities for a bed they are not on.
+            and len(self.devices) == 1
         ):
             ids.append(partner_id)
         return ids
