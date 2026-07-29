@@ -67,7 +67,22 @@ class FakeClient:
     """
 
     def __init__(self, **kwargs: Any) -> None:
-        self.user: dict[str, Any] = {"id": ACCOUNT, "email": "alice@example.com"}
+        # A display name AND the email, deliberately both. This profile
+        # used to carry only the email, and because `orion_user_label`
+        # falls through to it, every entity in this suite registered an
+        # entity_id with a login credential baked into it. Two tests then
+        # asserted on those ids, which turned the leak into the expected
+        # result. Keeping the email here means the default path now
+        # proves the opposite: that a real name outranks it.
+        #
+        # The email-only and phone-only accounts are still covered, on
+        # purpose, by `test_display_names_real.py`, which reassigns this
+        # attribute before the entry is set up.
+        self.user: dict[str, Any] = {
+            "id": ACCOUNT,
+            "name": "Alex",
+            "email": "alice@example.com",
+        }
         self.devices: list[dict[str, Any]] = [device(BED_A, SERIAL_A)]
         self.fail_devices: Exception | None = None
         self.fail_insights: Exception | None = None

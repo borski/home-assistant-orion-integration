@@ -32,7 +32,6 @@ from homeassistant.components.climate import (
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import ATTR_TEMPERATURE, UnitOfTemperature
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import entity_platform
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -102,8 +101,25 @@ async def async_setup_entry(
     # per-zone things in the integration. Registering here means the
     # caller picks a side by naming a person's climate entity instead of
     # handling raw zone ids.
+    #
+    # `admin=False` on both, and stated rather than omitted. These change a
+    # temperature for a few minutes and nothing else, which is the same
+    # authority the climate entity already hands to anyone who can see it.
+    # Gating them would mean a non-admin can set the bed to 45 degrees
+    # through `climate.set_temperature` but cannot cool it back down, which
+    # is a worse outcome than the one it prevents.
+    #
+    # Registered through `helpers.async_register_entity_service` rather than
+    # the raw platform method so that decision is visible HERE. These two
+    # used to call `platform.async_register_entity_service` directly, and
+    # the reasoning above lived only in a comment inside
+    # `tests_ha/test_entity_service_auth_real.py`. A reader in this file saw
+    # an unexplained deviation from the pattern every other registration in
+    # the integration follows and had no way to tell "considered and
+    # allowed" apart from "nobody thought about it".
     platform = entity_platform.async_get_current_platform()
-    platform.async_register_entity_service(
+    helpers.async_register_entity_service(
+        platform,
         SERVICE_START_COOLING,
         {
             vol.Optional("duration_minutes", default=DEFAULT_COOLING_MINUTES): vol.All(
@@ -112,9 +128,14 @@ async def async_setup_entry(
             )
         },
         "async_start_cooling",
+        admin=False,
     )
-    platform.async_register_entity_service(
-        SERVICE_STOP_COOLING, {}, "async_stop_cooling"
+    helpers.async_register_entity_service(
+        platform,
+        SERVICE_STOP_COOLING,
+        {},
+        "async_stop_cooling",
+        admin=False,
     )
 
 
@@ -210,10 +231,10 @@ class OrionZoneClimateEntity(OrionBaseEntity, ClimateEntity):
             return
         async with orion_call("change the temperature"):
             await self.coordinator.api_client.update_live_device_zone(
-            device_serial=self._serial(),
-            zone_id=self._zone_id,
-            temp=float(temp),
-        )
+                device_serial=self._serial(),
+                zone_id=self._zone_id,
+                temp=float(temp),
+            )
         await self.coordinator.async_request_refresh()
 
     async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
@@ -227,10 +248,10 @@ class OrionZoneClimateEntity(OrionBaseEntity, ClimateEntity):
         """Power this zone on, leaving its setpoint untouched."""
         async with orion_call("change the temperature"):
             await self.coordinator.api_client.update_live_device_zone(
-            device_serial=self._serial(),
-            zone_id=self._zone_id,
-            on=True,
-        )
+                device_serial=self._serial(),
+                zone_id=self._zone_id,
+                on=True,
+            )
         await self.coordinator.async_request_refresh()
 
     async def async_turn_off(self) -> None:
@@ -242,10 +263,10 @@ class OrionZoneClimateEntity(OrionBaseEntity, ClimateEntity):
         """
         async with orion_call("change the temperature"):
             await self.coordinator.api_client.update_live_device_zone(
-            device_serial=self._serial(),
-            zone_id=self._zone_id,
-            on=False,
-        )
+                device_serial=self._serial(),
+                zone_id=self._zone_id,
+                on=False,
+            )
         await self._handle_schedule_on_turn_off()
         await self.coordinator.async_request_refresh()
 
@@ -283,13 +304,15 @@ class OrionZoneClimateEntity(OrionBaseEntity, ClimateEntity):
         legitimately sends several keys in one body, because that is what
         the vendor's own client does.
         """
-        try:
-            async with orion_call("start rapid cooling"):
-                await self.coordinator.api_client.start_thermal_relief(
+        # No `except ValueError` around this. `errors.orion_call` already
+        # catches `ValueError` and re-raises it as `HomeAssistantError`, so
+        # an outer handler here can never run. It looked like belt and
+        # braces and was dead code, which is worse than nothing: the next
+        # reader copies it to a fifth call site believing it does something.
+        async with orion_call("start rapid cooling"):
+            await self.coordinator.api_client.start_thermal_relief(
                 self._serial(), [self._zone_id], duration_minutes
             )
-        except ValueError as err:
-            raise HomeAssistantError(str(err)) from err
 
         await self.coordinator.async_request_refresh()
 
@@ -300,12 +323,9 @@ class OrionZoneClimateEntity(OrionBaseEntity, ClimateEntity):
         stashed when relief started. Safe to call when nothing is
         running: the server treats it as a no-op rather than an error.
         """
-        try:
-            async with orion_call("stop rapid cooling"):
-                await self.coordinator.api_client.cancel_thermal_relief(
+        async with orion_call("stop rapid cooling"):
+            await self.coordinator.api_client.cancel_thermal_relief(
                 self._serial(), [self._zone_id]
             )
-        except ValueError as err:
-            raise HomeAssistantError(str(err)) from err
 
         await self.coordinator.async_request_refresh()

@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import logging
 import time
-from collections.abc import Callable
-from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
@@ -13,11 +11,10 @@ import voluptuous as vol
 from homeassistant.components.sensor import (
     SensorDeviceClass,
     SensorEntity,
-    SensorEntityDescription,
     SensorStateClass,
 )
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import PERCENTAGE, UnitOfTemperature, UnitOfTime
+from homeassistant.const import PERCENTAGE, UnitOfTemperature
 from homeassistant.core import HomeAssistant, SupportsResponse
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import config_validation as cv
@@ -31,8 +28,30 @@ from orion_sleep_api import OrionApiError, util
 
 from . import helpers
 from .coordinator import OrionDataUpdateCoordinator
+from .descriptions import (
+    _SCHEDULE_LABELS,
+    INSIGHT_SENSOR_DESCRIPTIONS,
+    SCHEDULE_SENSOR_DESCRIPTIONS,
+    OrionSensorEntityDescription,
+    _get_day_field,
+    _get_partner_day_field,
+    _insight_label,
+)
 from .entity import OrionBaseEntity
 from .errors import orion_call
+
+# The description tuples, the dataclass that types them, and the pure
+# readers behind every `value_fn` now live in `descriptions.py`. They were
+# moved out because `migrations.py` derives its unique_id renames from
+# `INSIGHT_SENSOR_DESCRIPTIONS` and had to reach into this platform module
+# to get them, which was a layering inversion papered over with two
+# function-scoped imports, and which made the FIRST import of this
+# 2000-line module happen inside the event loop on a cold start.
+# `descriptions.py` explains the whole thing.
+#
+# They are re-imported here at module scope rather than referenced through
+# the module, so `sensor.INSIGHT_SENSOR_DESCRIPTIONS` still resolves for
+# anything that reads it off this module.
 
 # Topper sensors exposed on every WS payload. Mapping to zone_a/zone_b
 # isn't verified yet, so entities are named per sensor.
@@ -56,619 +75,6 @@ SERVICE_UPDATE_USER_PHONE = "update_user_phone"
 SERVICE_ASSIGN_ZONES = "assign_zones"
 SERVICE_SET_DEVICE_NAME = "set_device_name"
 SERVICE_SET_DEVICE_TIMEZONE = "set_device_timezone"
-
-_INSIGHT_DISPLAY_NAMES = {
-    "sleep_score": "Sleep Score",
-    "total_sleep_time": "Total Sleep Time",
-    "deep_sleep_time": "Deep Sleep",
-    "rem_sleep_time": "REM Sleep",
-    "light_sleep_time": "Light Sleep",
-    "awake_time": "Awake Time",
-    "heart_rate_avg": "Heart Rate",
-    "breath_rate": "Breath Rate",
-    "hrv": "HRV",
-    "body_movement_rate": "Body Movement Rate",
-    "restless_time": "Restless Time",
-    # Numeric counterparts to the human-readable duration sensors above.
-    # Those emit strings like "7h 53m" and so can carry no state_class,
-    # which means no long-term statistics and nothing to graph. These do.
-    "total_sleep_minutes": "Total Sleep Minutes",
-    "deep_sleep_minutes": "Deep Sleep Minutes",
-    "rem_sleep_minutes": "REM Sleep Minutes",
-    "light_sleep_minutes": "Light Sleep Minutes",
-    "awake_minutes": "Awake Minutes",
-    "last_session_end": "Last Session End",
-    "sleep_quality": "Sleep Quality",
-    "time_in_bed": "Time in Bed",
-    "sleep_efficiency": "Sleep Efficiency",
-    "session_confidence": "Session Confidence",
-    "avg_target_temperature": "Average Target Temperature",
-    "avg_bed_temperature": "Average Bed Temperature",
-    "apnea_ahi": "Apnea Index",
-    "apnea_obstructive_time": "Obstructive Apnea Time",
-    "apnea_central_time": "Central Apnea Time",
-    "apnea_longest_event": "Longest Apnea Event",
-}
-
-
-# ── Helpers ────────────────────────────────────────────────────────────────
-
-
-def _insight_label(key: str) -> str:
-    """Human label for one insight metric, used to build per-person names."""
-    return _INSIGHT_DISPLAY_NAMES.get(key, key.replace("_", " ").title())
-
-
-def _get_sleep_summary(session: dict | None) -> dict:
-    """Get sleep_summary from a session.
-
-    Type-guarded: every caller immediately does `.get(...)` on the result,
-    so returning a vendor-supplied list here would raise AttributeError
-    deep inside a value_fn lambda where nothing catches it.
-    """
-    return util.session_subsection(session, "sleep_summary")
-
-
-def _get_heart_rate(session: dict | None) -> dict:
-    """Get heart_rate from a session."""
-    return util.session_subsection(session, "heart_rate")
-
-
-def _get_breath_rate(session: dict | None) -> dict:
-    """Get breath_rate from a session."""
-    return util.session_subsection(session, "breath_rate")
-
-
-def _get_hrv(session: dict | None) -> dict:
-    """Get hrv from a session."""
-    return util.session_subsection(session, "hrv")
-
-
-def _get_movement(session: dict | None) -> dict:
-    """Get movement from a session."""
-    return util.session_subsection(session, "movement")
-
-
-def _minutes_to_hm(minutes: float | int | None) -> str | None:
-    """Convert minutes to 'Xh Ym' string like the app shows."""
-    if minutes is None:
-        return None
-    total = int(round(minutes))
-    h, m = divmod(total, 60)
-    if h > 0:
-        return f"{h}h {m}m"
-    return f"{m}m"
-
-
-def _get_apnea(session: dict | None) -> dict:
-    """Breathing-interruption block from a completed session.
-
-    Only populated once a night finishes. Mid-session this is null, so
-    every apnea sensor reads unknown while someone is still asleep.
-    """
-    return util.session_subsection(session, "apnea")
-
-
-def _minutes_value(minutes: Any) -> float | None:
-    """Return a sleep-stage duration as a plain number of minutes.
-
-    Rejects bool explicitly: it subclasses int, so ``True`` would
-    otherwise be recorded as a one-minute sleep stage.
-    """
-    if isinstance(minutes, bool) or not isinstance(minutes, (int, float)):
-        return None
-    return float(minutes)
-
-
-def _session_end(session: dict | None) -> Any:
-    """Timezone-aware end time of a session, or None.
-
-    Only meaningful on a session already known to be finished. The
-    vendor fills end_time in while a night is still running.
-    """
-    if not isinstance(session, dict):
-        return None
-    return util.parse_iso_datetime(session.get("end_time"))
-
-
-def _seconds_to_ms(seconds: float | int | None) -> str | None:
-    """Convert seconds to 'Xm Ys' string like the app shows."""
-    if seconds is None:
-        return None
-    total = int(round(seconds))
-    m, s = divmod(total, 60)
-    if m > 0:
-        return f"{m}m {s}s"
-    return f"{s}s"
-
-
-def _temp_stats(session: dict | None, block: str) -> dict | None:
-    """Reduce one per-session temperature series to average/min/max.
-
-    `temperature_setpoint` is what the bed was aiming for through the
-    night and `temperature` is what it measured. Both arrive as a few
-    hundred samples, which no Home Assistant state can hold, so they get
-    reduced to scalars here.
-    """
-    return util.series_stats(util.session_subsection(session, block).get("values"))
-
-
-def _temp_attrs(session: dict | None, block: str) -> dict:
-    stats = _temp_stats(session, block)
-    if stats is None:
-        return {}
-    # Home Assistant converts a sensor's state to the user's preferred
-    # unit but leaves attributes exactly as given. Naming these plainly
-    # "min" and "max" put 17.5 next to a state of 69.9 and looked like a
-    # fault. The unit is in the key instead.
-    return {
-        "min_celsius": stats["min"],
-        "max_celsius": stats["max"],
-        "samples": stats["samples"],
-    }
-
-
-def _time_in_bed(session: dict | None) -> float | None:
-    """Minutes between getting in and getting out.
-
-    Distinct from time asleep. On one measured night the stay ran 80
-    minutes past the end of the session itself.
-    """
-    if not isinstance(session, dict):
-        return None
-    return util.duration_minutes(
-        session.get("in_bed_start_time"), session.get("in_bed_end_time")
-    )
-
-
-def _get_day_field(coordinator_data: dict, field: str) -> Any:
-    """Newest non-null day-level value for one field.
-
-    `overview` and `data` both carry `score`, `quality`, and `color` per
-    day. Overview wins because it is the summary the app itself renders,
-    with `data` as a fallback for accounts where overview comes back
-    empty.
-    """
-    insights = coordinator_data.get("insights", {})
-    for source in (insights.get("overview", {}), insights.get("data", {})):
-        if not isinstance(source, dict):
-            continue
-        for date_key in sorted(source.keys(), reverse=True):
-            day = source[date_key]
-            if not isinstance(day, dict):
-                continue
-            value = day.get(field)
-            if value is not None:
-                return value
-    return None
-
-
-def _get_partner_day_field(coordinator_data: dict, field: str) -> Any:
-    """Same lookup against the partner account's own insights."""
-    return _get_day_field(
-        {"insights": coordinator_data.get("partner_insights", {})}, field
-    )
-
-
-# ── Sensor descriptions ───────────────────────────────────────────────────
-
-
-@dataclass(frozen=True, kw_only=True)
-class OrionSensorEntityDescription(SensorEntityDescription):
-    """Describe an Orion Sleep sensor."""
-
-    value_fn: Callable[[dict | None], Any]
-    extra_attrs_fn: Callable[[dict | None], dict[str, Any]] | None = None
-    icon: str | None = None
-    # Read from the newest FINISHED session rather than the newest one.
-    # Only set this where an in-progress night would give a wrong answer.
-    completed_only: bool = False
-    # Read this field off the day summary instead of a session. Day
-    # values (score, quality, colour) are not session-scoped.
-    day_field: str | None = None
-    # Further day-level fields to hang off the entity as attributes.
-    day_attrs: tuple[str, ...] = ()
-
-
-# Duration sensors: we intentionally do NOT set device_class=DURATION.
-# HA's DURATION device class overrides entity names on device pages with a
-# generic "Duration" label, making all sleep duration sensors indistinguishable.
-# Instead we format the values ourselves as human-friendly strings (7h 53m).
-
-INSIGHT_SENSOR_DESCRIPTIONS: tuple[OrionSensorEntityDescription, ...] = (
-    OrionSensorEntityDescription(
-        key="sleep_score",
-        translation_key="sleep_score",
-        day_field="score",
-        day_attrs=("quality", "color"),
-        native_unit_of_measurement="points",
-        suggested_display_precision=0,
-        state_class=SensorStateClass.MEASUREMENT,
-        icon="mdi:medal-outline",
-        value_fn=lambda session: None,  # day-level, see day_field
-        # Whether this night is the bed's own number or a correction
-        # someone made in the app. Worth knowing now that the integration
-        # can edit sessions itself.
-        extra_attrs_fn=lambda session: {
-            "edited": (session or {}).get("has_been_edited"),
-            "rated": (session or {}).get("has_been_rated"),
-        },
-    ),
-    OrionSensorEntityDescription(
-        key="total_sleep_time",
-        translation_key="total_sleep_time",
-        icon="mdi:sleep",
-        value_fn=lambda session: _minutes_to_hm(_get_sleep_summary(session).get("time_asleep")),
-    ),
-    OrionSensorEntityDescription(
-        key="deep_sleep_time",
-        translation_key="deep_sleep_time",
-        icon="mdi:power-sleep",
-        value_fn=lambda session: _minutes_to_hm(_get_sleep_summary(session).get("deep_sleep")),
-    ),
-    OrionSensorEntityDescription(
-        key="rem_sleep_time",
-        translation_key="rem_sleep_time",
-        icon="mdi:eye-refresh-outline",
-        value_fn=lambda session: _minutes_to_hm(_get_sleep_summary(session).get("rem_sleep")),
-    ),
-    OrionSensorEntityDescription(
-        key="light_sleep_time",
-        translation_key="light_sleep_time",
-        icon="mdi:weather-night",
-        value_fn=lambda session: _minutes_to_hm(_get_sleep_summary(session).get("light_sleep")),
-    ),
-    OrionSensorEntityDescription(
-        key="awake_time",
-        translation_key="awake_time",
-        icon="mdi:eye-outline",
-        value_fn=lambda session: _minutes_to_hm(_get_sleep_summary(session).get("awake_time")),
-    ),
-    OrionSensorEntityDescription(
-        key="heart_rate_avg",
-        translation_key="heart_rate_avg",
-        native_unit_of_measurement="bpm",
-        suggested_display_precision=0,
-        state_class=SensorStateClass.MEASUREMENT,
-        icon="mdi:heart-pulse",
-        value_fn=lambda session: _get_heart_rate(session).get("average"),
-        extra_attrs_fn=lambda session: {
-            "min": _get_heart_rate(session).get("min"),
-            "max": _get_heart_rate(session).get("max"),
-            "range": (
-                f"{_get_heart_rate(session).get('min')} - {_get_heart_rate(session).get('max')}"
-                if _get_heart_rate(session).get("min") is not None
-                and _get_heart_rate(session).get("max") is not None
-                else None
-            ),
-        },
-    ),
-    OrionSensorEntityDescription(
-        key="breath_rate",
-        translation_key="breath_rate",
-        native_unit_of_measurement="breaths/min",
-        suggested_display_precision=1,
-        state_class=SensorStateClass.MEASUREMENT,
-        icon="mdi:lungs",
-        value_fn=lambda session: _get_breath_rate(session).get("average"),
-        extra_attrs_fn=lambda session: {
-            "min": _get_breath_rate(session).get("min"),
-            "max": _get_breath_rate(session).get("max"),
-            "range": (
-                f"{_get_breath_rate(session).get('min')} - {_get_breath_rate(session).get('max')}"
-                if _get_breath_rate(session).get("min") is not None
-                and _get_breath_rate(session).get("max") is not None
-                else None
-            ),
-        },
-    ),
-    OrionSensorEntityDescription(
-        key="hrv",
-        translation_key="hrv",
-        native_unit_of_measurement="ms",
-        suggested_display_precision=0,
-        state_class=SensorStateClass.MEASUREMENT,
-        icon="mdi:heart-flash",
-        value_fn=lambda session: _get_hrv(session).get("average"),
-        extra_attrs_fn=lambda session: {
-            "min": _get_hrv(session).get("min"),
-            "max": _get_hrv(session).get("max"),
-        },
-    ),
-    OrionSensorEntityDescription(
-        key="body_movement_rate",
-        translation_key="body_movement_rate",
-        native_unit_of_measurement="/hr",
-        suggested_display_precision=1,
-        state_class=SensorStateClass.MEASUREMENT,
-        icon="mdi:run",
-        value_fn=lambda session: _get_movement(session).get("movement_rate"),
-    ),
-    OrionSensorEntityDescription(
-        key="restless_time",
-        translation_key="restless_time",
-        icon="mdi:motion-sensor",
-        # Format as human-friendly string like the app (3m 36s)
-        value_fn=lambda session: _seconds_to_ms(_get_movement(session).get("total_seconds")),
-    ),
-    # ── Numeric sleep-stage durations ──────────────────────────────────
-    #
-    # The five string sensors above are the app-facing presentation and
-    # stay for compatibility. These carry the same underlying values as
-    # plain numbers so HA can keep long-term statistics and graph them.
-    #
-    # No device_class. DURATION would add minute/hour conversion nobody
-    # asked for, and this codebase already avoids it on the duration
-    # sensors. state_class=MEASUREMENT is deliberate: these are
-    # independent per-night measurements, NOT accumulations. Using
-    # total_increasing would make HA read every shorter night as a meter
-    # reset and add the whole value again, permanently corrupting the
-    # stored sum.
-    #
-    # Field names measured on the wire 2026-07-26 against a live
-    # in-progress session. They had been asserted upstream since April
-    # with no capture behind them.
-    OrionSensorEntityDescription(
-        key="total_sleep_minutes",
-        native_unit_of_measurement=UnitOfTime.MINUTES,
-        suggested_display_precision=0,
-        state_class=SensorStateClass.MEASUREMENT,
-        icon="mdi:sleep",
-        value_fn=lambda session: _minutes_value(_get_sleep_summary(session).get("time_asleep")),
-    ),
-    OrionSensorEntityDescription(
-        key="deep_sleep_minutes",
-        native_unit_of_measurement=UnitOfTime.MINUTES,
-        suggested_display_precision=0,
-        state_class=SensorStateClass.MEASUREMENT,
-        icon="mdi:power-sleep",
-        value_fn=lambda session: _minutes_value(_get_sleep_summary(session).get("deep_sleep")),
-    ),
-    OrionSensorEntityDescription(
-        key="rem_sleep_minutes",
-        native_unit_of_measurement=UnitOfTime.MINUTES,
-        suggested_display_precision=0,
-        state_class=SensorStateClass.MEASUREMENT,
-        icon="mdi:eye-refresh-outline",
-        value_fn=lambda session: _minutes_value(_get_sleep_summary(session).get("rem_sleep")),
-    ),
-    OrionSensorEntityDescription(
-        key="light_sleep_minutes",
-        native_unit_of_measurement=UnitOfTime.MINUTES,
-        suggested_display_precision=0,
-        state_class=SensorStateClass.MEASUREMENT,
-        icon="mdi:weather-night",
-        value_fn=lambda session: _minutes_value(_get_sleep_summary(session).get("light_sleep")),
-    ),
-    OrionSensorEntityDescription(
-        key="awake_minutes",
-        native_unit_of_measurement=UnitOfTime.MINUTES,
-        suggested_display_precision=0,
-        state_class=SensorStateClass.MEASUREMENT,
-        icon="mdi:eye-outline",
-        value_fn=lambda session: _minutes_value(_get_sleep_summary(session).get("awake_time")),
-    ),
-    # When the last finished night actually ended. state_class is left
-    # unset because HA rejects one on a non-numeric sensor.
-    OrionSensorEntityDescription(
-        key="sleep_quality",
-        day_field="quality",
-        day_attrs=("color", "score"),
-        icon="mdi:star-outline",
-        value_fn=lambda session: None,  # day-level, see day_field
-    ),
-    # ── Session shape ─────────────────────────────────────────────
-    #
-    # Time in bed is the whole stay, including the stretch spent awake
-    # before and after the session proper. Efficiency is the share of
-    # that actually slept, which is the standard way to read the pair.
-    #
-    # Sleep latency is deliberately absent. The obvious source fields,
-    # `user_fallasleep_timestamp` and `user_wakeup_timestamp`, come back
-    # null on completed sessions: they are user-supplied overrides from
-    # the app's edit screen, not measurements. Deriving latency from
-    # `in_bed_start_time` instead would inherit the occupancy false
-    # positive and report hours of lying awake that never happened.
-    OrionSensorEntityDescription(
-        key="time_in_bed",
-        native_unit_of_measurement=UnitOfTime.MINUTES,
-        state_class=SensorStateClass.MEASUREMENT,
-        suggested_display_precision=0,
-        icon="mdi:bed-clock",
-        completed_only=True,
-        value_fn=lambda session: _time_in_bed(session),
-        extra_attrs_fn=lambda session: {
-            "in_bed_start": (session or {}).get("in_bed_start_time"),
-            "in_bed_end": (session or {}).get("in_bed_end_time"),
-        },
-    ),
-    OrionSensorEntityDescription(
-        key="sleep_efficiency",
-        native_unit_of_measurement=PERCENTAGE,
-        state_class=SensorStateClass.MEASUREMENT,
-        suggested_display_precision=0,
-        icon="mdi:percent-outline",
-        completed_only=True,
-        value_fn=lambda session: util.sleep_efficiency(
-            util.session_subsection(session, "sleep_summary").get("time_asleep"),
-            _time_in_bed(session),
-        ),
-    ),
-    OrionSensorEntityDescription(
-        key="session_confidence",
-        native_unit_of_measurement=PERCENTAGE,
-        state_class=SensorStateClass.MEASUREMENT,
-        suggested_display_precision=0,
-        icon="mdi:check-decagram-outline",
-        completed_only=True,
-        value_fn=lambda session: util.confidence_percent(
-            (session or {}).get("confidence")
-        ),
-    ),
-    # ── Breathing ─────────────────────────────────────────────────
-    #
-    # Reported per completed session and previously discarded entirely.
-    # AHI is events per hour of sleep and is the figure sleep clinics
-    # actually use, which makes it the most consequential number the bed
-    # produces. It is also an estimate from a mattress topper, so the
-    # sensors carry the vendor's numbers and nothing else. No severity
-    # banding, no interpretation: see the README.
-    OrionSensorEntityDescription(
-        key="apnea_ahi",
-        native_unit_of_measurement="events/h",
-        state_class=SensorStateClass.MEASUREMENT,
-        suggested_display_precision=1,
-        icon="mdi:lungs",
-        value_fn=lambda session: util.apnea_number(_get_apnea(session).get("ahi")),
-    ),
-    OrionSensorEntityDescription(
-        key="apnea_obstructive_time",
-        native_unit_of_measurement=UnitOfTime.SECONDS,
-        suggested_display_precision=0,
-        state_class=SensorStateClass.MEASUREMENT,
-        icon="mdi:lungs",
-        value_fn=lambda session: util.apnea_number(
-            _get_apnea(session).get("obstructive_total_seconds")
-        ),
-    ),
-    OrionSensorEntityDescription(
-        key="apnea_central_time",
-        native_unit_of_measurement=UnitOfTime.SECONDS,
-        suggested_display_precision=0,
-        state_class=SensorStateClass.MEASUREMENT,
-        icon="mdi:lungs",
-        value_fn=lambda session: util.apnea_number(
-            _get_apnea(session).get("central_total_seconds")
-        ),
-    ),
-    OrionSensorEntityDescription(
-        key="apnea_longest_event",
-        native_unit_of_measurement=UnitOfTime.SECONDS,
-        suggested_display_precision=0,
-        state_class=SensorStateClass.MEASUREMENT,
-        icon="mdi:timer-alert-outline",
-        value_fn=lambda session: util.apnea_number(
-            _get_apnea(session).get("longest_event_seconds")
-        ),
-    ),
-    # ── Overnight temperature ─────────────────────────────────────
-    #
-    # The live climate entity already records target and measured temp
-    # continuously, but only from whenever the integration was installed
-    # and only until the recorder purges it. These are the vendor's own
-    # series for the night, reduced to scalars and tied to the session.
-    OrionSensorEntityDescription(
-        key="avg_target_temperature",
-        device_class=SensorDeviceClass.TEMPERATURE,
-        native_unit_of_measurement=UnitOfTemperature.CELSIUS,
-        state_class=SensorStateClass.MEASUREMENT,
-        suggested_display_precision=1,
-        icon="mdi:thermometer-check",
-        completed_only=True,
-        value_fn=lambda session: (_temp_stats(session, "temperature_setpoint") or {}).get(
-            "average"
-        ),
-        extra_attrs_fn=lambda session: _temp_attrs(session, "temperature_setpoint"),
-    ),
-    OrionSensorEntityDescription(
-        key="avg_bed_temperature",
-        device_class=SensorDeviceClass.TEMPERATURE,
-        native_unit_of_measurement=UnitOfTemperature.CELSIUS,
-        state_class=SensorStateClass.MEASUREMENT,
-        suggested_display_precision=1,
-        icon="mdi:thermometer",
-        completed_only=True,
-        value_fn=lambda session: (_temp_stats(session, "temperature") or {}).get("average"),
-        extra_attrs_fn=lambda session: _temp_attrs(session, "temperature"),
-    ),
-    OrionSensorEntityDescription(
-        key="last_session_end",
-        device_class=SensorDeviceClass.TIMESTAMP,
-        icon="mdi:clock-check-outline",
-        completed_only=True,
-        value_fn=_session_end,
-    ),
-)
-
-# Schedule sensors — derived from today_sleep_schedule, not sessions.
-#
-# These are per-person. Names are built imperatively from the display alias
-# rather than a translation_key, because the person's name has to lead and
-# translations cannot interpolate a runtime value.
-_SCHEDULE_LABELS: dict[str, str] = {
-    "schedule_duration": "Schedule Duration",
-    "bedtime_temp": "Bedtime Temperature",
-    "phase_1_temp": "Asleep Phase 1 Temperature",
-    "phase_2_temp": "Asleep Phase 2 Temperature",
-    "wakeup_temp": "Wake Up Temperature",
-}
-
-SCHEDULE_SENSOR_DESCRIPTIONS: tuple[OrionSensorEntityDescription, ...] = (
-    OrionSensorEntityDescription(
-        key="schedule_duration",
-        icon="mdi:timer-sand",
-        value_fn=lambda schedule: helpers.schedule_duration_text(schedule),
-    ),
-    # device_class=TEMPERATURE added 2026-07-26. Without it HA treats "°C"
-    # as a custom unit and will NOT convert for a Fahrenheit household, so
-    # these rendered as "23 °C" beside a climate card reading "78 °F".
-    OrionSensorEntityDescription(
-        key="bedtime_temp",
-        device_class=SensorDeviceClass.TEMPERATURE,
-        native_unit_of_measurement=UnitOfTemperature.CELSIUS,
-        suggested_display_precision=1,
-        state_class=SensorStateClass.MEASUREMENT,
-        icon="mdi:thermometer-lines",
-        value_fn=lambda schedule: schedule.get("bedtime_temp") if schedule else None,
-        extra_attrs_fn=lambda schedule: _schedule_temp_attrs(schedule),
-    ),
-    # phase_1_temp and phase_2_temp were previously only extra attributes on
-    # the bedtime temperature sensor. Promoted to first-class sensors so they
-    # graph and generate long-term statistics like the other two. New keys for
-    # both people, so there is no legacy id to preserve.
-    OrionSensorEntityDescription(
-        key="phase_1_temp",
-        device_class=SensorDeviceClass.TEMPERATURE,
-        native_unit_of_measurement=UnitOfTemperature.CELSIUS,
-        suggested_display_precision=1,
-        state_class=SensorStateClass.MEASUREMENT,
-        icon="mdi:thermometer-chevron-down",
-        value_fn=lambda schedule: schedule.get("phase_1_temp") if schedule else None,
-    ),
-    OrionSensorEntityDescription(
-        key="phase_2_temp",
-        device_class=SensorDeviceClass.TEMPERATURE,
-        native_unit_of_measurement=UnitOfTemperature.CELSIUS,
-        suggested_display_precision=1,
-        state_class=SensorStateClass.MEASUREMENT,
-        icon="mdi:thermometer-chevron-up",
-        value_fn=lambda schedule: schedule.get("phase_2_temp") if schedule else None,
-    ),
-    OrionSensorEntityDescription(
-        key="wakeup_temp",
-        device_class=SensorDeviceClass.TEMPERATURE,
-        native_unit_of_measurement=UnitOfTemperature.CELSIUS,
-        suggested_display_precision=1,
-        state_class=SensorStateClass.MEASUREMENT,
-        icon="mdi:thermometer-alert",
-        value_fn=lambda schedule: schedule.get("wakeup_temp") if schedule else None,
-    ),
-)
-
-
-def _schedule_temp_attrs(schedule: dict | None) -> dict[str, Any]:
-    """Extra attributes for the bedtime temp sensor showing the full temp curve."""
-    if not schedule:
-        return {}
-    attrs: dict[str, Any] = {}
-    for key in ("phase_1_temp", "phase_2_temp", "wakeup_temp"):
-        val = schedule.get(key)
-        if val is not None:
-            attrs[key] = val
-    if schedule.get("is_smart_temperature_active") is not None:
-        attrs["smart_temperature"] = schedule["is_smart_temperature_active"]
-    return attrs
-
 
 # ── Setup ─────────────────────────────────────────────────────────────────
 
@@ -709,25 +115,65 @@ async def async_setup_entry(
         entities.append(OrionAccessSensor(coordinator, device_id))
         entities.append(OrionSchedulePhaseSensor(coordinator, device_id))
         entities.append(OrionZoneSplitModeSensor(coordinator, device_id))
-        if coordinator.has_partner_for_device(device_id):
+        # CONFIGURED, not verified. This gate decides whether the partner's
+        # entities EXIST, which is a fact about how this entry was set up,
+        # not about whether an HTTP request succeeded thirty seconds ago.
+        #
+        # It used to be `has_partner_for_device`, the trust predicate, and
+        # that was the bug. A single failed partner fetch at cold start left
+        # `partner_user` empty and `partner_mapping_valid` False, so this
+        # loop built nothing and the partner's sleep score, heart rate, HRV
+        # and apnea sensors did not exist in Home Assistant at all. Not
+        # unavailable. Absent. Every card and automation referencing them
+        # broke, and nothing in the log tied that to one dropped connection.
+        # There was no recovery short of reloading the entry by hand.
+        #
+        # Trust has not been weakened, it has been moved to where it can be
+        # revisited. `OrionPartnerInsightSensor.available` still requires
+        # `has_partner_for_device`, so an unverified partner's entities
+        # exist and report `unavailable`, and they go available on their own
+        # the moment a later poll verifies the partner. `available` is a
+        # property evaluated per state write, so that needs no reload.
+        if coordinator.has_partner_configured_for_device(device_id):
             for description in INSIGHT_SENSOR_DESCRIPTIONS:
                 entities.append(OrionPartnerInsightSensor(coordinator, device_id, description))
 
     async_add_entities(entities)
 
-    # Both services are registered on this platform because sleep sessions
-    # belong to an account, and the insight sensors are the only entities
-    # that know which account they speak for. Targeting one of a person's
-    # insight sensors is how the caller says whose session they mean,
-    # without ever handling a raw Orion user id.
+    # Both service groups are registered on this platform because sleep
+    # sessions belong to an account, and the insight sensors are the only
+    # entities that know which account they speak for. Targeting one of a
+    # person's insight sensors is how the caller says whose session they
+    # mean, without ever handling a raw Orion user id.
+    #
+    # Every registration below goes through `helpers.async_register_entity_service`
+    # and must state `admin=`. Home Assistant only enforces per-entity
+    # POLICY_CONTROL for an entity service and the built-in Users group
+    # controls every entity, so `admin=False` means "any household member
+    # of this HA instance may call this". Nothing here is gated by
+    # accident and nothing is left open by accident either.
     platform = async_get_current_platform()
-    platform.async_register_entity_service(
+
+    # ── Sleep sessions: admin only ────────────────────────────────────
+    #
+    # Reads as well as writes. `list_sleep_sessions` hands over session
+    # ids and per-night timestamps, and the reason those are a service
+    # response rather than an entity attribute is that attributes go to
+    # the recorder and into every backup. "Too sensitive to keep" and
+    # "any household member may fetch on demand" cannot both be true of
+    # the same data. The timestamps on their own are an occupancy log,
+    # which `_SENSITIVE_DIAGNOSTIC_BRANCHES` already strips from a
+    # diagnostics download for exactly that reason.
+    helpers.async_register_entity_service(
+        platform,
         SERVICE_LIST_SLEEP_SESSIONS,
         {vol.Optional("limit", default=30): vol.All(int, vol.Range(min=1, max=200))},
         "async_list_sleep_sessions",
+        admin=True,
         supports_response=SupportsResponse.ONLY,
     )
-    platform.async_register_entity_service(
+    helpers.async_register_entity_service(
+        platform,
         SERVICE_DELETE_SLEEP_SESSION,
         {
             vol.Required("session_id"): cv.string,
@@ -735,8 +181,12 @@ async def async_setup_entry(
             vol.Required("confirm"): vol.All(cv.boolean, vol.Equal(True)),
         },
         "async_delete_sleep_session",
+        admin=True,
     )
-    platform.async_register_entity_service(
+    # Not a relabel. The server recomputes stages, heart rate, breathing
+    # and apnea from the new window, so the original night is gone.
+    helpers.async_register_entity_service(
+        platform,
         SERVICE_EDIT_SLEEP_SESSION,
         {
             vol.Required("session_id"): cv.string,
@@ -744,77 +194,114 @@ async def async_setup_entry(
             vol.Required("woke_up"): cv.datetime,
         },
         "async_edit_sleep_session",
+        admin=True,
     )
-    platform.async_register_entity_service(
+    # `claim: both` writes a named person into a session they may not
+    # have slept, which is somebody else's record being edited.
+    helpers.async_register_entity_service(
+        platform,
         SERVICE_CONFIRM_SLEEP_SESSION,
         {
             vol.Required("session_id"): cv.string,
             vol.Optional("claim", default="me"): vol.In(["me", "both"]),
         },
         "async_confirm_sleep_session",
+        admin=True,
     )
-    platform.async_register_entity_service(
+    helpers.async_register_entity_service(
+        platform,
         SERVICE_END_SLEEP_SESSION,
         {vol.Required("confirm"): cv.boolean},
         "async_end_sleep_session",
+        admin=True,
     )
 
+    # ── Bed access and device settings: admin only ────────────────────
+    #
     # Access management is device-scoped rather than person-scoped, so it
     # targets the Bed Access sensor. The device owns the guest list; a
     # person's insight sensor has nothing to say about who else can use
     # the bed.
-    platform.async_register_entity_service(
+    #
+    # `list_access` and `list_invites` are gated alongside the writes
+    # rather than left open, because they are the reconnaissance step for
+    # them. `list_access` returns the raw Orion `user_id` for every
+    # household member, and those ids are the exact required input to
+    # `remove_user_access`, `update_user_phone` and `assign_zones`.
+    # `list_invites` is keyed on phone numbers, which for this vendor is
+    # where login codes are delivered. Redacting them instead was the
+    # alternative and it does not work: `list_access` minus the ids is
+    # just the `people` attribute this sensor already publishes, and
+    # `list_invites` minus the numbers is a count.
+    helpers.async_register_entity_service(
+        platform,
         SERVICE_LIST_ACCESS,
         {},
         "async_list_access",
+        admin=True,
         supports_response=SupportsResponse.ONLY,
     )
-    platform.async_register_entity_service(
+    helpers.async_register_entity_service(
+        platform,
         SERVICE_LIST_INVITES,
         {},
         "async_list_invites",
+        admin=True,
         supports_response=SupportsResponse.ONLY,
     )
-    platform.async_register_entity_service(
+    helpers.async_register_entity_service(
+        platform,
         SERVICE_INVITE_USER,
         {
             vol.Required("phone_number"): cv.string,
             vol.Required("role"): vol.In(sorted(util.INVITE_ROLES)),
         },
         "async_invite_user",
+        admin=True,
     )
-    platform.async_register_entity_service(
+    helpers.async_register_entity_service(
+        platform,
         SERVICE_CANCEL_INVITE,
         {vol.Required("invite_id"): cv.string},
         "async_cancel_invite",
+        admin=True,
     )
-    platform.async_register_entity_service(
+    helpers.async_register_entity_service(
+        platform,
         SERVICE_ACCEPT_INVITE,
         {vol.Required("code"): cv.string},
         "async_accept_invite",
+        admin=True,
     )
-    platform.async_register_entity_service(
+    helpers.async_register_entity_service(
+        platform,
         SERVICE_REMOVE_USER_ACCESS,
         {
             vol.Required("user_id"): cv.string,
             vol.Required("confirm"): vol.All(cv.boolean, vol.Equal(True)),
         },
         "async_remove_user_access",
+        admin=True,
     )
-    platform.async_register_entity_service(
+    helpers.async_register_entity_service(
+        platform,
         SERVICE_CREATE_GUEST,
         {},
         "async_create_guest",
+        admin=True,
     )
-    platform.async_register_entity_service(
+    helpers.async_register_entity_service(
+        platform,
         SERVICE_UPDATE_USER_PHONE,
         {
             vol.Required("user_id"): cv.string,
             vol.Required("phone"): cv.string,
         },
         "async_update_user_phone",
+        admin=True,
     )
-    platform.async_register_entity_service(
+    helpers.async_register_entity_service(
+        platform,
         SERVICE_ASSIGN_ZONES,
         {
             vol.Required("user_id"): cv.string,
@@ -822,16 +309,27 @@ async def async_setup_entry(
             vol.Required("confirm"): vol.All(cv.boolean, vol.Equal(True)),
         },
         "async_assign_zones",
+        admin=True,
     )
-    platform.async_register_entity_service(
+    # Cosmetic on the vendor's side and nothing here reads it, but it
+    # still writes to the shared account, so it sits with the writes
+    # rather than becoming the one ungated exception somebody has to
+    # remember the reason for.
+    helpers.async_register_entity_service(
+        platform,
         SERVICE_SET_DEVICE_NAME,
         {vol.Required("name"): cv.string},
         "async_set_device_name",
+        admin=True,
     )
-    platform.async_register_entity_service(
+    # The bed derives which weekday it is from this, so a wrong value
+    # moves everyone's bedtime rather than relabelling it.
+    helpers.async_register_entity_service(
+        platform,
         SERVICE_SET_DEVICE_TIMEZONE,
         {vol.Required("timezone"): cv.string},
         "async_set_device_timezone",
+        admin=True,
     )
 
 
@@ -1035,9 +533,19 @@ class OrionSensorEntity(OrionBaseEntity, SensorEntity):
 
         user_ids = [own_id]
         if claim == "both":
+            # `has_partner_for_device` already returns False unless
+            # `partner_mapping_valid`, so re-checking that flag here said
+            # nothing and read as though it did. The cost of leaving it
+            # was not a wrong answer, it was that the next partner-gated
+            # entity copies this belt-and-braces shape and the two
+            # eventually disagree about which one is authoritative.
+            #
+            # `partner_update_ok` stays. That is a genuinely separate
+            # axis: it is about whether the partner's tokens can be
+            # WRITTEN with right now, where the other is about whether
+            # this partner belongs to this bed at all.
             if (
-                not self.coordinator.partner_mapping_valid
-                or not self.coordinator.partner_update_ok
+                not self.coordinator.partner_update_ok
                 or not self.coordinator.has_partner_for_device(self._device_id)
             ):
                 raise HomeAssistantError(
@@ -1152,13 +660,46 @@ class OrionPartnerInsightSensor(OrionSensorEntity):
         description: OrionSensorEntityDescription,
     ) -> None:
         super().__init__(coordinator, device_id, description)
+        # `partner_entity_key_id` rather than `partner_user["id"]`, because
+        # this entity is now built on runs where no partner fetch has
+        # succeeded and `partner_user` is therefore empty. An empty id makes
+        # `person_unique_id` return the 2.x role-keyed legacy string, the
+        # registry keeps that id forever, and the next boot that reaches the
+        # server mints the account-keyed id as a SECOND entity. The
+        # household ends up with two of everything and their history split
+        # across the pair. See `partner_entity_key_id` for why the recorded
+        # id is the right durable answer and why it is preferred over the
+        # fetched one.
         self._attr_unique_id = helpers.person_unique_id(
             device_id,
             description.key,
-            (coordinator.partner_user or {}).get("id"),
+            coordinator.partner_entity_key_id(),
             legacy=f"{device_id}_partner_{description.key}",
         )
-        self._attr_name = f"{coordinator.partner_name()} {_insight_label(description.key)}"
+        self._insight_label = _insight_label(description.key)
+
+    @property
+    def name(self) -> str:
+        """The partner's display name, recomputed rather than frozen.
+
+        A property instead of the `_attr_name` the parent sets, because
+        this entity is now constructed on runs where no partner fetch has
+        succeeded. `coordinator.partner_name()` returns "Partner" there,
+        and freezing that at construction would leave the friendly name
+        wrong until somebody reloaded the entry, even after a later poll
+        had verified the partner and learned their real name.
+
+        This fixes the FRIENDLY NAME only. Home Assistant slugifies the
+        first name an entity ever registers with into its entity_id and
+        never revisits it, so an entity born on a failed-fetch run keeps
+        `sensor.partner_...` permanently. That is a real cost and it is
+        accepted deliberately: an entity with a plain name is recoverable
+        through the alias options flow, and an entity that does not exist
+        is not recoverable at all. `partner_name` already reads the
+        household's alias for the recorded partner id first, so anyone who
+        has named this person is unaffected.
+        """
+        return f"{self.coordinator.partner_name()} {self._insight_label}"
 
     def _session(self) -> dict | None:
         if self.entity_description.completed_only:
@@ -1181,13 +722,15 @@ class OrionPartnerInsightSensor(OrionSensorEntity):
         partner_id = (self.coordinator.partner_user or {}).get("id")
         return partner_id if isinstance(partner_id, str) and partner_id else None
 
-
     @property
     def available(self) -> bool:
+        # No `partner_mapping_valid` conjunct. `has_partner_for_device`
+        # already folds it in, and stating it twice invites the two to
+        # drift apart. `partner_update_ok` is a different question and
+        # stays.
         return (
             super().available
             and self.coordinator.has_partner_for_device(self._device_id)
-            and self.coordinator.partner_mapping_valid
             and self.coordinator.partner_update_ok
         )
 
@@ -1330,8 +873,12 @@ class OrionWebSocketStateSensor(OrionBaseEntity, SensorEntity):
 class _OrionLiveSensorBase(OrionBaseEntity, SensorEntity):
     """Shared plumbing for per-topper-sensor live entities."""
 
-    # Fed by the live-device stream, so a fresh socket keeps it
-    # available even while a polled endpoint is failing.
+    # Fed by the live-device stream, so a fresh socket keeps it available
+    # even while a polled endpoint is failing. Load-bearing: `available`
+    # below chains up to `OrionBaseEntity.available`, which is the only
+    # thing that reads this. An earlier version of that override dropped
+    # the `super()` call, which made this line dead and the comment above
+    # it a description of behaviour the class did not have.
     _live_fed = True
 
     _attr_state_class = SensorStateClass.MEASUREMENT
@@ -1349,8 +896,29 @@ class _OrionLiveSensorBase(OrionBaseEntity, SensorEntity):
 
     @property
     def available(self) -> bool:
-        # Available whenever we've seen any live frame for this device.
-        return self.coordinator.sensor_status_text(self._device_id, self._sensor_name) is not None
+        """A live frame is necessary but not sufficient. It must be a fresh one.
+
+        Having seen any frame ever is not a freshness test.
+        `coordinator.live_devices` is only replaced inside
+        `_async_update_data`, and every early raise in that method leaves
+        it exactly as it was: an auth failure on a permanently invalid
+        refresh token, or the ownership `UpdateFailed`. Without the
+        `super()` call this property reported the last frame received as
+        current forever, with no upper bound on how old it was. That is
+        live heart rate and breath rate, so a stale reading is worse than
+        no reading.
+
+        `super().available` is `OrionBaseEntity.available`, which honours
+        `_live_fed` through `push_is_fresh`, so a genuinely live socket
+        still keeps these up while a polled endpoint is failing. That is
+        the behaviour `_OrionZoneTempSensor` has always had, for entities
+        fed by the same socket.
+        """
+        return (
+            super().available
+            and self.coordinator.sensor_status_text(self._device_id, self._sensor_name)
+            is not None
+        )
 
     @property
     def extra_state_attributes(self) -> dict[str, Any] | None:

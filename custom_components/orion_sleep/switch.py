@@ -117,9 +117,9 @@ class OrionPowerSwitch(OrionBaseEntity, SwitchEntity):
             raise HomeAssistantError("Orion device has no controllable zones")
         async with orion_call("change that setting"):
             await self.coordinator.api_client.update_live_device_zones(
-            device_serial=serial,
-            zones=[{"id": zid, "on": on} for zid in zone_ids],
-        )
+                device_serial=serial,
+                zones=[{"id": zid, "on": on} for zid in zone_ids],
+            )
         await self.coordinator.async_request_refresh()
 
     async def async_turn_on(self, **kwargs: Any) -> None:
@@ -180,6 +180,16 @@ class OrionAwayModeSwitch(OrionBaseEntity, SwitchEntity):
         already present. Swallow that specific error so a redundant
         toggle (e.g. after an automation re-asserts state) isn't a hard
         failure in the HA UI.
+
+        Everything that is NOT that one code leaves through `orion_call`.
+        This method used to `raise` the raw `OrionApiError` in the else
+        arm, which is precisely the failure `errors.orion_call` was
+        written to remove: a vendor 500 on this route reached the user as
+        a traceback in the HA UI instead of a sentence. The nesting is
+        deliberate. The inner handler needs `err.error_code`, and
+        `orion_call` has already converted the exception by the time it
+        would be readable outside, so the special case has to be decided
+        first and the re-raise then falls out into the context manager.
         """
 
         if len(self.coordinator.devices) != 1:
@@ -189,19 +199,19 @@ class OrionAwayModeSwitch(OrionBaseEntity, SwitchEntity):
         if not self.coordinator.user_id:
             raise HomeAssistantError("Orion user is unavailable")
 
-        try:
-            await self.coordinator.api_client.set_user_away(
-                user_id=self.coordinator.user_id,
-                is_away=is_away,
-            )
-        except OrionApiError as err:
-            if err.error_code == "user_already_present":
+        async with orion_call("change away mode"):
+            try:
+                await self.coordinator.api_client.set_user_away(
+                    user_id=self.coordinator.user_id,
+                    is_away=is_away,
+                )
+            except OrionApiError as err:
+                if err.error_code != "user_already_present":
+                    raise
                 _LOGGER.debug(
                     "set_user_away(%s) was a no-op; server state already matched",
                     is_away,
                 )
-            else:
-                raise
         await self.coordinator.async_request_refresh()
 
     async def async_turn_on(self, **kwargs: Any) -> None:
@@ -330,24 +340,21 @@ class OrionRapidCoolSwitch(OrionBaseEntity, SwitchEntity):
     async def async_turn_on(self, **kwargs: Any) -> None:
         """Start cooling this side for the window chosen on its slider."""
         minutes = self.coordinator.rapid_cool_duration(self._zone_id)
-        try:
-            async with orion_call("start rapid cooling"):
-                await self.coordinator.api_client.start_thermal_relief(
+        # No `except ValueError` around this. `errors.orion_call` already
+        # catches `ValueError` and re-raises it as `HomeAssistantError`, so
+        # an outer handler here can never run.
+        async with orion_call("start rapid cooling"):
+            await self.coordinator.api_client.start_thermal_relief(
                 self._serial(), [self._zone_id], minutes
             )
-        except ValueError as err:
-            raise HomeAssistantError(str(err)) from err
         await self.coordinator.async_request_refresh()
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         """Cancel cooling on this side and restore the previous setpoint."""
-        try:
-            async with orion_call("stop rapid cooling"):
-                await self.coordinator.api_client.cancel_thermal_relief(
+        async with orion_call("stop rapid cooling"):
+            await self.coordinator.api_client.cancel_thermal_relief(
                 self._serial(), [self._zone_id]
             )
-        except ValueError as err:
-            raise HomeAssistantError(str(err)) from err
         await self.coordinator.async_request_refresh()
 
 
@@ -408,9 +415,9 @@ class OrionScheduleFlagSwitch(OrionBaseEntity, SwitchEntity):
             )
         async with orion_call("save that schedule change"):
             await self.coordinator.api_client.update_schedule_field(
-            day=day,
-            field=self._field,
-            value=value,
-            user_id=self._user_id,
-        )
+                day=day,
+                field=self._field,
+                value=value,
+                user_id=self._user_id,
+            )
         await self.coordinator.async_request_refresh()

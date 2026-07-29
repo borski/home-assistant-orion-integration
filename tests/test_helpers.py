@@ -195,6 +195,105 @@ def test_duration_returns_nothing_rather_than_guessing():
         assert helpers.schedule_duration_text(bad) is None
 
 
+# ── Names that are actually credentials ───────────────────────────────
+#
+# The thing being defended: Home Assistant slugifies an entity's name
+# into its entity_id at first registration and never revisits it on
+# rename, and `orion_user_label` falls back through name, then email,
+# then phone. So an account with no display name set puts a login
+# credential into a permanent identifier. `tests_ha` proves the entity
+# ids that result. These prove the predicate underneath them.
+
+
+def test_an_email_is_never_a_display_name():
+    for bad in (
+        "alice@example.com",
+        "  alice@example.com  ",
+        "Alice <alice@example.com>",
+        "a@b",
+    ):
+        assert helpers.is_safe_display_name(bad) is False, bad
+
+
+def test_a_phone_number_is_never_a_display_name():
+    """Every spelling the vendor has been seen to use, and then some."""
+    for bad in (
+        "+1 (555) 123-4567",
+        "+15551234567",
+        "555-123-4567",
+        "555.123.4567",
+        "5551234567",
+        "(555) 123 4567",
+        "  +1 555 123 4567  ",
+    ):
+        assert helpers.is_safe_display_name(bad) is False, bad
+
+
+def test_a_non_ascii_separator_does_not_get_a_phone_number_through():
+    """The three measured defeats of the old fixed-punctuation strip.
+
+    The predicate used to remove exactly " \\t\\u00a0-.()+" and then test
+    whether what remained was a digit string. Anything separated by a
+    character outside that set survived as "not all digits" and was
+    therefore waved through as a safe display name, which made it
+    eligible to be slugified into a permanent entity_id. Home Assistant
+    never revisits an entity_id on rename, so that is irreversible.
+
+    None of these is exotic. An en dash or a non-breaking hyphen is what
+    a word processor produces from a typed hyphen, and a slash-separated
+    number is an ordinary way to write one in several countries.
+
+    Parametrized-by-loop rather than by pytest so this file keeps its
+    dependency-free shape.
+    """
+    for bad in (
+        "555\u20131234567",  # en dash
+        "+1\u20115551234567",  # non-breaking hyphen
+        "555/123/4567",  # forward slashes
+        "555\u20141234567",  # em dash, same class of miss
+        "555_123_4567",  # underscore, ditto
+        "\u0665\u0665\u0665\u0661\u0662\u0663\u0664\u0665\u0666\u0667",  # Arabic-Indic
+        "５５５１２３４５６７",  # fullwidth digits
+    ):
+        assert helpers.is_safe_display_name(bad) is False, bad
+
+
+def test_a_real_name_is_not_rejected():
+    """The other half of the contract.
+
+    A predicate aggressive enough to drop these would make every
+    household's entities unreadable and buy no privacy at all. "R2" and
+    "42" are the deliberate stress cases: short, digit-heavy, and still
+    plainly names rather than phone numbers.
+
+    This list is why the rule is "long enough AND letterless" rather than
+    just "long enough". Tightening the digit floor to catch a
+    slash-separated number would take "Room 101" and "42" with it, and a
+    household cannot argue with that from the UI.
+    """
+    for good in (
+        "Alex",
+        "Anne-Marie",
+        "O'Brien",
+        "R2",
+        "42",
+        "Björn",
+        "李雷",
+        "Mary Jane Watson",
+        "Room 101",
+        "555",
+        # A name that is long enough to be a phone number and is plainly
+        # not one. Letters are what tells the two apart.
+        "Zone 4 Bed 3 Sensor 12",
+    ):
+        assert helpers.is_safe_display_name(good) is True, good
+
+
+def test_a_blank_or_missing_name_is_not_usable():
+    for bad in ("", "   ", None, 0, [], {}, 12345678):
+        assert helpers.is_safe_display_name(bad) is False, bad
+
+
 # ── Options-flow plumbing ─────────────────────────────────────────────
 
 
@@ -250,20 +349,48 @@ def test_nested_mapping_never_raises():
 
 
 def _to_redact() -> set[str]:
-    """Read the TO_REDACT literal out of diagnostics.py without importing it."""
+    """Read the TO_REDACT set out of diagnostics.py without importing it.
+
+    Resolves `ast.Name` elements against `const.py` as well as reading
+    plain string literals, because most of TO_REDACT is now written as
+    references to the constants it mirrors rather than as retyped copies
+    of their strings.
+
+    That indirection is the fix for the leak this whole section is about.
+    `CONF_PARTNER_ACCOUNT_ID` shipped unredacted because the redaction
+    set was a list of hand-typed strings living in a different file from
+    the constants it was supposed to shadow, so adding the constant and
+    adding the redaction were two separate acts and only one of them
+    happened. An earlier version of this reader saw literals only, which
+    means it would have silently reported an almost-empty set the moment
+    the indirection landed. Anything it cannot resolve is a hard failure
+    for exactly that reason.
+    """
     import ast
     import pathlib
 
+    const = _orion.load("const")
     src = pathlib.Path("custom_components/orion_sleep/diagnostics.py").read_text()
     for node in ast.parse(src).body:
-        if isinstance(node, ast.Assign) and any(
+        if not isinstance(node, ast.Assign) or not any(
             isinstance(t, ast.Name) and t.id == "TO_REDACT" for t in node.targets
         ):
-            return {
-                el.value
-                for el in node.value.elts
-                if isinstance(el, ast.Constant) and isinstance(el.value, str)
-            }
+            continue
+        found: set[str] = set()
+        for el in node.value.elts:
+            if isinstance(el, ast.Constant) and isinstance(el.value, str):
+                found.add(el.value)
+                continue
+            resolved = getattr(el, "id", None)
+            value = getattr(const, resolved, None) if resolved else None
+            assert isinstance(value, str), (
+                f"TO_REDACT element {ast.dump(el)} does not resolve to a "
+                "string constant in const.py. Extend this reader rather "
+                "than dropping the element, because an element it cannot "
+                "read is a field nobody checks the redaction of."
+            )
+            found.add(value)
+        return found
     raise AssertionError("TO_REDACT not found in diagnostics.py")
 
 
@@ -322,6 +449,17 @@ def test_recovery_journal_and_every_phone_spelling_are_redacted():
         "_device_ids_v3",
         "_uid_migration_v3",
         "_uid_recovery_active_v3",
+        # The partner's Orion user id, which shipped in the clear next to
+        # a redacted `_account_id_v3` because the redaction set was a
+        # separate hand-typed enumeration. Spelled as its literal here on
+        # purpose: this file resolves constants, and asserting on the
+        # constant would pass even if `const.CONF_PARTNER_ACCOUNT_ID` and
+        # the entry in TO_REDACT drifted to two different strings.
+        #
+        # `tests_ha/test_diagnostics_redaction_real.py` carries the
+        # general form of this, which requires every credential-shaped
+        # and identifier-shaped CONF_* constant to be present.
+        "_partner_account_id_v3",
     } <= redacted
 
 
@@ -507,23 +645,58 @@ def test_uuids_in_lists_are_redacted_not_just_uuid_keys():
 #
 # `config_flow.py` imports Home Assistant, so the decision is exercised
 # through a stand-in with the same shape rather than the real flow.
+#
+# THE STAND-IN WAS UPDATED, and the reason matters more than the diff.
+# Two things changed underneath it.
+#
+# 1. The decision reads `coordinator.recorded_account_id` instead of
+#    `entry.unique_id`. The account identity is recorded twice, this
+#    method guarded one copy and the coordinator guarded the other, and
+#    the reauth write then overwrote the copy this method had not
+#    checked. Reading one accessor also retires the `existing != typed`
+#    heuristic, which existed only to guess which of the two things
+#    `unique_id` was holding. `CONF_ACCOUNT_ID` means one thing on every
+#    entry, so there is nothing left to guess.
+#
+# 2. The address comparison is `coordinator.profile_carries_address`
+#    rather than a copy. The copy and the canonical version were the same
+#    rule written twice, and the unverified-account option made them
+#    genuinely divergent: setup could be relaxed by it, reauth could not.
+#    A household that set the option could load the entry and still not
+#    reauthenticate.
+#
+# The old drift test string-matched the copy, so it necessarily failed
+# once the copy was deleted. It encoded "config_flow reimplements this",
+# and the whole point of the change is that config_flow no longer does.
+# `test_config_flow_delegates_rather_than_reimplementing` replaces it and
+# asserts the stronger property: that the duplicate has not come back.
 
 
 class _Entry:
-    def __init__(self, unique_id, auth_value):
-        self.unique_id = unique_id
+    """A config entry as this decision sees it.
+
+    Carries `options` because the decision now consults one, and the
+    account id lives in `data` under its real key rather than in
+    `unique_id`, which is what actually changed.
+    """
+
+    def __init__(self, auth_value, account_id=None, allow_unverified=False):
         self.data = {"auth_value": auth_value}
+        if account_id is not None:
+            self.data["_account_id_v3"] = account_id
+        self.options = {"allow_unverified_account": allow_unverified}
 
 
-def _matches(entry, profile):
-    """The logic of ConfigFlow._async_reauth_account_matches."""
-    if entry is None or not isinstance(profile, dict) or not profile:
+def _recorded_account_id(entry):
+    """The logic of coordinator.recorded_account_id."""
+    value = entry.data.get("_account_id_v3")
+    return value if isinstance(value, str) and value else None
+
+
+def _carries_address(profile, typed):
+    """The logic of coordinator.profile_carries_address."""
+    if not isinstance(profile, dict) or not profile or not typed:
         return False
-    account_id = profile.get("id")
-    existing = entry.unique_id
-    typed = (entry.data.get("auth_value") or "").strip().lower()
-    if existing and existing != typed:
-        return bool(account_id) and existing == account_id
     known = {
         str(profile.get(f) or "").strip().lower()
         for f in ("email", "phone", "phone_number")
@@ -534,8 +707,24 @@ def _matches(entry, profile):
     return typed in known
 
 
-LEGACY = _Entry("alice@example.com", "alice@example.com")
-MODERN = _Entry(USER_A, "alice@example.com")
+def _matches(entry, profile):
+    """The logic of ConfigFlow._async_reauth_account_matches."""
+    if entry is None or not isinstance(profile, dict) or not profile:
+        return False
+    account_id = profile.get("id")
+    recorded = _recorded_account_id(entry)
+    typed = (entry.data.get("auth_value") or "").strip().lower()
+    if recorded is not None:
+        return bool(account_id) and recorded == account_id
+    if _carries_address(profile, typed):
+        return True
+    return bool(account_id) and isinstance(account_id, str) and (
+        entry.options.get("allow_unverified_account", False) is True
+    )
+
+
+LEGACY = _Entry("alice@example.com")
+MODERN = _Entry("alice@example.com", account_id=USER_A)
 
 
 def test_a_pre_3_0_entry_still_rejects_a_foreign_account():
@@ -550,7 +739,7 @@ def test_an_account_keyed_entry_compares_on_the_account():
 
 
 def test_a_phone_entry_matches_on_phone():
-    phone = _Entry("15555550100", "15555550100")
+    phone = _Entry("15555550100")
     assert _matches(phone, {"id": USER_A, "phone": "15555550100"}) is True
     assert _matches(phone, {"id": USER_B, "phone": "15555550199"}) is False
 
@@ -562,23 +751,80 @@ def test_reauth_fails_closed_when_identity_is_unknowable():
     assert _matches(LEGACY, {"id": USER_B}) is False, "profile carries no address"
 
 
-def test_the_stand_in_matches_the_real_implementation():
-    """A stand-in that drifts from the code proves nothing.
+def test_the_bypass_option_reaches_the_reauth_decision():
+    """Setup and reauth have to apply one rule, or the hatch is a dead end.
 
-    Compares the decision branches in config_flow against the ones above,
-    so rewriting one without the other fails here rather than silently.
+    Expired tokens are the case that matters. Setup cannot run at all,
+    so the option never gets consulted there, and reauth is the only
+    door left. A reauth that refuses an address-less profile while
+    setup accepts it locks the household out through the one path
+    still available to them.
+    """
+    locked_out = _Entry("alice@example.com", allow_unverified=True)
+    assert _matches(locked_out, {"id": USER_A}) is True
+
+
+def test_the_bypass_option_cannot_ratify_a_recorded_mismatch():
+    """The scope of the hatch, and the whole safety argument for it.
+
+    A recorded account id is a real reference value, so a mismatch
+    against it is a real finding rather than an absence of evidence.
+    Accepting it swaps two people's sleep history.
+    """
+    recorded = _Entry("alice@example.com", account_id=USER_A, allow_unverified=True)
+    assert _matches(recorded, {"id": USER_B, "email": "alice@example.com"}) is False
+    # And an empty profile is still refused, because accepted credentials
+    # are not evidence of whose they are no matter what is switched on.
+    assert _matches(_Entry("alice@example.com", allow_unverified=True), {}) is False
+
+
+def test_config_flow_delegates_rather_than_reimplementing():
+    """The replacement for the old drift test, and a stronger claim.
+
+    The old version asserted that config_flow contained its own copy of
+    the address comparison, which is exactly the duplication that was
+    removed. It could only ever fail once the copy was deleted.
+
+    This asserts the property that actually matters now: the decision
+    reads the one account-id accessor, calls the one address function,
+    and does NOT carry a second copy of either. The re-inlined copy is
+    what made setup and reauth able to disagree, so its absence is the
+    thing worth pinning.
     """
     import pathlib
 
     src = pathlib.Path("custom_components/orion_sleep/config_flow.py").read_text()
+    assert "from .coordinator import profile_carries_address, recorded_account_id" in src
+
     body = src[src.index("def _async_reauth_account_matches") :]
     body = body[: body.index("\n    async def ")]
+
+    # Docstring stripped before the absence checks below. That docstring
+    # explains what the old rule was and names `entry.unique_id` while
+    # doing it, so a substring search over the whole body would match the
+    # explanation of the fix and call it the bug. The absence claims are
+    # about code, so they get code.
+    opening = body.index('"""')
+    code = body[body.index('"""', opening + 3) + 3 :]
+    # Line comments are prose too, and this file is full of them.
+    code = "\n".join(
+        line for line in code.splitlines() if not line.strip().startswith("#")
+    )
+
     for marker in (
-        'if existing and existing != typed:',
+        "recorded = recorded_account_id(entry)",
+        "if profile_carries_address(profile, typed):",
+    ):
+        assert marker in code, "config_flow stopped delegating: " + marker
+    for copy in (
         'for field in ("email", "phone", "phone_number")',
         "return typed in known",
+        "entry.unique_id",
     ):
-        assert marker in body, "stand-in has drifted from config_flow: " + marker
+        assert copy not in code, (
+            "the duplicated identity rule is back in config_flow, so setup "
+            "and reauth can disagree again: " + copy
+        )
 
 
 def test_rotated_verification_tokens_are_copied_only_after_identity_probe():

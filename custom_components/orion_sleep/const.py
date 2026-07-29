@@ -23,10 +23,57 @@ CONF_PARTNER_EXPIRES_AT = "partner_expires_at"
 CONF_PARTNER_CONFIGURED = "partner_configured"
 CONF_PARTNER_REVISION = "partner_revision"
 CONF_PARTNER_DEVICE_SERIAL = "partner_device_serial"
+# The Orion account behind the partner tokens, recorded when the partner is
+# linked so a later profile response can be checked against it.
+#
+# Named like CONF_ACCOUNT_ID rather than like its CONF_PARTNER_AUTH_VALUE
+# neighbours, because it is the same KIND of thing as CONF_ACCOUNT_ID. The
+# plainly named partner keys are what the user typed. This one is derived
+# from a server response and is only ever written by the integration.
+#
+# The primary account has had a recorded-versus-returned identity check
+# since 3.0 and the partner had nothing at all. `partner_mapping_valid`
+# compared device serials and counts, which says the two accounts still
+# share one bed and says nothing about WHICH partner account this is. That
+# id then names every record `migrations._partner_recovery_renames` writes
+# into the downgrade journal, and reverting a journal that names the wrong
+# partner hands the previous partner's entities to the current one, merging
+# two people's heart rate, HRV and apnea history under one identity.
+CONF_PARTNER_ACCOUNT_ID = "_partner_account_id_v3"
+
+# Whether the partner linked to this entry has ever been changed.
+#
+# Written by `ConfigFlow._write_partner_change` whenever a partner is
+# already linked at the moment the linkage changes, so it covers both a
+# direct replacement and a removal followed later by a new partner.
+#
+# It exists for exactly one decision, in `migrations.async_revert_unique_ids`.
+# A normal 2.x upgrade leaves the pre-3.0 `{device}_partner_{key}` rows in
+# the registry on purpose, and their presence is used to SUPPRESS the
+# "partner is unmapped" refusal, because 2.x will find those rows exactly
+# where it left them. That reasoning holds only while the partner who
+# filled them is still the partner. After a replacement those rows hold
+# the PREVIOUS partner's history, 2.x will write the CURRENT partner's
+# heart rate straight into them, and the suppression turns a two-person
+# history merge into a downgrade that reports itself ready.
+#
+# `_has_legacy_partner_rows` cannot tell those apart on its own. A
+# `_partner_` substring says the row exists. It cannot say who filled it.
+CONF_PARTNER_REPLACED = "_partner_replaced_v3"
 
 # Options flow keys
 CONF_SCAN_INTERVAL = "scan_interval"  # polling interval in seconds
 DEFAULT_SCAN_INTERVAL = 600  # 10 minutes
+
+# Escape hatch for an entry that cannot prove which account its tokens
+# belong to. Read by `OrionDataUpdateCoordinator._async_setup`, which is
+# where the assertion it relaxes lives, and documented in full there.
+#
+# In options rather than in data on purpose. Data is where the integration
+# records what it learned. Options are where the household states what it
+# wants, and this is a decision only the household can make.
+CONF_ALLOW_UNVERIFIED_ACCOUNT = "allow_unverified_account"
+DEFAULT_ALLOW_UNVERIFIED_ACCOUNT = False
 
 # Insights
 CONF_INSIGHTS_DAYS = "insights_days"
@@ -56,9 +103,35 @@ RAPID_COOL_SLIDER_STEP = 5
 
 # Display aliases. Maps an immutable Orion user id to the name the household
 # actually uses, since Orion stores whatever was on the account at signup.
-# Affects friendly names ONLY. Unique ids and
-# entity ids are built from device and zone ids, never from a person's name,
-# so renaming never orphans history, dashboards, or voice assistant mappings.
+#
+# Changing an alias is always safe. It is what the two identifiers below do
+# and do not derive from that decides why, and an earlier version of this
+# comment got the second one wrong in a way that read as a guarantee.
+#
+#   unique_id   Built from device and zone ids, never from a person's name.
+#               True. Renaming cannot orphan recorder history, long term
+#               statistics, dashboards, or voice assistant mappings.
+#
+#   entity_id   DERIVED FROM THE DISPLAY NAME. Home Assistant slugifies an
+#               entity's `_attr_name` into its entity_id at FIRST
+#               registration and never revisits it on a later rename, so
+#               the first name an entity ever carries is the one its
+#               entity_id keeps forever. Setting an alias later changes the
+#               friendly name shown in the UI and leaves the entity_id, and
+#               everything keyed on it, exactly where it was. That is why
+#               renaming is non-breaking, and it is the opposite of the
+#               reason this comment used to give.
+#
+# That permanence is also why a vendor-supplied name is not trusted on the
+# way to an entity name. `orion_sleep_api.util.orion_user_label` falls back
+# through first_name, firstName, name, email, and finally phone, so an
+# account that never had a name set reaches a login credential on the
+# ordinary path rather than as an edge case. `helpers.is_safe_display_name`
+# is the predicate that refuses an email or a phone number before it can be
+# slugified into a permanent identifier, and every naming path in this
+# integration converges on it through `coordinator.display_name_for_user`.
+# An attribute carrying a credential can be purged later. An entity_id
+# cannot.
 CONF_DISPLAY_ALIASES = "display_aliases"
 
 # The Orion app displays temperature as a relative offset (-10 to +10).

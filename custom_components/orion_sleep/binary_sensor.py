@@ -29,7 +29,6 @@ _LOGGER = logging.getLogger(__name__)
 _TOPPER_SENSORS: tuple[str, ...] = ("sensor1", "sensor2")
 
 
-
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: ConfigEntry,
@@ -44,7 +43,15 @@ async def async_setup_entry(
         if not device_id:
             continue
         entities.append(OrionSessionActiveBinarySensor(coordinator, device_id))
-        if coordinator.has_partner_for_device(device_id):
+        # CONFIGURED, not verified. Same split, same reasoning, as the
+        # partner insight sensors in `sensor.py`. Gating CONSTRUCTION on the
+        # trust predicate meant one failed partner fetch at cold start
+        # deleted this entity from Home Assistant entirely rather than
+        # marking it unavailable, and nothing rebuilt it until a manual
+        # reload. `OrionPartnerSessionActiveBinarySensor.available` still
+        # requires `has_partner_for_device`, so an unverified partner gets
+        # an entity that exists and reports `unavailable`.
+        if coordinator.has_partner_configured_for_device(device_id):
             entities.append(OrionPartnerSessionActiveBinarySensor(coordinator, device_id))
         for sensor_name in _TOPPER_SENSORS:
             entities.append(OrionSensorOnBedBinarySensor(coordinator, device_id, sensor_name))
@@ -115,23 +122,44 @@ class OrionPartnerSessionActiveBinarySensor(OrionSessionActiveBinarySensor):
         device_id: str,
     ) -> None:
         super().__init__(coordinator, device_id)
+        # `partner_entity_key_id` rather than `partner_user["id"]`. This
+        # entity is now built on runs where no partner fetch has succeeded,
+        # and an empty id would send `person_unique_id` to its 2.x
+        # role-keyed legacy fallback, which the registry would then hold
+        # forever while the account-keyed id got minted as a second entity
+        # on the next healthy boot. See `coordinator.partner_entity_key_id`.
         self._attr_unique_id = helpers.person_unique_id(
             device_id,
             "session_active",
-            (coordinator.partner_user or {}).get("id"),
+            coordinator.partner_entity_key_id(),
             legacy=f"{device_id}_partner_session_active",
         )
-        self._attr_name = f"{coordinator.partner_name()} Sleep Session"
+
+    @property
+    def name(self) -> str:
+        """The partner's display name, recomputed rather than frozen.
+
+        A property for the same reason the one on
+        `OrionPartnerInsightSensor` is. This entity can be constructed
+        before any partner fetch has succeeded, when `partner_name()` can
+        only answer "Partner", and the name has to correct itself once a
+        later poll learns who the partner actually is. Freezing it at
+        construction would need a reload to fix.
+        """
+        return f"{self.coordinator.partner_name()} Sleep Session"
 
     def _session(self) -> dict | None:
         return self.coordinator.get_latest_partner_session(self._device_id)
 
     @property
     def available(self) -> bool:
-        return (
-            super().available
-            and self.coordinator.has_partner_for_device(self._device_id)
-            and self.coordinator.partner_mapping_valid
+        # `has_partner_for_device` already returns False unless
+        # `partner_mapping_valid`, so the conjunct that used to sit here
+        # decided nothing. It was removed rather than left alone because
+        # a redundant check reads as a necessary one, and the next
+        # partner-gated entity gets written by copying this line.
+        return super().available and self.coordinator.has_partner_for_device(
+            self._device_id
         )
 
 

@@ -7,11 +7,25 @@ redaction policy for a diagnostics download.
 
 A client library has no business choosing an entity's unique_id or
 formatting a duration as "7h 30m".
+
+The service authorization block below lives here for the same reason,
+plus one more: both entity platforms and `__init__.py` need the same
+answer to "may this caller do that", and three copies of an
+authorization rule is how two of them drift.
 """
 
 from __future__ import annotations
 
 import re
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Coroutine
+
+    from homeassistant.core import Context, HomeAssistant, ServiceCall
+    from homeassistant.helpers.entity import Entity
+    from homeassistant.helpers.entity_platform import EntityPlatform
+    from homeassistant.helpers.typing import VolDictType, VolSchemaType
 
 # Matches the vendor's HH:mm schedule times. The library keeps its own
 # copy for write validation; this one is only used to render a duration.
@@ -48,6 +62,134 @@ _UUID_RE = re.compile(
 )
 
 
+# How many digits a value needs before it is read as a phone number
+# rather than as a name. Seven is the shortest real subscriber number.
+# Set lower and legitimate short names like "R2", "42" or "Room 101"
+# start getting rejected, which costs a household a readable entity for
+# no privacy gain and cannot be argued with from the UI.
+_MIN_PHONE_DIGITS = 7
+
+
+# ── Service authorization ──────────────────────────────────────────────
+#
+# Home Assistant enforces only per-entity POLICY_CONTROL for an entity
+# service, and the built-in Users group has control of every entity. So
+# with no gate of our own, any non-admin household member of this HA
+# instance can revoke another person's access to the bed, delete a night
+# of biometric history, or rewrite the account owner's phone number,
+# which is the factor the vendor's API sends login codes to.
+#
+# Everything in this block deliberately avoids importing Home Assistant
+# at module scope. `helpers.py` is the one module in this package that
+# the fast test suite loads and executes for real instead of parsing it
+# with `ast`, and it can only do that because Home Assistant is not
+# installed there. The runtime imports therefore sit inside the
+# functions, which only ever run inside a live Home Assistant.
+
+
+async def _require_admin(hass: HomeAssistant, context: Context) -> None:
+    """Refuse an account-changing call from a non-admin Home Assistant user.
+
+    Matches `_async_admin_handler` in `homeassistant/helpers/service.py`
+    exactly, including the part that reads like a bug and is not.
+
+    A context with no `user_id` is ALLOWED. Automations, scripts and
+    scenes all produce a context with no user attached, and Home
+    Assistant treats those as trusted because creating the automation
+    was itself an admin-gated action. An earlier version of this check
+    inverted that and denied them, which broke every automation touching
+    one of these services. For a home automation integration that is a
+    worse failure than the hole it closed.
+
+    A `user_id` that resolves to nothing raises `UnknownUser` rather than
+    `Unauthorized`, again matching core, so a caller can tell a deleted
+    account apart from an under-privileged one.
+
+    Takes the `Context` off the `ServiceCall`. Never `Entity._context`,
+    which is private, nullable, and cleared five seconds after it is set
+    by `CONTEXT_RECENT_TIME_SECONDS` in `helpers/entity.py`. A gate built
+    on that attribute raises AttributeError on `None.user_id` instead of
+    denying, and it only ever holds the right value because
+    `entity_service_call` happens to set it with no await in between.
+    Nothing in Home Assistant's contract promises that ordering.
+    """
+    from homeassistant.exceptions import Unauthorized, UnknownUser
+
+    if not context.user_id:
+        return
+    user = await hass.auth.async_get_user(context.user_id)
+    if user is None:
+        raise UnknownUser(context=context)
+    if not user.is_admin:
+        raise Unauthorized(context=context)
+
+
+def _admin_only(
+    method_name: str,
+) -> Callable[[Entity, ServiceCall], Coroutine[Any, Any, Any]]:
+    """Wrap one entity service method behind `_require_admin`.
+
+    Home Assistant hands a CALLABLE `func` the raw `ServiceCall`, where a
+    method registered by NAME gets only the filtered data dict.
+    `entity_service_call` picks between the two on `isinstance(func, str)`
+    and `_handle_single_entity_call` then runs the job as
+    `func(entity, call)`. That fork is the entire reason this indirection
+    exists. A method registered by name can never see `call.context`, and
+    `call.context` is the only correct place to read the caller from.
+
+    The filtered dict is rebuilt here with the same core helper, so the
+    wrapped method keeps the signature it already had and nothing about
+    the call sites changes.
+    """
+    from homeassistant.helpers.service import remove_entity_service_fields
+
+    async def handler(entity: Entity, call: ServiceCall) -> Any:
+        await _require_admin(entity.hass, call.context)
+        # Returned, not discarded. Several gated services declare
+        # SupportsResponse.ONLY, and swallowing the value here would turn
+        # them into services that answer with nothing.
+        return await getattr(entity, method_name)(**remove_entity_service_fields(call))
+
+    handler.__name__ = f"admin_gated_{method_name}"
+    return handler
+
+
+def async_register_entity_service(
+    platform: EntityPlatform,
+    name: str,
+    # Matches what `EntityPlatform.async_register_entity_service` accepts.
+    # This used to say `dict | None`, which is narrower than the truth: a
+    # `vol.Schema`, a `vol.All` and a `cv.make_entity_service_schema`
+    # result are all valid here and none of them is a dict. Deferred to
+    # TYPE_CHECKING with the rest of the Home Assistant imports, because
+    # `tests/test_helpers.py` loads and EXECUTES this module in an
+    # environment where Home Assistant is not installed.
+    schema: VolDictType | VolSchemaType | None,
+    method: str,
+    *,
+    admin: bool,
+    **kwargs: Any,
+) -> None:
+    """Register one entity service, having first decided who may call it.
+
+    `admin` is keyword-only and has no default on purpose. The
+    registration block used to say nothing about whether a service was
+    destructive, so the answer lived eight separate times inside eight
+    method bodies. Adding a ninth account-changing service and
+    forgetting the line was a silent privilege escalation that no test
+    could see. A registration now does not compile without an answer.
+
+    Named identically to the `EntityPlatform` method it wraps, so the
+    structural guard in `tests/test_service_wiring.py` keeps matching
+    these call sites. That test parses the platform modules with `ast`
+    and exists because three handlers once landed on the wrong class and
+    nothing noticed until somebody called one. Renaming this would have
+    made every registration invisible to it.
+    """
+    func: str | Callable[..., Any] = _admin_only(method) if admin else method
+    platform.async_register_entity_service(name, schema, func, **kwargs)
+
+
 def short_id(value: object) -> str:
     """Last four characters of an identifier, for logs.
 
@@ -60,6 +202,69 @@ def short_id(value: object) -> str:
     """
     text = value if isinstance(value, str) else str(value or "")
     return "…" + text[-4:] if len(text) > 4 else (text or "?")
+
+
+def is_safe_display_name(value: object) -> bool:
+    """Whether a vendor-supplied name may be used to name an entity.
+
+    The thing being defended: `orion_sleep_api.util.orion_user_label`
+    falls back through first_name, firstName, name, email, and finally
+    phone. The last two are login credentials, and the vendor sends
+    sign-in codes to both. An account that never had a display name set
+    reaches them on the ordinary path, not as an edge case, which is why
+    the test fixtures were asserting on an entity id with an email in it.
+
+    That matters more for a name than for a recorded attribute. Home
+    Assistant slugifies an entity's name into its entity_id at FIRST
+    registration and never revisits it on rename, so a credential that
+    reaches a name is permanent. It lands in every dashboard,
+    automation, recorder row, long term statistics row, backup, and
+    screenshot pasted into a bug report. A recorded attribute can be
+    purged. An entity_id cannot.
+
+    `OrionAccessSensor._people` already refuses `orion_user_label` for
+    exactly this reason. This is that same policy, moved to where every
+    naming path in the integration actually converges.
+
+    Deliberately permissive about anything that is not an email or a
+    phone number. Rejecting a real name costs a household a readable
+    entity and gains nothing, so "R2", "42" and "Anne-Marie" all pass.
+    """
+    if not isinstance(value, str):
+        return False
+    text = value.strip()
+    if not text:
+        return False
+    # Any "@" at all. Email is the first credential in that fallback
+    # chain and the one the default fixture profile actually hits.
+    if "@" in text:
+        return False
+    # A phone number is digits plus separators. A name that is long
+    # enough to be a phone number essentially always contains a letter.
+    #
+    # Tested by Unicode property rather than against a fixed punctuation
+    # set, because a fixed set is only ever as complete as whatever
+    # somebody thought of on the day. The previous version stripped
+    # exactly " \t\u00a0-.()+" and was therefore defeated by an en dash
+    # (U+2013), a non-breaking hyphen (U+2011), and a forward slash, all
+    # three of which sailed through as safe names and were eligible to
+    # be slugified into a permanent entity_id. None of those is exotic.
+    # A vendor that stores "555/123/4567" or a copy-paste out of a word
+    # processor that helpfully converted the hyphen produces them, and
+    # the failure is silent and irreversible.
+    #
+    # `str.isdigit` also covers non-ASCII digits, so an Arabic-Indic or
+    # fullwidth spelling of the same number is caught by the same rule
+    # rather than needing its own entry in a table.
+    # The letter test is what keeps this permissive. "Room 101" and "42"
+    # are short enough to pass on the digit count alone, and a genuine
+    # name that does carry seven digits still passes because it has
+    # letters in it. Only a bare, letterless, long-enough run of digits
+    # is refused, which is exactly the shape `orion_user_label` returns
+    # when it falls all the way through to the phone field.
+    if sum(1 for char in text if char.isdigit()) < _MIN_PHONE_DIGITS:
+        return True
+    return any(char.isalpha() for char in text)
 
 
 def nested_mapping(container: object, *keys: str) -> dict:

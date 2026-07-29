@@ -363,29 +363,91 @@ a Number (write) and a Sensor (history).
 
 ## Testing
 
-### Unit suite
+### Building the test environment
+
+Both suites run under `.venv-ha`. It is gitignored, so a fresh checkout has
+to build it. The dependencies are declared as a PEP 735 group in
+`pyproject.toml`:
 
 ```bash
-mise exec pipx:pytest -- pytest -q          # 95 tests
-mise exec pipx:ruff -- ruff check custom_components tests orion_info.py
+uv venv .venv-ha --python 3.14
+uv pip install --python .venv-ha --group test
+# The API client is a separate step. See the warning below.
+uv pip install --python .venv-ha -e ../orion-sleep-api
+```
+
+`homeassistant` is intentionally not pinned on its own.
+`pytest-homeassistant-custom-component` pins the version it was built
+against, and letting it resolve that is the point of using it. It resolves
+to `homeassistant==2026.7.4` today.
+
+> The editable install above points at the local checkout on purpose, so
+> a change to the client is picked up without a reinstall. It is not
+> required. `orion-sleep-api` is published, so
+> `uv pip install --python .venv-ha orion-sleep-api` works from a clean
+> machine with no sibling checkout, which is what CI does.
+>
+> `manifest.json` pins the version Home Assistant installs from PyPI when
+> it sets up the integration, and `tests/test_package_imports.py` asserts
+> that pin matches the build actually installed in the environment. That
+> test is what catches the two halves drifting apart, and it does fire:
+> an editable install keeps its `dist-info` metadata from install time,
+> so bumping `__version__` in the sibling checkout without reinstalling
+> makes the environment and the pin disagree while the source looks
+> right. Reinstall when that test fails.
+
+### Fast suite
+
+```bash
+.venv-ha/bin/python -m pytest -q -p no:homeassistant   # 229 passed, 2 xfailed, 0.8s
+mise exec pipx:ruff -- ruff check custom_components tests tests_ha
 mise exec -- python -m compileall -q custom_components tests
 ```
 
-**Home Assistant and aiohttp are deliberately not installed**, and CI runs
-without them. That constraint shapes the whole suite. Tests reach the
-integration two ways, both via `tests/_orion.py`:
+`testpaths` in `pyproject.toml` points a bare `pytest` at `tests`, so the
+command above needs no path.
+
+**`-p no:homeassistant` is required, not optional.**
+`pytest-homeassistant-custom-component` is installed for `tests_ha` and
+pytest autoloads it by entry point. It registers autouse async fixtures
+against every test in the session, and every test in the fast suite is
+synchronous, so all of them error at setup with a message about
+`enable_event_loop_debug` that points at pytest_asyncio internals rather
+than at the cause. `tests/conftest.py` detects the plugin and fails with
+the flag to add, so this is a one-line fix rather than a debugging session.
+
+Tests reach the integration three ways, via `tests/_orion.py`, in
+descending order of what they can prove:
 
 | Helper | Use |
 |--------|-----|
-| `_orion.load("util")` | Imports a dependency-free module off disk and exercises it normally. Covers `util.py` and `live_state.py`. |
-| `_orion.tree("api")` | Parses a module as source with stdlib `ast`, never importing it. Covers `api.py` and `coordinator.py`. |
+| `_orion.real("descriptions")` | **Prefer this.** Imports the real module from the real package and returns the real objects. The only technique that catches a missing symbol, a renamed Home Assistant helper, or a handler on the wrong class. |
+| `_orion.load("helpers")` | Loads a Home-Assistant-free module off disk in isolation. Kept for `helpers.py`, where loading it with no package context is what proves its Home Assistant imports are still deferred. |
+| `_orion.tree("coordinator")` | Parses source with `ast`, never imports. Structural only. Still earns its place: it sees code no fixture happens to execute, and it can assert the ABSENCE of a call, which no import can. |
+
+Real imports cost about 560 ms once per process, almost all of it inside
+`homeassistant.components.sensor`, which pulls in `websocket_api` then
+`http` then `hass_nabucasa` then `ssl`. That is paid once, not per test.
+On a cold bytecode cache the first run is several seconds. Warm, the whole
+suite is under a second.
 
 | File | Tests | Covers |
 |------|-------|--------|
-| `tests/test_util.py` | 58 | Pure helpers: unique ids, aliases, schedule validation, session selection, timeline parsing |
-| `tests/test_api_errors.py` | 18 | Structural leak guards on `api.py`, malformed vendor payloads, auth response shapes |
-| `tests/test_coordinator_safety.py` | 12 | Exception handler ordering, account isolation, poll carry-forward, hostile data |
-| `tests/test_live_state.py` | 7 | Live payload extraction |
+| `tests/test_helpers.py` | 51 | Diagnostics redaction, aliases, unique ids, schedule text. Real execution of `helpers.py`. |
+| `tests/test_descriptions.py` | 112 | Entity descriptions and their `value_fn` / `extra_attrs_fn` readers, driven against malformed vendor payloads. Real objects. |
+| `tests/test_migrations.py` | 23 | v3 identity migration against real `ConfigEntryState` and the real description list, with only the two registries faked. |
+| `tests/test_package_imports.py` | 21 | Every module imports, every `orion_sleep_api` symbol resolves, manifest pin matches the installed client. |
+| `tests/test_coordinator_safety.py` | 12 | Structural: exception handler ordering, account isolation, poll carry-forward. |
+| `tests/test_service_wiring.py` | 12 | Half structural (what is registered), half real (does it resolve on the class). |
+
+### Real Home Assistant suite
+
+```bash
+.venv-ha/bin/python -m pytest tests_ha -q     # 233 tests, about 130s
+```
+
+Separate invocation because it builds real Home Assistant instances per
+test. Same interpreter as the fast suite.
 
 ### The structural guards, and why they exist
 

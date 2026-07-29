@@ -10,7 +10,9 @@ from __future__ import annotations
 import pytest
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers import issue_registry as ir
 
+from custom_components.orion_sleep import ISSUE_UNIQUE_ID_CONFLICT
 from custom_components.orion_sleep.const import (
     CONF_ACCOUNT_ID,
     CONF_DEVICE_IDS,
@@ -44,6 +46,15 @@ async def test_a_two_generation_registry_is_not_silently_accepted(hass, patched)
     registry shape this produces is also the one `revert_unique_ids`
     cannot resolve, so a silent accept costs the user the rollback path
     as well as the history.
+
+    This used to assert that setup FAILED, which was a stricter thing
+    than the paragraph above asks for and it cost too much. Refusing the
+    entry took down all nine platforms over one squatted id, so a user
+    whose history was split lost every climate control and every
+    automation as well. The requirement is that it is not silent, and a
+    repair issue satisfies that without the outage.
+    `test_migration_degrades_real.py` covers the other half, that the
+    platforms load and the entities stay available.
     """
     entry = make_entry(hass, data={CONF_DEVICE_IDS: [BED_A], CONF_ACCOUNT_ID: ACCOUNT})
     old_id = f"{BED_A}_sleep_score"
@@ -54,11 +65,15 @@ async def test_a_two_generation_registry_is_not_silently_accepted(hass, patched)
     await hass.config_entries.async_setup(entry.entry_id)
     await hass.async_block_till_done()
 
-    if entry.state is ConfigEntryState.LOADED:
+    issue = ir.async_get(hass).async_get_issue(
+        DOMAIN, f"{ISSUE_UNIQUE_ID_CONFLICT}_{entry.entry_id}"
+    )
+    if issue is None:
         pytest.fail(
-            "setup succeeded with both generations of sleep_score present, so "
-            "one person's history is split across two entities and nothing "
-            "told the user"
+            "setup finished with both generations of sleep_score present and "
+            "raised nothing, so one person's history is split across two "
+            "entities, the rollback path is gone with it, and the only record "
+            "is a log line nobody reads"
         )
 
 

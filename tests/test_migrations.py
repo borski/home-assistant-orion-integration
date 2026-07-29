@@ -1,21 +1,41 @@
 """Executable registry tests for the v3 identity migration.
 
-The ordinary suite intentionally has no Home Assistant dependency. These
-fakes implement the same registry operations the migration uses, so the
-tests exercise the migration itself rather than a copied decision helper.
+The migration module itself is now imported for real. What is faked is
+narrower and lower down: the two Home Assistant registries it reads,
+because a real `EntityRegistry` needs a real `hass` and that is 130
+seconds of `tests_ha`, not 4 seconds of this suite.
+
+WHAT STOPPED BEING FAKED, AND WHY IT MATTERED. This file used to build an
+entire fake `homeassistant` package tree in `sys.modules`, plus a stub of
+`custom_components.orion_sleep.descriptions`, and then load `migrations`
+against them. Two things were wrong with that.
+
+The stubbed `descriptions` module declared exactly one sensor key,
+`sleep_score`. `_planned_renames` derives every unique_id rename from
+`INSIGHT_SENSOR_DESCRIPTIONS`, so every rename assertion in this file was
+really an assertion about a one-element list this file wrote itself. The
+real module has 27 keys. A key that renames badly, collides with
+`session_active`, or disappears was unobservable here.
+
+The fake `ConfigEntryState` was a class of five string constants standing
+in for a real enum of eight members. `_entries_still_starting` compares
+against `NOT_LOADED` and `SETUP_IN_PROGRESS`. If Home Assistant renamed
+either one, production would break and this file would keep passing,
+because it was comparing its own strings to its own strings.
+
+Both are gone. The real enum and the real description list are used, and
+only `async_get` and `async_entries_for_config_entry` are swapped out.
 """
 
 from __future__ import annotations
 
-import importlib.util
-import sys
 import types
 from dataclasses import dataclass, replace
-from pathlib import Path
 
+import _orion
 import pytest
+from homeassistant.config_entries import ConfigEntryState
 
-ROOT = Path(__file__).parent.parent / "custom_components" / "orion_sleep"
 DOMAIN = "orion_sleep"
 ACCOUNT = "11111111-1111-4111-8111-111111111111"
 PARTNER = "22222222-2222-4222-8222-222222222222"
@@ -83,16 +103,6 @@ class DeviceRegistry:
         return types.SimpleNamespace(config_entries=set(owners))
 
 
-class ConfigEntryState:
-    """Only the members the migration actually branches on."""
-
-    NOT_LOADED = "not_loaded"
-    SETUP_IN_PROGRESS = "setup_in_progress"
-    LOADED = "loaded"
-    SETUP_RETRY = "setup_retry"
-    SETUP_ERROR = "setup_error"
-
-
 class Entry:
     def __init__(
         self,
@@ -139,84 +149,53 @@ class Coordinator:
         self.devices = [{"id": DEVICE, "serial_number": "SERIAL"}]
         self.user_id = ACCOUNT
         self.partner_user = {}
+        # Mirrors the real coordinator's initial value, which is False.
+        # This stub omitted the attribute entirely, so every test using it
+        # exercised `_partner_recovery_renames` through a `getattr`
+        # fallback rather than through the flag production code reads. The
+        # fallback used to default to True, which meant the stub silently
+        # asserted that an unverifiable partner may still claim ownership
+        # of a unique_id. A test double that cannot answer a question the
+        # production code asks is not a smaller coordinator, it is a
+        # different one.
+        self.partner_identity_confirmed = False
 
     def has_partner_for_device(self, _device_id):
         return False
 
 
-@pytest.fixture(scope="module")
-def migrations():
-    """Restores sys.modules on the way out.
+@pytest.fixture
+def migrations(monkeypatch):
+    """The real migrations module, with only the two registries swapped.
 
-    This installs fake `homeassistant` and `custom_components` modules and
-    used to leave them there for the rest of the process. Harmless only
-    while nothing else imports Home Assistant. The moment a real HA test
-    lands in the same run, collection order decides whether it gets the
-    real package or these stubs, and the failure looks like an HA bug.
+    The swap replaces the `dr` and `er` names inside the migrations
+    module rather than patching attributes on Home Assistant's own
+    modules. Patching `homeassistant.helpers.entity_registry.async_get`
+    in place would be visible to anything else that imported it, and this
+    suite shares a process with every other file in `tests/`. Rebinding
+    the module's own reference is scoped to exactly the code under test.
+
+    `monkeypatch` undoes both on teardown, so an ordering change between
+    test files cannot leave a fake registry installed for the next one.
+    That is the specific failure the old module-scoped `sys.modules`
+    surgery in this file could produce, and it produced it silently: a
+    later test would get a fake `homeassistant` and fail in a way that
+    read like a Home Assistant bug.
     """
-    saved = dict(sys.modules)
-    try:
-        yield from _load_migrations()
-    finally:
-        sys.modules.clear()
-        sys.modules.update(saved)
+    module = _orion.real("migrations")
 
-
-def _load_migrations():
-    package = types.ModuleType("custom_components.orion_sleep")
-    package.__path__ = [str(ROOT)]
-    sys.modules["custom_components"] = types.ModuleType("custom_components")
-    sys.modules["custom_components.orion_sleep"] = package
-
-    for name in ("const", "helpers"):
-        spec = importlib.util.spec_from_file_location(
-            f"custom_components.orion_sleep.{name}", ROOT / f"{name}.py"
-        )
-        module = importlib.util.module_from_spec(spec)
-        sys.modules[spec.name] = module
-        spec.loader.exec_module(module)
-
-    sensor = types.ModuleType("custom_components.orion_sleep.sensor")
-    sensor.INSIGHT_SENSOR_DESCRIPTIONS = [types.SimpleNamespace(key="sleep_score")]
-    sys.modules[sensor.__name__] = sensor
-
-    homeassistant = types.ModuleType("homeassistant")
-    config_entries = types.ModuleType("homeassistant.config_entries")
-    config_entries.ConfigEntry = Entry
-    config_entries.ConfigEntryState = ConfigEntryState
-    core = types.ModuleType("homeassistant.core")
-    core.HomeAssistant = Hass
-    exceptions = types.ModuleType("homeassistant.exceptions")
-    exceptions.ConfigEntryError = type("ConfigEntryError", (Exception,), {})
-    helpers = types.ModuleType("homeassistant.helpers")
-    device_registry = types.ModuleType("homeassistant.helpers.device_registry")
-    entity_registry = types.ModuleType("homeassistant.helpers.entity_registry")
-    device_registry.async_get = lambda hass: hass.device_registry
-    entity_registry.async_get = lambda hass: hass.entity_registry
-    entity_registry.async_entries_for_config_entry = lambda registry, entry_id: [
-        row for row in registry.entities.values() if row.config_entry_id == entry_id
-    ]
-    helpers.device_registry = device_registry
-    helpers.entity_registry = entity_registry
-    sys.modules.update(
-        {
-            "homeassistant": homeassistant,
-            "homeassistant.config_entries": config_entries,
-            "homeassistant.core": core,
-            "homeassistant.exceptions": exceptions,
-            "homeassistant.helpers": helpers,
-            "homeassistant.helpers.device_registry": device_registry,
-            "homeassistant.helpers.entity_registry": entity_registry,
-        }
+    fake_dr = types.SimpleNamespace(async_get=lambda hass: hass.device_registry)
+    fake_er = types.SimpleNamespace(
+        async_get=lambda hass: hass.entity_registry,
+        async_entries_for_config_entry=lambda registry, entry_id: [
+            row
+            for row in registry.entities.values()
+            if row.config_entry_id == entry_id
+        ],
     )
-
-    spec = importlib.util.spec_from_file_location(
-        "custom_components.orion_sleep.migrations", ROOT / "migrations.py"
-    )
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    yield module
+    monkeypatch.setattr(module, "dr", fake_dr)
+    monkeypatch.setattr(module, "er", fake_er)
+    return module
 
 
 def record(domain, old, new, platform=DOMAIN, role="primary"):
@@ -273,19 +252,25 @@ def test_fresh_v3_rows_are_journalled_without_waiting_for_a_restart(migrations):
     ]
 
 
-def test_a_partner_record_is_dropped_once_that_partner_is_unverifiable(migrations):
+def test_a_partner_record_is_distrusted_once_that_partner_is_unverifiable(migrations):
     """The reverse rename would hand 2.x the wrong person's entities.
 
     2.x has one role-keyed partner row and feeds it from whichever partner
     account is linked at the time. So a record naming a partner this pass
-    cannot verify must not survive: reverting it would put the previous
+    cannot verify must not be REVERTED: doing so would put the previous
     partner's sleep, heart rate and apnea entities on the id that 2.x then
-    writes the CURRENT partner's readings to. One transient fetch failure
-    is enough to reach this, so the eviction is unconditional.
+    writes the CURRENT partner's readings to.
+
+    This used to be spelled as an unconditional delete, and that
+    overshot. A single transient fetch failure reaches this code path too,
+    and deleting on that destroyed the household's only rollback record
+    over an 800ms network blip, with no self-healing. The record is now
+    kept and marked stale instead, which withholds the revert without
+    withholding the data. `async_revert_unique_ids` refuses on the flag.
     """
     old = f"{DEVICE}_sleep_score"
     new = f"{DEVICE}_user_{ACCOUNT}_sleep_score"
-    stale_partner = record(
+    partner_record = record(
         "sensor",
         f"{DEVICE}_partner_sleep_score",
         f"{DEVICE}_user_{PARTNER}_sleep_score",
@@ -296,19 +281,31 @@ def test_a_partner_record_is_dropped_once_that_partner_is_unverifiable(migration
         data={
             "auth_value": "alice@example.com",
             "_device_ids_v3": [DEVICE],
-            "_uid_migration_v3": [stale_partner],
+            "_uid_migration_v3": [partner_record],
         }
     )
     hass = Hass([entry], EntityRegistry([row]))
 
     assert migrations.async_migrate_unique_ids(hass, entry, Coordinator()) == 1
     journal = entry.data["_uid_migration_v3"]
-    assert stale_partner not in journal
     assert record("sensor", old, new) in journal
+    kept = [r for r in journal if r["role"] == "partner"]
+    assert kept == [{**partner_record, "stale": True}], (
+        "an unverifiable partner record was either deleted, which loses the "
+        "rollback path over a transient failure, or left trusted, which lets "
+        "a revert rename the wrong person's entities"
+    )
 
 
 def test_a_legacy_partner_record_without_a_role_is_still_recognised(migrations):
-    """Journals written before `role` existed must not slip past the guard."""
+    """Journals written before `role` existed must not slip past the guard.
+
+    Recognition is observable as the stale marking rather than as a
+    delete. A record this reader failed to recognise would come back
+    labelled "primary" and carrying no flag, so asserting the flag proves
+    the same thing the old delete assertion did, and proves it about the
+    exact record rather than about the journal being empty.
+    """
     legacy = {
         "domain": "sensor",
         "platform": DOMAIN,
@@ -325,7 +322,9 @@ def test_a_legacy_partner_record_without_a_role_is_still_recognised(migrations):
     hass = Hass([entry], EntityRegistry())
 
     migrations.async_migrate_unique_ids(hass, entry, Coordinator())
-    assert "_uid_migration_v3" not in entry.data
+    assert entry.data["_uid_migration_v3"] == [
+        {**legacy, "role": "partner", "stale": True}
+    ]
 
 
 def test_partial_revert_keeps_only_the_mapping_that_failed(migrations):
@@ -464,6 +463,12 @@ def test_fresh_v3_partner_row_is_still_recoverable_for_downgrade(migrations):
     coordinator = Coordinator()
     coordinator.partner_user = {"id": PARTNER}
     coordinator.has_partner_for_device = lambda _device_id: True
+    # Stated, not inherited. This test's premise is a partner whose
+    # identity this setup positively established, because that is the only
+    # state in which a partner rename record may be written at all. A
+    # partner nobody could verify must NOT be journalled, and that case is
+    # covered separately in `tests_ha/test_partner_journal_split_real.py`.
+    coordinator.partner_identity_confirmed = True
 
     migrations.async_migrate_unique_ids(hass, entry, coordinator)
     assert record("sensor", old, new, role="partner") in entry.data["_uid_migration_v3"]
@@ -545,12 +550,16 @@ def test_selling_the_first_bed_does_not_brick_the_entry(migrations):
     assert migrations.async_migrate_unique_ids(hass, entry, coordinator) == 0
 
 
-def test_a_legacy_options_partner_pair_is_still_evicted(migrations):
+def test_a_legacy_options_partner_pair_is_still_recognised(migrations):
     """The pair format is the one this project shipped WITH partner renames.
 
-    Labelling it "primary" let every legacy partner record past the
-    eviction, so a downgrade handed the previous partner's entities to
-    2.x, which then wrote the current partner's readings onto them.
+    Labelling it "primary" let every legacy partner record past the guard,
+    so a downgrade handed the previous partner's entities to 2.x, which
+    then wrote the current partner's readings onto them.
+
+    Asserted as the stale marking rather than as a delete, for the same
+    reason as the role-less record above. A pair this reader mislabelled
+    would arrive as "primary" with no flag and would be reverted.
     """
     old = f"{DEVICE}_partner_sleep_score"
     new = f"{DEVICE}_user_{PARTNER}_sleep_score"
@@ -562,7 +571,9 @@ def test_a_legacy_options_partner_pair_is_still_evicted(migrations):
     hass = Hass([entry], EntityRegistry([row]))
 
     migrations.async_migrate_unique_ids(hass, entry, Coordinator())
-    assert "_uid_migration_v3" not in entry.data
+    assert entry.data["_uid_migration_v3"] == [
+        record("sensor", old, new, role="partner") | {"stale": True}
+    ]
 
 
 def test_the_plan_does_not_depend_on_vendor_response_order(migrations):
@@ -592,3 +603,89 @@ def test_the_plan_does_not_depend_on_vendor_response_order(migrations):
         return [p for p in pairs if p[1].endswith("_temperature_display_unit")]
 
     assert account_pair(a) == account_pair(b)
+
+
+# ── Checks that only became possible with the real description list ───
+#
+# Everything below reads `descriptions.INSIGHT_SENSOR_DESCRIPTIONS`
+# through the migration. While that module was stubbed here with a
+# single made-up key, none of these could say anything: they would have
+# been assertions about a one-element list this file wrote itself.
+
+
+def test_every_real_insight_key_gets_a_rename_planned(migrations):
+    """The plan must cover the whole description list, not a sample.
+
+    `_planned_renames` is the only thing that moves a 2.x unique_id onto
+    its 3.x name. A key present in `INSIGHT_SENSOR_DESCRIPTIONS` and
+    absent from the plan is an entity that keeps its old id, gets a new
+    entity built alongside it under the new id, and leaves the user with
+    a duplicate and a dead sensor holding all the history.
+
+    Reading the list off the real module rather than restating it here on
+    purpose. A copy would pass forever after somebody added a sensor.
+    """
+    descriptions = _orion.real("descriptions")
+    keys = [d.key for d in descriptions.INSIGHT_SENSOR_DESCRIPTIONS]
+    assert len(keys) > 20, (
+        "the real description list is suspiciously short, which usually "
+        f"means a stub crept back in: {keys}"
+    )
+
+    planned = migrations._planned_renames(Entry(), Coordinator())
+    new_ids = {new for _old, new in planned}
+    missing = [key for key in keys if not any(n.endswith(f"_{key}") for n in new_ids)]
+    assert missing == [], f"no rename planned for these real sensor keys: {missing}"
+
+
+def test_no_two_description_keys_plan_the_same_new_unique_id(migrations):
+    """A collision here silently drops one entity's history.
+
+    `async_update_entity` raises when the target id is occupied, and the
+    migration counts that as a failure it cannot retry past. Two keys
+    that build the same new id make that unavoidable rather than
+    transient. The stub could not see this: one key cannot collide with
+    itself.
+
+    The realistic way in is a key that is a suffix of another key, since
+    the id is built by concatenation. That is exactly the shape of
+    `total_sleep_time` next to `sleep_time`.
+    """
+    planned = migrations._planned_renames(Entry(), Coordinator())
+    new_ids = [new for _old, new in planned]
+    duplicates = sorted({n for n in new_ids if new_ids.count(n) > 1})
+    assert duplicates == [], (
+        "two planned renames target the same unique_id, so one of them "
+        f"will always fail and that entity keeps its 2.x id: {duplicates}"
+    )
+
+    old_ids = [old for old, _new in planned]
+    dupe_sources = sorted({o for o in old_ids if old_ids.count(o) > 1})
+    assert dupe_sources == [], (
+        f"one old unique_id is planned to move to two places: {dupe_sources}"
+    )
+
+
+def test_the_partner_plan_covers_the_same_keys_plus_the_session_flag(migrations):
+    """Partner renames are derived from the same list, and must stay so.
+
+    `_partner_recovery_renames` builds its keys as
+    `INSIGHT_SENSOR_DESCRIPTIONS + ["session_active"]`. If the two lists
+    ever drift, a partner keeps 2.x ids for the sensors the primary
+    already moved, and a later revert reverses only half a household.
+    """
+    descriptions = _orion.real("descriptions")
+    expected = {d.key for d in descriptions.INSIGHT_SENSOR_DESCRIPTIONS}
+    expected.add("session_active")
+
+    coordinator = Coordinator()
+    coordinator.partner_identity_confirmed = True
+    coordinator.partner_user = {"id": PARTNER}
+    coordinator.has_partner_for_device = lambda _device_id: True
+
+    planned = migrations._partner_recovery_renames(coordinator)
+    assert planned, "no partner renames planned for a verified partner"
+    covered = {
+        key for key in expected if any(new.endswith(f"_{key}") for _old, new in planned)
+    }
+    assert covered == expected, f"partner plan misses: {sorted(expected - covered)}"

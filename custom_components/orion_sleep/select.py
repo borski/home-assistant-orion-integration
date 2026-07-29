@@ -9,17 +9,18 @@ keeping that oddity in one file makes it hard to copy by accident.
 from __future__ import annotations
 
 import logging
+from typing import ClassVar
 
 from homeassistant.components.select import SelectEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from orion_sleep_api import OrionApiError, util
+from orion_sleep_api import util
 
 from .coordinator import OrionDataUpdateCoordinator
 from .entity import OrionBaseEntity
+from .errors import orion_call
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -75,7 +76,12 @@ class OrionOrientationSelect(OrionBaseEntity, SelectEntity):
 
     _attr_entity_category = EntityCategory.CONFIG
     _attr_icon = "mdi:bed-outline"
-    _attr_options = list(util.DEVICE_ORIENTATIONS)
+    # `ClassVar` because this is a mutable list shared by every instance of
+    # the class, which ruff flags as RUF012. Annotating it is the assertion
+    # that sharing is intended: the option set is a property of the vendor
+    # API, not of one bed. Anything that mutated it in place would silently
+    # change the options on every other bed's entity too.
+    _attr_options: ClassVar[list[str]] = list(util.DEVICE_ORIENTATIONS)
     _attr_translation_key = "device_orientation"
 
     def __init__(
@@ -103,24 +109,35 @@ class OrionOrientationSelect(OrionBaseEntity, SelectEntity):
         return super().available and self.current_option is not None
 
     async def async_select_option(self, option: str) -> None:
-        """Write a new orientation and refresh."""
-        try:
-            util.validate_device_orientation(option)
-        except ValueError as err:
-            raise HomeAssistantError(str(err)) from err
+        """Write a new orientation and refresh.
 
-        _LOGGER.warning(
-            "Changing Orion bed orientation to %s. This decides which "
-            "physical side each zone maps to and may re-attribute sleep "
-            "data between sleepers",
-            option,
-        )
-        try:
+        Both arms go through `errors.orion_call` rather than being
+        hand-rolled here. This method used to catch `OrionApiError` with a
+        bespoke message and put NO guard at all on the API call for
+        `ValueError`, which the client raises bare for input validation. A
+        vendor 500 was handled and a client-side `ValueError` was not, so
+        the second one reached the user as a traceback. `orion_call` covers
+        both, and it now also routes an expired token to
+        `ConfigEntryAuthFailed` instead of reporting it as a rejected
+        orientation.
+
+        The validation call sits INSIDE the context manager on purpose.
+        `util.validate_device_orientation` raises `ValueError`, and
+        `orion_call` surfaces a `ValueError` as its own message unchanged,
+        so the user still reads "not a valid orientation" rather than
+        "Orion could not ...".
+        """
+        async with orion_call("change the bed orientation"):
+            util.validate_device_orientation(option)
+            _LOGGER.warning(
+                "Changing Orion bed orientation to %s. This decides which "
+                "physical side each zone maps to and may re-attribute sleep "
+                "data between sleepers",
+                option,
+            )
             await self.coordinator.api_client.set_device_orientation(
                 self._device_id, option
             )
-        except OrionApiError as err:
-            raise HomeAssistantError(f"Orion rejected the orientation change: {err}") from err
         await self.coordinator.async_request_refresh()
 
 
@@ -138,7 +155,8 @@ class OrionTemperatureDisplaySelect(OrionBaseEntity, SelectEntity):
 
     _attr_entity_category = EntityCategory.CONFIG
     _attr_icon = "mdi:thermometer-lines"
-    _attr_options = list(util.TEMPERATURE_DISPLAY_UNITS)
+    # ClassVar for the same reason as the orientation options above.
+    _attr_options: ClassVar[list[str]] = list(util.TEMPERATURE_DISPLAY_UNITS)
 
     def __init__(self, coordinator, device_id: str, entry_id: str) -> None:
         super().__init__(coordinator, device_id)
@@ -157,17 +175,20 @@ class OrionTemperatureDisplaySelect(OrionBaseEntity, SelectEntity):
         return self.coordinator.temperature_display_unit()
 
     async def async_select_option(self, option: str) -> None:
-        _LOGGER.warning(
-            "Changing the Orion app's temperature scale to %s. This write has "
-            "not been observed against the live API.",
-            option,
-        )
-        try:
-            await self.coordinator.api_client.set_temperature_units(display_unit=option)
-        except ValueError as err:
-            raise HomeAssistantError(str(err)) from err
-        except OrionApiError as err:
-            raise HomeAssistantError(
-                f"Orion rejected the temperature scale change: {err}"
-            ) from err
+        """Write a new display scale and refresh.
+
+        Reimplemented both of `orion_call`'s arms inline until now. Same
+        two-branch shape, one message drifted from the other write paths,
+        and it predated the `OrionAuthError` arm so an expired token here
+        was reported as a rejected scale change.
+        """
+        async with orion_call("change the app's temperature scale"):
+            _LOGGER.warning(
+                "Changing the Orion app's temperature scale to %s. This write "
+                "has not been observed against the live API.",
+                option,
+            )
+            await self.coordinator.api_client.set_temperature_units(
+                display_unit=option
+            )
         await self.coordinator.async_request_refresh()

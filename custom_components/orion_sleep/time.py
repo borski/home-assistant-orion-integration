@@ -96,11 +96,62 @@ async def async_setup_entry(
     # Registered on this platform so the service inherits entity targeting.
     # Pointing it at somebody's Bedtime entity is how the caller says whose
     # schedule to override, which beats asking for a raw Orion user id.
+    #
+    # `admin=False`, and that is a decision rather than an oversight.
+    #
+    # This registration used to say `admin=True`, justified by the fact
+    # that the service rewrites a NAMED person's bedtime, wake up time and
+    # overnight temperature curve while Home Assistant only enforces
+    # per-entity POLICY_CONTROL, which the built-in Users group holds over
+    # every entity. Every word of that was true. It was also true of four
+    # ungated paths onto the same schedule rows, and all four are strictly
+    # MORE destructive than this service:
+    #
+    #   time.set_value        -> OrionScheduleTime.async_set_value
+    #                            PERMANENTLY rewrites that person's weekday
+    #                            bedtime row.
+    #   switch.turn_on/off    -> OrionScheduleFlagSwitch._write
+    #                            permanently flips bedtime_is_active and
+    #                            auto_turn_off.
+    #   number.set_value      -> OrionTempOffsetNumber.async_set_native_value
+    #                            permanently rewrites the overnight
+    #                            temperature curve.
+    #   select.select_option  -> OrionOrientationSelect
+    #                            re-attributes sleep data between sleepers.
+    #
+    # All four carry the partner's `user_id` on the partner's entities. So
+    # the gate bought this: a non-admin household member could not override
+    # tonight's bedtime, but could permanently delete it. That is not a
+    # security boundary, it is a speed bump on the one reversible door in a
+    # room with four unlocked ones, and it read as a promise the code did
+    # not keep.
+    #
+    # The alternative was to stop creating writable per-person entities for
+    # anyone but the authenticated account and route partner writes through
+    # this service alone. Rejected. Direct entity control IS the contract
+    # this integration exists to provide, it is what dashboards and
+    # automations are already built on, and demoting half a household's
+    # schedule to read-only would still leave the account owner's own rows
+    # writable by the same non-admin user. That is an asymmetry with no
+    # principled basis, paid for by gutting the feature.
+    #
+    # A household that genuinely wants these locked has the right tool
+    # already: Home Assistant's per-entity permissions. That mechanism
+    # covers all five paths at once, composes with everything else on the
+    # instance, and does not require this integration to maintain a second
+    # and weaker authorization system that guards one door in five.
+    #
+    # A gate is not reachable at the entity write in any case.
+    # `async_set_value` receives no `ServiceCall`, so there is no
+    # `Context` to read a caller from, and `helpers._require_admin`
+    # documents at length why `Entity._context` is the wrong substitute.
     platform = entity_platform.async_get_current_platform()
-    platform.async_register_entity_service(
+    helpers.async_register_entity_service(
+        platform,
         SERVICE_OVERRIDE_SCHEDULE,
         _OVERRIDE_SCHEMA,
         "async_override_schedule",
+        admin=False,
     )
 
 
@@ -154,11 +205,11 @@ class OrionScheduleTime(OrionBaseEntity, TimeEntity):
         # and silently shifting someone's bedtime by 30s would be worse.
         async with orion_call("save that schedule change"):
             await self.coordinator.api_client.update_schedule_field(
-            day=day,
-            field=self._field,
-            value=f"{value.hour:02d}:{value.minute:02d}",
-            user_id=self._user_id,
-        )
+                day=day,
+                field=self._field,
+                value=f"{value.hour:02d}:{value.minute:02d}",
+                user_id=self._user_id,
+            )
         await self.coordinator.async_request_refresh()
 
     async def async_override_schedule(self, **kwargs) -> None:
@@ -203,8 +254,8 @@ class OrionScheduleTime(OrionBaseEntity, TimeEntity):
 
         async with orion_call("override tonight's schedule"):
             await self.coordinator.api_client.override_schedule(
-            day=day, fields=fields, user_id=self._user_id
-        )
+                day=day, fields=fields, user_id=self._user_id
+            )
         # The override response echoes pre-change values, so refetch rather
         # than trusting it. Measured 2026-07-26.
         await self.coordinator.async_request_refresh()

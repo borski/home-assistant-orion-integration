@@ -27,6 +27,7 @@ from . import helpers
 from .const import (
     CONF_ACCESS_TOKEN,
     CONF_ACCOUNT_ID,
+    CONF_ALLOW_UNVERIFIED_ACCOUNT,
     CONF_AUTH_METHOD,
     CONF_AUTH_VALUE,
     CONF_DEVICE_IDS,
@@ -34,24 +35,36 @@ from .const import (
     CONF_EXPIRES_AT,
     CONF_INSIGHTS_DAYS,
     CONF_PARTNER_ACCESS_TOKEN,
+    CONF_PARTNER_ACCOUNT_ID,
     CONF_PARTNER_AUTH_METHOD,
     CONF_PARTNER_AUTH_VALUE,
     CONF_PARTNER_CONFIGURED,
     CONF_PARTNER_DEVICE_SERIAL,
     CONF_PARTNER_EXPIRES_AT,
     CONF_PARTNER_REFRESH_TOKEN,
+    CONF_PARTNER_REPLACED,
     CONF_PARTNER_REVISION,
     CONF_REFRESH_TOKEN,
     CONF_SCAN_INTERVAL,
+    CONF_UID_MIGRATION,
+    DEFAULT_ALLOW_UNVERIFIED_ACCOUNT,
     DEFAULT_INSIGHTS_DAYS,
     DEFAULT_SCAN_INTERVAL,
     DOMAIN,
 )
+from .coordinator import profile_carries_address, recorded_account_id
+
+# Module scope. `overlapping_entry_ids` used to be imported inside
+# `async_step_verify`, beside a module-scope import from the very same
+# module, which reads as a deliberate cycle break and is not one.
+# `migrations` imports `helpers`, `const` and `descriptions` only.
+from .migrations import evict_partner_journal, overlapping_entry_ids
 
 _LOGGER = logging.getLogger(__name__)
 
 AUTH_METHOD_EMAIL = "email"
 AUTH_METHOD_PHONE = "phone"
+
 
 class OrionSleepConfigFlow(ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Orion Sleep."""
@@ -96,8 +109,16 @@ class OrionSleepConfigFlow(ConfigFlow, domain=DOMAIN):
 
 
 
+    @callback
     def _async_reauth_account_matches(self, profile: dict | None) -> bool:
         """Whether these credentials belong to the entry being reauthed.
+
+        Decorated `@callback` rather than renamed. In Home Assistant an
+        `_async_` prefix on a plain `def` reads as a coroutine somebody
+        forgot to await, and a caller acting on that assumption gets a
+        truthy object back from an identity check that is supposed to be
+        able to say no. The decorator states the real contract, which is
+        that this is synchronous and safe to call from the event loop.
 
         The first version of this compared the entry's unique_id to the
         account id and gave up when the unique_id still held the typed
@@ -115,28 +136,76 @@ class OrionSleepConfigFlow(ConfigFlow, domain=DOMAIN):
         Identity must be positively established. A timeout after Orion
         accepts the verification code cannot be treated as permission to
         replace another account's credentials.
+
+        READS `recorded_account_id`, NOT `entry.unique_id`. The account
+        identity is recorded twice and the two copies were guarded
+        separately. This method used to compare `unique_id` while the
+        coordinator compared `CONF_ACCOUNT_ID`, and the reauth write below
+        then overwrote `CONF_ACCOUNT_ID` through a dict spread, having
+        validated only the other field. That is the "never overwrite a
+        recorded account id" invariant `__init__.py` states, violated two
+        modules away, and it was harmless only because the bed-overlap
+        check happened to reject the mismatch first. One accessor, read by
+        both layers, is what stops the two drifting again.
+
+        It also removes a heuristic that no longer has to exist. Deciding
+        whether `unique_id` held an account id or a typed address meant
+        testing `existing != typed`, which is a guess. `CONF_ACCOUNT_ID`
+        means exactly one thing on every entry, and absent means absent.
+
+        DELEGATES the address comparison to `profile_carries_address`
+        rather than reimplementing it. The copy that used to live here and
+        the coordinator's canonical version were the same rule written
+        twice, and the bypass option made them genuinely divergent: setup
+        could be relaxed by it and reauth could not. A household that set
+        the option could load the entry and still not reauthenticate, which
+        defeats the escape hatch in the one case it is needed most. Expired
+        tokens mean setup cannot run at all, so reauth is the ONLY door,
+        and a reauth that refuses is a locked-out household with nowhere
+        left to go.
+
+        The option relaxes exactly what it relaxes in the coordinator, and
+        no more. A recorded account id is a real reference value, a
+        mismatch against it is a real finding, and ratifying that is the
+        identity swap that moves one person's sleep history onto another
+        person. The recorded branch below never consults the option. A
+        missing or empty profile never reaches the option either, because
+        accepted credentials are not evidence of whose they are.
         """
         entry = self._reauth_entry
         if entry is None or not isinstance(profile, dict) or not profile:
             return False
 
         account_id = profile.get("id")
-        existing = entry.unique_id
+        recorded = recorded_account_id(entry)
         typed = (entry.data.get(CONF_AUTH_VALUE) or "").strip().lower()
 
-        # Already account-keyed: compare directly.
-        if existing and existing != typed:
-            return bool(account_id) and existing == account_id
+        if recorded is not None:
+            # A real reference value exists. Compare against it and stop.
+            # No option may widen this branch.
+            return bool(account_id) and recorded == account_id
 
-        # Still keyed on the typed address, which is every pre-3.0 entry.
-        known = {
-            str(profile.get(field) or "").strip().lower()
-            for field in ("email", "phone", "phone_number")
-        }
-        known.discard("")
-        if not known:
-            return False
-        return typed in known
+        # No recorded account id, which is every pre-3.0 entry. The
+        # address the entry was set up with is the only reference value
+        # left, and it is the same one the coordinator falls back to.
+        if profile_carries_address(profile, typed):
+            return True
+
+        # The escape hatch, and the reason setup and reauth now agree.
+        # Requires a usable account id even here, because the coordinator's
+        # empty-id guard is not something this option relaxes either.
+        # `isinstance` first. `bool(account_id)` was the leading term and
+        # is the weaker test: it passes for any truthy value, including a
+        # dict or a list the vendor might return in that field, and the
+        # real requirement is that the id is a usable string. Ordering the
+        # weak guard first meant the strong one only ever ran as a
+        # formality after the answer was already decided.
+        return isinstance(account_id, str) and bool(account_id) and (
+            entry.options.get(
+                CONF_ALLOW_UNVERIFIED_ACCOUNT, DEFAULT_ALLOW_UNVERIFIED_ACCOUNT
+            )
+            is True
+        )
 
     async def _async_account_identity(
         self, tokens: dict
@@ -317,8 +386,6 @@ class OrionSleepConfigFlow(ConfigFlow, domain=DOMAIN):
                     return self.async_abort(reason="identity_unavailable")
                 profile, device_ids = identity
                 account_id = profile["id"]
-                from .migrations import overlapping_entry_ids
-
                 if self._reauth_entry:
                     # Reauth was the one door into this flow with no
                     # identity check on it, and it is the dangerous one.
@@ -363,9 +430,42 @@ class OrionSleepConfigFlow(ConfigFlow, domain=DOMAIN):
                 }
 
                 if self._reauth_entry:
+                    updated = dict(data)
+                    if recorded_account_id(self._reauth_entry) is not None:
+                        # Only ever POPULATE an absent account id, never
+                        # overwrite a recorded one. This is the invariant
+                        # `__init__.py` states and holds on the setup path,
+                        # and the dict spread below used to violate it here.
+                        #
+                        # `CONF_ACCOUNT_ID` was spread in unconditionally,
+                        # so a reauth wrote the id the server just returned
+                        # over the id the entry already recorded. The guard
+                        # above validated `entry.unique_id`, a DIFFERENT
+                        # field, so the write landed on the copy nothing in
+                        # this flow had checked. Overwriting a recorded id
+                        # does not surface a mismatch, it ratifies one, and
+                        # the coordinator then compares the id to itself and
+                        # reports agreement forever while the entity
+                        # migration re-keys one person's history onto the
+                        # other person's identity.
+                        #
+                        # It was survivable only by accident. The bed
+                        # overlap check a few lines up rejects most
+                        # mismatches first, which is an unrelated third
+                        # check doing this one's job. Two accounts that
+                        # share a bed, which is exactly the household this
+                        # integration is built for, do not trip it.
+                        #
+                        # Nothing is lost by dropping the key. When an id is
+                        # recorded, `_async_reauth_account_matches` has
+                        # already proven the returned id equals it, so the
+                        # write would have been a no-op in every case where
+                        # it was safe. Popping is a no-op on success and a
+                        # refusal on the case the guard exists for.
+                        updated.pop(CONF_ACCOUNT_ID, None)
                     self.hass.config_entries.async_update_entry(
                         self._reauth_entry,
-                        data={**self._reauth_entry.data, **data},
+                        data={**self._reauth_entry.data, **updated},
                     )
                     await self.hass.config_entries.async_reload(
                         self._reauth_entry.entry_id
@@ -462,6 +562,13 @@ class OrionSleepOptionsFlow(OptionsFlow):
         current_insights_days = self._config_entry.options.get(
             CONF_INSIGHTS_DAYS, DEFAULT_INSIGHTS_DAYS
         )
+        # Defaulted from the entry rather than from the constant, so that
+        # re-saving options for an unrelated reason cannot silently switch
+        # the escape hatch back off underneath a household that is using it
+        # to keep a locked-out entry loading.
+        current_allow_unverified = self._config_entry.options.get(
+            CONF_ALLOW_UNVERIFIED_ACCOUNT, DEFAULT_ALLOW_UNVERIFIED_ACCOUNT
+        )
         partner_actions = {
             "keep": "Keep linked partner" if has_partner else "No partner account",
             "add": "Replace partner account" if has_partner else "Add partner account",
@@ -483,6 +590,39 @@ class OrionSleepOptionsFlow(OptionsFlow):
                         partner_actions
                     ),
                     vol.Required("edit_aliases", default=False): bool,
+                    # The recovery escape hatch, and the only way to reach
+                    # `CONF_ALLOW_UNVERIFIED_ACCOUNT` at all.
+                    #
+                    # `coordinator._unverified_account_allowed` has read this
+                    # option since it was defined, and nothing has ever
+                    # written it, so the documented way out of one specific
+                    # lockout did not exist. The lockout: setup requires the
+                    # profile to carry the address the entry was set up with,
+                    # a profile carrying none of `email`, `phone` and
+                    # `phone_number` fails that, and the reauth flow the
+                    # failure launches applies the same test, so the entry
+                    # fails to load and every attempt to escape aborts. That
+                    # endpoint has been measured returning `{"response":
+                    # null}`, so it is an observed shape rather than a
+                    # hypothesis.
+                    #
+                    # Home Assistant offers the options flow on an entry that
+                    # failed to set up, which is what makes this reachable by
+                    # somebody who is actually locked out. It is placed last
+                    # and worded as a recovery step because it relaxes an
+                    # identity assertion, and the scope of what it relaxes is
+                    # argued in full in the coordinator docstring. It cannot
+                    # ratify a mismatch against a recorded account id.
+                    #
+                    # Saving a change to this field reloads the entry, which
+                    # is what makes the escape hatch escape anything. The
+                    # locked-out entry has no options listener to reload it,
+                    # because setup raised before the listener was
+                    # registered. See `_async_reload_for_escape_hatch`.
+                    vol.Required(
+                        CONF_ALLOW_UNVERIFIED_ACCOUNT,
+                        default=current_allow_unverified,
+                    ): bool,
                 }
             ),
         )
@@ -506,11 +646,19 @@ class OrionSleepOptionsFlow(OptionsFlow):
         Keyed on the immutable Orion user id. Form field labels are the
         vendor's own names so the mapping is obvious, but nothing about a
         name reaches a unique id, so renaming is always non-breaking.
+
+        NON-BREAKING IS NOT THE SAME AS NON-PERMANENT, and reading the
+        sentence above as licence to accept any string is what put a
+        credential filter in this method. A rename never orphans history,
+        because unique ids are built from device and zone ids. It does
+        decide the entity_id the FIRST time an entity registers, and Home
+        Assistant never revisits that. See the refusal below.
         """
         users = self._known_users()
         labels = helpers.unique_alias_labels(users)
         label_to_id = {label: user_id for user_id, label in labels.items()}
         existing = dict(self._config_entry.options.get(CONF_DISPLAY_ALIASES) or {})
+        errors: dict[str, str] = {}
 
         if user_input is not None:
             aliases = {
@@ -518,11 +666,60 @@ class OrionSleepOptionsFlow(OptionsFlow):
                 for label, value in user_input.items()
                 if label in label_to_id
             }
-            options = dict(self._pending_options)
-            options[CONF_DISPLAY_ALIASES] = helpers.clean_alias_map(
-                aliases, set(labels)
-            )
-            return await self._async_finish_init(options)
+            # The write boundary for a household-typed display name, and
+            # the only place in the integration that can refuse one and
+            # explain why.
+            #
+            # What is being refused: an alias that looks like a login
+            # credential. Home Assistant slugifies an entity's name into
+            # its entity_id at FIRST registration and never revisits it on
+            # rename, so an alias of "alice@example.com" mints
+            # `climate.alice_example_com_climate` and that string then sits
+            # in the entity registry, every recorder row, every long term
+            # statistics row, every backup, and every screenshot pasted
+            # into a bug report. Forever. Clearing the alias afterwards
+            # changes the friendly name and nothing else.
+            #
+            # `coordinator.display_name_for_user` already refused the
+            # vendor's own label for exactly this reason, and refused the
+            # alias for none, which left the credential a clear path into
+            # the permanent identifier through the field beside the one
+            # that was guarded. Same predicate, both paths.
+            #
+            # Refused HERE rather than in `helpers.clean_alias_map` on
+            # purpose. That helper runs from `coordinator.__init__` over
+            # options that are already stored, so a filter there would
+            # silently delete an alias a household is relying on, on the
+            # next reload, with nothing said. Here the value is not yet
+            # permanent, nothing has been written, and the person who
+            # typed it is looking at the form.
+            #
+            # A blank field is NOT an error. Clearing a field is the
+            # documented way to drop an override and fall back to the
+            # account name, and `clean_alias_map` removes blanks anyway.
+            for label, value in user_input.items():
+                if label not in label_to_id:
+                    continue
+                if not isinstance(value, str) or not value.strip():
+                    continue
+                if not helpers.is_safe_display_name(value):
+                    errors[label] = "unsafe_alias"
+
+            if not errors:
+                options = dict(self._pending_options)
+                options[CONF_DISPLAY_ALIASES] = helpers.clean_alias_map(
+                    aliases, set(labels)
+                )
+                return await self._async_finish_init(options)
+
+            # Re-show with what was typed rather than with what is stored,
+            # so the household can see and edit the offending value. A form
+            # that silently reverts to the previous alias reads as if the
+            # rejection came from somewhere else.
+            existing = {
+                user_id: user_input.get(label, existing.get(user_id, ""))
+                for user_id, label in labels.items()
+            }
 
         if not labels:
             # Nothing to rename yet. Save what the first step collected
@@ -540,7 +737,187 @@ class OrionSleepOptionsFlow(OptionsFlow):
                 }
             ),
             description_placeholders={"people": ", ".join(labels.values())},
+            errors=errors,
         )
+
+    def _async_save_options(self, options: dict[str, Any]) -> ConfigFlowResult:
+        """Write the options, carrying an unmigrated pair journal forward.
+
+        Every options save in this flow goes through here, and that is the
+        point. `async_create_entry` REPLACES `entry.options` wholesale with
+        whatever the form collected, and the form has never collected
+        `CONF_UID_MIGRATION`, so any options save silently discarded it.
+
+        That key is the ORIGINAL `[old, new]` pair journal, and it is the
+        map back from 3.x unique ids to the ids 2.x asks for. Losing it
+        does not fail. `async_revert_unique_ids` reports "no recorded Orion
+        renames to undo" and exits clean while every entity sits on an id
+        2.x never asks for, which is the stranded-history outcome this
+        project treats as the worst one available.
+
+        Only reachable before a migration pass has run, because
+        `migrations._write_journal` pops this key from options once it
+        expands the pairs into `data`. The window is small and it is
+        exactly the window a fresh upgrade sits in, which is also when
+        somebody is most likely to open options and change the polling
+        interval.
+
+        Read from `self._config_entry.options` at call time rather than
+        from a value captured earlier, and that ordering is load bearing.
+        `_write_partner_change` runs `evict_partner_journal` and writes the
+        pruned options back to the entry BEFORE the flow reaches this
+        method. Carrying a captured copy forward would put the previous
+        partner's pairs back after the eviction removed them, which is the
+        history merge `evict_partner_journal` exists to prevent, performed
+        by the thing meant to prevent data loss.
+
+        Nothing is preserved when the journal is absent or empty, so this
+        cannot resurrect the key as an empty list. Downstream readers treat
+        a present-but-empty journal as "a journal exists here and it is
+        complete", which is the most confident possible way to be wrong
+        about whether a downgrade has anything to undo.
+
+        ALSO THE ONLY PLACE THE UNVERIFIED-ACCOUNT ESCAPE HATCH CAN APPLY
+        ITSELF. See `_async_reload_for_escape_hatch`.
+        """
+        journal = self._config_entry.options.get(CONF_UID_MIGRATION)
+        if journal and CONF_UID_MIGRATION not in options:
+            options = {**options, CONF_UID_MIGRATION: journal}
+        self._async_reload_for_escape_hatch(options)
+        return self.async_create_entry(title="", data=options)
+
+    def _async_reload_for_escape_hatch(self, options: dict[str, Any]) -> None:
+        """Reload the entry when `CONF_ALLOW_UNVERIFIED_ACCOUNT` changed.
+
+        The option exists to rescue an entry that cannot load, and until
+        now saving it did nothing on the entry that needed it most.
+
+        Why nothing happened. Every other options change applies through
+        the update listener that `async_setup_entry` registers, and that
+        registration is the LAST statement of a successful setup. An entry
+        locked out by the account check never reaches it, because setup
+        raised long before. So `entry.update_listeners` is empty, the write
+        fires nothing, and the household is left with the setting saved and
+        unapplied on the one entry it was written for. The previous
+        shipped remedy was a paragraph of `strings.json` telling them to
+        reload by hand.
+
+        `async_schedule_reload` rather than `async_reload`. It cancels the
+        pending SETUP_RETRY first, and a locked-out entry can be sitting in
+        exactly that state with a retry timer armed. Reloading without
+        cancelling it races the retry over the same setup.
+
+        GUARDED ON AN ACTUAL CHANGE, and that guard is not cosmetic. This
+        method runs on EVERY options save, including a scan interval edit
+        on a perfectly healthy entry. The field is `vol.Required` with a
+        default read from the entry, so it is submitted every time whether
+        or not anybody touched it, and testing presence instead of value
+        would make every save a hatch change.
+
+        Compared against the entry's stored value with the same default
+        the options form defaults the field from, so the first save on an
+        entry that predates the option does not read as a change. A
+        missing key in `options` also reads as unchanged rather than as a
+        switch to the default, because a caller that did not collect the
+        field is not expressing an opinion about it.
+
+        THE OPTIONS ARE WRITTEN HERE, BEFORE THE RELOAD IS SCHEDULED, and
+        that ordering is the whole thing working. It was originally left
+        to `OptionsFlowManager.async_finish_flow`, which writes them once
+        this step returns, on the reasoning that a task cannot start
+        before its scheduler yields. That reasoning was wrong when
+        measured. The scheduled reload ran first, set the entry up against
+        the options as they were BEFORE the save, failed the identical
+        account check, and left the hatch saved and unapplied, which is
+        indistinguishable from the bug being fixed. Writing first makes
+        the ordering ours instead of a property of somebody else's call
+        stack.
+
+        The second write is free. `async_finish_flow` calls
+        `async_update_entry` with the same dict, and `async_update_entry`
+        returns without doing anything when nothing changed.
+
+        SKIPPED ENTIRELY WHEN THE ENTRY HAS AN UPDATE LISTENER. A loaded
+        entry already reloads on any options change through the listener
+        `async_setup_entry` registers, so scheduling a second reload would
+        tear down and rebuild every per-device socket again for nothing.
+        The absence of that listener is not incidental here, it IS the
+        lockout: the registration is the last statement of a successful
+        setup, so the entries that need this are exactly the entries that
+        have nobody watching.
+
+        The alternatives are closed, and were checked rather than assumed.
+        Registering the listener early through `entry.async_on_unload` is
+        defeated by `config_entries.py` calling `_async_process_on_unload`
+        in the `finally` of a failed setup, which unregisters it on the way
+        out. Registering it bare leaks one listener per SETUP_RETRY with
+        nothing owning the unsubscribe. `OptionsFlowWithReload` refuses to
+        run at all when `entry.update_listeners` is non-empty, and this
+        integration registers one.
+        """
+        previous = bool(
+            self._config_entry.options.get(
+                CONF_ALLOW_UNVERIFIED_ACCOUNT, DEFAULT_ALLOW_UNVERIFIED_ACCOUNT
+            )
+        )
+        requested = bool(options.get(CONF_ALLOW_UNVERIFIED_ACCOUNT, previous))
+        if requested == previous:
+            return
+        if self._config_entry.update_listeners:
+            return
+        self.hass.config_entries.async_update_entry(
+            self._config_entry, options=options
+        )
+        self.hass.config_entries.async_schedule_reload(
+            self._config_entry.entry_id
+        )
+
+    def _write_partner_change(self, data: dict[str, Any]) -> None:
+        """Persist a partner change and evict both partner journals at once.
+
+        One `async_update_entry`, never two. The update fires the options
+        listener and can reload the entry, so writing the new partner
+        tokens first and clearing the journal second opens a window where
+        a reload sees the PREVIOUS partner's rename records next to the
+        CURRENT partner's tokens. That pair is exactly what merges two
+        people's history, and it is the pair `evict_partner_journal`
+        exists to break.
+
+        `options` is passed only when it actually changed. The pair format
+        journal it can hold is long gone from most entries, and handing
+        `async_update_entry` an identical options dict would turn a token
+        write into an options change and reload the entry for nothing.
+
+        ALSO RECORDS THAT A PARTNER CHANGED AT ALL. Evicting the journal
+        removes this integration's own records of the previous partner. It
+        does nothing about the pre-3.0 `{device}_partner_{key}` rows still
+        sitting in the entity registry, which the forward migration leaves
+        alone on purpose and which still hold the PREVIOUS partner's
+        history.
+
+        Those rows are read as reassurance by `async_revert_unique_ids`:
+        their presence suppresses the refusal that would otherwise block a
+        downgrade, on the grounds that 2.x will find them where it left
+        them. That is correct for a household that upgraded and never
+        touched its partner, and it is a two-person history merge for one
+        that replaced them. 2.x reads the role-keyed row, finds the
+        previous partner's history, and writes the current partner's heart
+        rate into it. Every check passes on the way there.
+
+        The marker is set whenever a partner is linked at the moment this
+        runs, which covers a straight replacement and also removal followed
+        much later by a new partner. It is never cleared, because nothing
+        that happens afterwards makes those registry rows belong to the
+        current partner again. Only deleting them does, and that is what
+        the revert now tells the household to do.
+        """
+        if self._config_entry.data.get(CONF_PARTNER_ACCESS_TOKEN):
+            data = {**data, CONF_PARTNER_REPLACED: True}
+        data, options = evict_partner_journal(data, self._config_entry.options)
+        changes: dict[str, Any] = {"data": data}
+        if options != self._config_entry.options:
+            changes["options"] = options
+        self.hass.config_entries.async_update_entry(self._config_entry, **changes)
 
     async def _async_finish_init(
         self, options: dict[str, Any]
@@ -550,6 +927,17 @@ class OrionSleepOptionsFlow(OptionsFlow):
         partner_action = options.pop("partner_action", "keep")
 
         if partner_action == "remove" and has_partner:
+            # Every key that describes the linked partner goes in one write.
+            #
+            # CONF_PARTNER_ACCOUNT_ID belongs in this set for the same reason
+            # it belongs beside the tokens when a partner is linked. Leaving
+            # it behind meant remove-then-re-add did not clear it either, so
+            # an entry that had ever recorded partner A rejected partner B
+            # through both of the flows the household actually has. It also
+            # left a stale identity claim sitting in `data` describing tokens
+            # that are no longer there, and `_partner_identity_verified`
+            # prefers a recorded id over the linked address, so the next
+            # partner would have been judged against the previous one.
             partner_keys = {
                 CONF_PARTNER_AUTH_METHOD,
                 CONF_PARTNER_AUTH_VALUE,
@@ -557,17 +945,17 @@ class OrionSleepOptionsFlow(OptionsFlow):
                 CONF_PARTNER_REFRESH_TOKEN,
                 CONF_PARTNER_EXPIRES_AT,
                 CONF_PARTNER_DEVICE_SERIAL,
+                CONF_PARTNER_ACCOUNT_ID,
             }
-            self.hass.config_entries.async_update_entry(
-                self._config_entry,
-                data={
+            self._write_partner_change(
+                {
                     key: value
                     for key, value in self._config_entry.data.items()
                     if key not in partner_keys
-                },
+                }
             )
             options[CONF_PARTNER_CONFIGURED] = False
-            return self.async_create_entry(title="", data=options)
+            return self._async_save_options(options)
 
         if partner_action == "add":
             options[CONF_PARTNER_CONFIGURED] = True
@@ -576,7 +964,7 @@ class OrionSleepOptionsFlow(OptionsFlow):
             return await self.async_step_partner_method()
 
         options[CONF_PARTNER_CONFIGURED] = has_partner
-        return self.async_create_entry(title="", data=options)
+        return self._async_save_options(options)
 
     async def async_step_partner_method(
         self, user_input: dict[str, Any] | None = None
@@ -740,21 +1128,53 @@ class OrionSleepOptionsFlow(OptionsFlow):
                         return self.async_abort(reason="partner_device_ambiguous")
                     else:
                         partner_serial = next(iter(shared_serials))
-                        self.hass.config_entries.async_update_entry(
-                            self._config_entry,
-                            data={
-                                **self._config_entry.data,
-                                CONF_PARTNER_AUTH_METHOD: self._partner_auth_method,
-                                CONF_PARTNER_AUTH_VALUE: self._partner_auth_value,
-                                CONF_PARTNER_ACCESS_TOKEN: tokens["access_token"],
-                                CONF_PARTNER_REFRESH_TOKEN: tokens["refresh_token"],
-                                CONF_PARTNER_EXPIRES_AT: tokens["expires_at"],
-                                CONF_PARTNER_DEVICE_SERIAL: partner_serial,
-                            },
-                        )
-                        return self.async_create_entry(
-                            title="", data=self._pending_options
-                        )
+                        # CONF_PARTNER_ACCOUNT_ID is written HERE and only
+                        # here, in the same dict as the tokens it describes.
+                        #
+                        # It was read in three places and written in none.
+                        # `coordinator.recorded_partner_account_id` reads it
+                        # and `_partner_identity_verified` compares the
+                        # returned partner id against it, so once partner A
+                        # was recorded by any means, linking partner B stored
+                        # B's tokens beside A's recorded id. The next poll
+                        # compared B against A, called it a mismatch, and
+                        # disabled partner insights with a warning telling the
+                        # household to relink the partner in the Orion
+                        # options. Relinking is the action that had just
+                        # failed, so the prescribed remedy was the thing that
+                        # caused the problem, and the removal path did not
+                        # clear the key either. No supported flow could clear
+                        # it. Once A was linked, B could never be accepted.
+                        #
+                        # `partner_id` is the id from the profile fetched with
+                        # these exact tokens, and it has already been checked
+                        # non-empty and checked against the primary a few
+                        # lines above, so this records who the tokens actually
+                        # belong to rather than who the user said they were.
+                        #
+                        # In the same `_write_partner_change` call as the
+                        # tokens on purpose. A separate write would open a
+                        # window where a reload sees the new tokens next to
+                        # the previous partner's recorded id, which is the
+                        # exact pairing that whole method exists to prevent.
+                        self._write_partner_change({
+                            **self._config_entry.data,
+                            CONF_PARTNER_AUTH_METHOD: self._partner_auth_method,
+                            CONF_PARTNER_AUTH_VALUE: self._partner_auth_value,
+                            CONF_PARTNER_ACCESS_TOKEN: tokens["access_token"],
+                            CONF_PARTNER_REFRESH_TOKEN: tokens["refresh_token"],
+                            CONF_PARTNER_EXPIRES_AT: tokens["expires_at"],
+                            CONF_PARTNER_DEVICE_SERIAL: partner_serial,
+                            CONF_PARTNER_ACCOUNT_ID: partner_id,
+                        })
+                        # After `_write_partner_change`, never before. That
+                        # call runs the partner eviction and writes the
+                        # pruned options back to the entry, and the save
+                        # below reads the entry's options as they are now.
+                        # Reversing the order would carry the previous
+                        # partner's pair records forward past the eviction
+                        # that just removed them.
+                        return self._async_save_options(self._pending_options)
 
         return self.async_show_form(
             step_id="partner_verify",

@@ -1,9 +1,69 @@
 [tool.pytest.ini_options]
-# `tests` is the fast suite: it never imports Home Assistant and parses the
-# component with `ast`. `tests_ha` runs against a real Home Assistant.
-# They are separate invocations because the fast suite installs fake
-# `homeassistant` modules into sys.modules and does not remove them.
+# `tests` is the fast suite and `tests_ha` is the slow one. Both now run
+# under the same interpreter, `.venv-ha`, because that is the only one
+# with Home Assistant and orion_sleep_api on it, and without those the
+# fast suite cannot import the integration and has to fall back to
+# parsing it with `ast`.
+#
+# They stay SEPARATE INVOCATIONS, for a reason that changed. It used to be
+# that `tests/test_migrations.py` installed fake `homeassistant` modules
+# into sys.modules and never removed them, so collection order decided
+# whether a real Home Assistant test got the real package or the stubs.
+# That stubbing is gone. The reason now is simply cost: `tests` imports
+# modules and calls functions and takes under a second, `tests_ha` builds
+# real Home Assistant instances and takes about 130 seconds.
+#
+# `testpaths` points at the fast one so that a bare `pytest` is the cheap
+# thing. Run the slow suite by naming it.
 testpaths = ["tests"]
+
+filterwarnings = [
+    "error::DeprecationWarning:custom_components.*",
+    # Home Assistant 2026.7 subclasses aiohttp's web.Application, which
+    # aiohttp 3.14 deprecates. Nothing in this repository can fix that,
+    # and left unfiltered it prints a warnings summary on every single
+    # run of the fast suite, which is how people learn to stop reading
+    # warning summaries. Scoped to the exact class so a warning from our
+    # own code still surfaces.
+    "ignore:Inheritance class HomeAssistantApplication from web.Application is discouraged:DeprecationWarning",
+]
+
+# PEP 735. Declared here rather than in a requirements file because there
+# is no `[project]` table to hang optional-dependencies off, and because
+# `.venv-ha` was previously undocumented: it is gitignored, it is the only
+# way to run either suite, and nothing in the repository said how to build
+# one. A checkout could not reproduce it.
+#
+# `homeassistant` is deliberately NOT pinned separately.
+# `pytest-homeassistant-custom-component` pins the Home Assistant version
+# it was built against, and letting it resolve that is the whole point of
+# using it. Pinning both independently is how they drift.
+[dependency-groups]
+test = [
+  "pytest==9.0.3",
+  "pytest-homeassistant-custom-component==0.13.348",
+]
+
+# orion-sleep-api IS NOT LISTED ABOVE, AND THAT IS NOT AN OVERSIGHT.
+#
+# `manifest.json` pins `orion-sleep-api==0.1.0`, and that pin is currently
+# unsatisfiable from any network location. The package is not on PyPI at
+# any version, and the source checkout at ../orion-sleep-api has no git
+# remote and no tags, so there is nothing to install from either. The only
+# copy that exists anywhere is a local directory and the two wheels in its
+# `dist/`.
+#
+# Listing it here would make `uv pip install --group test` fail outright
+# on every machine except the one that already has the directory, which
+# turns a documented bootstrap into a trap. It is installed as a separate
+# documented step instead. See AGENTS.md.
+#
+# This is bigger than the test environment. Home Assistant installs
+# `manifest.json` requirements from PyPI when it sets up an integration,
+# so as things stand nobody can install this integration from HACS. The
+# fix is to publish the client. Once it is published, delete this comment
+# and move the pin into the group above, where
+# `tests/test_package_imports.py` already asserts it matches the manifest.
 
 [tool.ruff]
 line-length = 100

@@ -150,11 +150,11 @@ class OrionTempOffsetNumber(OrionBaseEntity, NumberEntity):
 
         async with orion_call("save that schedule change"):
             await self.coordinator.api_client.update_schedule_field(
-            day=day,
-            field=self._schedule_field,
-            value=celsius,
-            user_id=self._user_id,
-        )
+                day=day,
+                field=self._schedule_field,
+                value=celsius,
+                user_id=self._user_id,
+            )
         await self.coordinator.async_request_refresh()
 
 

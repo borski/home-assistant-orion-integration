@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import logging
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
-from homeassistant.exceptions import ConfigEntryAuthFailed
+from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryError
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util import dt as dt_util
@@ -24,11 +24,17 @@ from orion_sleep_api import (
 
 from . import helpers
 from .const import (
+    CONF_ACCOUNT_ID,
+    CONF_ALLOW_UNVERIFIED_ACCOUNT,
+    CONF_AUTH_VALUE,
     CONF_DEVICE_IDS,
     CONF_DISPLAY_ALIASES,
     CONF_INSIGHTS_DAYS,
+    CONF_PARTNER_ACCOUNT_ID,
+    CONF_PARTNER_AUTH_VALUE,
     CONF_PARTNER_DEVICE_SERIAL,
     CONF_SCAN_INTERVAL,
+    DEFAULT_ALLOW_UNVERIFIED_ACCOUNT,
     DEFAULT_COOLING_MINUTES,
     DEFAULT_INSIGHTS_DAYS,
     DEFAULT_SCAN_INTERVAL,
@@ -36,9 +42,92 @@ from .const import (
     MIN_COOLING_MINUTES,
 )
 
+# Module scope, not inside `_async_update_data`. The function-scoped
+# import that used to sit at the bed-overlap check was defending against a
+# circular import that does not exist: `migrations` imports `helpers`,
+# `const` and `descriptions`, and none of those reach back here. A local
+# import that looks like a cycle workaround is worse than no comment,
+# because the next reader has to re-derive the whole import graph to find
+# out it was never needed.
+from .migrations import overlapping_entry_ids, resolve_bed_owner
+
 _LOGGER = logging.getLogger(__name__)
 
 OrionConfigEntry = ConfigEntry  # ConfigEntry[OrionDataUpdateCoordinator]
+
+
+def recorded_account_id(entry: ConfigEntry) -> str | None:
+    """The Orion account this entry is bound to, or None if not yet known.
+
+    `unique_id` also carries this after `async_migrate_entry_identity`, but
+    pre-3.0 entries hold the typed address there. This is the only field
+    that means one thing on every entry.
+
+    The one accessor exists because the account identity is recorded TWICE
+    and the two copies were guarded separately. `entry.unique_id` is what
+    `ConfigFlow._async_reauth_account_matches` compares. `CONF_ACCOUNT_ID`
+    is what the coordinator guard below compares. Reauth then writes
+    `CONF_ACCOUNT_ID` unconditionally through a dict spread, so it
+    overwrites the field the coordinator guards having validated only the
+    other one. That is the same "never overwrite a recorded account id"
+    invariant `__init__.py` states, violated two modules away, and it is
+    currently harmless only because an unrelated third check happens to
+    reject the mismatch first. A single reader is what stops the two
+    drifting again.
+
+    Returns None rather than "" for an absent value on purpose. An absent
+    account id and a recorded empty string mean different things: the first
+    is a pre-3.0 entry that has never been told who it belongs to, and the
+    second would be a corrupt record. Both are falsy, so a caller testing
+    truthiness is unaffected, and a caller that needs to tell them apart
+    still can.
+    """
+    value = entry.data.get(CONF_ACCOUNT_ID)
+    return value if isinstance(value, str) and value else None
+
+
+def recorded_partner_account_id(entry: ConfigEntry) -> str | None:
+    """The Orion account the linked partner tokens belong to, or None.
+
+    The partner half of `recorded_account_id`, with the same contract.
+    Absent on every entry whose partner was linked before this key
+    existed, which is why `_partner_identity_verified` treats an absent
+    value as unverifiable rather than as a mismatch.
+    """
+    value = entry.data.get(CONF_PARTNER_ACCOUNT_ID)
+    return value if isinstance(value, str) and value else None
+
+
+def profile_carries_address(profile: object, typed: str) -> bool:
+    """Whether an Orion profile names the address this entry was set up with.
+
+    `typed` is the already-normalised `CONF_AUTH_VALUE`, or
+    `CONF_PARTNER_AUTH_VALUE` on the partner path, the email or phone
+    number the user actually entered in the config flow. The profile's own
+    `email` / `phone` / `phone_number` fields are the only independent
+    statement of identity `/v1/auth/me` returns alongside the account id, so
+    they are what an unverified account id has to be checked against.
+
+    Fails closed. A profile carrying none of the three fields is not
+    evidence of a match, it is an absence of evidence, and an accepted
+    token is not proof of which account issued it.
+
+    This is the same test `ConfigFlow._async_reauth_account_matches` applies
+    on the reauth path, and it applies it by CALLING this function.
+    `config_flow.py` imports it at module scope, so there is one copy of
+    the rule and no way for the setup path and the reauth path to drift
+    into disagreeing about identity.
+    """
+    if not isinstance(profile, dict) or not profile or not typed:
+        return False
+    known = {
+        str(profile.get(field) or "").strip().lower()
+        for field in ("email", "phone", "phone_number")
+    }
+    known.discard("")
+    if not known:
+        return False
+    return typed in known
 
 
 class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
@@ -74,8 +163,8 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
         # realtime zone on/temp + status updates without waiting for the
         # next REST poll. Note that biometric-derived fields like
         # status.sensors.*.status_text (on-bed classification) lag the
-        # real event by ~30s–1min because the topper itself is slow to
-        # decide; the WS frame arrival is not the bottleneck there.
+        # real event by ~30s to 1min because the topper itself is slow to
+        # decide. The WS frame arrival is not the bottleneck there.
         self.live_devices: dict[str, dict] = {}
         # Per-zone rapid-cool window, in minutes. Chosen locally and held
         # here so the switch and its duration slider agree without either
@@ -93,8 +182,80 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
             self.options.get(CONF_DISPLAY_ALIASES)
         )
         self.partner_device_serial = str(config_entry.data.get(CONF_PARTNER_DEVICE_SERIAL, ""))
-        self.partner_mapping_valid = bool(self.partner_device_serial)
+        # Whether the last SUCCESSFUL partner fetch established that these
+        # two accounts still share exactly one bed AND that the partner is
+        # who this entry recorded. Both halves, together.
+        #
+        # Starts False, for the same reason `partner_identity_confirmed`
+        # sixteen lines below does. This used to initialise to
+        # `bool(self.partner_device_serial)`, which is neither of those
+        # things. It reports that a serial is written in the config entry,
+        # which is true the instant a partner is linked and stays true
+        # forever afterwards, including on a boot where the partner has
+        # never once been fetched.
+        #
+        # That fail-open default is what made the pair
+        # `partner_mapping_valid=True` with `partner_identity_confirmed=
+        # False` reachable on the FIRST fetch of a setup. Within one try
+        # block in `_async_refresh_partner_identity`, `get_current_user()`
+        # can return and `list_devices()` can throw, which populates
+        # `partner_user`, skips both assignments below it, and leaves this
+        # flag holding a value invented by the constructor rather than
+        # established by any fetch. `has_partner_for_device` then answers
+        # yes for a partner nothing has verified.
+        #
+        # The "leave it alone on a transient error" rule in the
+        # OrionApiError handler is not in tension with this. That rule
+        # preserves a verdict a previous successful fetch established. It
+        # is not a licence to invent one before the first fetch has
+        # happened.
+        self.partner_mapping_valid = False
+        # The topology half of the verdict above, published separately.
+        #
+        # `_async_refresh_partner_identity` has always computed these two
+        # halves apart and then thrown one of them away, so a reader asking
+        # "do these accounts still share one bed" had to infer it from a
+        # flag that also folds in identity, and could not.
+        #
+        # `partner_mapping_valid` is deliberately still a plain assigned
+        # attribute rather than a property returning `partner_topology_ok
+        # and partner_identity_confirmed`. That property was implemented and
+        # measured, and it is wrong. Identity goes False on any transient
+        # partner error, by design, so the derived flag would go False too,
+        # and `has_partner_for_device` gates entity CONSTRUCTION on it. A
+        # restart inside one dropped connection built 0 partner entities
+        # where the current code builds 44. That is the precise failure the
+        # OrionApiError handler below exists to prevent, reintroduced
+        # through the back door by a refactor that reads as pure tidying.
+        #
+        # The three-meanings problem that motivated the property is fixed by
+        # the initial value above plus this attribute, which is the part
+        # that was actually broken. `partner_mapping_valid` now means one
+        # thing in all three places: the verdict of the last SUCCESSFUL
+        # fetch.
+        self.partner_topology_ok = False
+        # Whether the LAST partner fetch positively established which Orion
+        # account these partner tokens belong to.
+        #
+        # Separate from `partner_mapping_valid`, which answers a different
+        # question and answers it in a way that cannot be inverted. That
+        # flag is false for a partner who was replaced, for a partner whose
+        # bed topology changed, AND for a partner the server simply did not
+        # answer about for 800ms. `migrations.async_migrate_unique_ids`
+        # needs to tell the first of those from the last, because it decides
+        # whether to DELETE the partner's downgrade records or merely
+        # distrust them, and deleting them on a network blip destroyed the
+        # only rollback path that person had.
+        #
+        # Starts False. Nothing has been confirmed before the first fetch,
+        # and an entry that never reaches one must not look confirmed.
+        self.partner_identity_confirmed = False
         self._warned_partner_topology = False
+        # Separate latch from the topology one on purpose. They are
+        # different findings with different fixes, and sharing a latch
+        # would let whichever fired first suppress the other's message
+        # for the lifetime of the entry.
+        self._warned_partner_identity = False
 
         # Maps device serial_number -> UUID so the WS message handler
         # (which only knows the serial) can key into live_devices.
@@ -107,6 +268,71 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
             on_message=self._handle_ws_message,
             on_state_change=self._handle_ws_state,
         )
+
+    def _unverified_account_allowed(self) -> bool:
+        """Whether the household has explicitly accepted an unverified account.
+
+        The escape hatch for one specific lockout, and deliberately not for
+        anything else.
+
+        WHAT IT RELAXES. Exactly one assertion: the requirement that a
+        profile carry the address this entry was set up with, in the branch
+        where NO account id has ever been recorded. That branch fails
+        closed, which is correct, but the failure it raises launches a
+        reauth flow whose own check is a copy of the same test. A profile
+        Orion returns without `email`, `phone` and `phone_number` therefore
+        fails setup and fails every attempt to escape setup, and there is
+        no supported action left. This option is that action.
+
+        WHAT IT DOES NOT RELAX, and this is the whole safety argument:
+
+          * The recorded-versus-returned comparison. When an account id IS
+            recorded there is a real reference value, a mismatch is a real
+            finding, and ratifying it is the identity swap that moves one
+            person's sleep history onto another person. That branch is
+            above this one and never consults this option.
+          * The empty account id guard. A profile with no id still refuses
+            to set up, because there is nothing to key an entity on and the
+            fallback ids no longer exist in the registry.
+          * Anything on the partner path. `_partner_identity_verified` has
+            its own reference values and its own degraded outcome, and it
+            cannot brick an entry, so it needs no hatch and is given none.
+
+        WHY THAT IS SAFE. The only thing this option can do is let an entry
+        with no recorded account id write the id the server just returned.
+        That is precisely what every 3.x build before the address assertion
+        did unconditionally, so the worst case is the previous behaviour,
+        entered deliberately, announced at WARNING, and confined to entries
+        the household has individually opted in. It is also self-limiting:
+        the write it permits happens once, in `async_setup_entry`, and
+        every boot after it takes the recorded-id branch instead, which
+        this option cannot reach. Leaving it switched on does not leave the
+        assertion switched off.
+
+        The warning is logged on the setup path rather than the poll path,
+        so it appears once per load and cannot become log spam.
+
+        SETTABLE FROM THE UI. `OrionSleepOptionsFlow.async_step_init`
+        offers `CONF_ALLOW_UNVERIFIED_ACCOUNT` as a boolean field defaulted
+        from the current options, placed last and worded as a recovery
+        step. Home Assistant offers the options flow on an entry that
+        failed to set up, which is what makes this reachable by somebody
+        who is actually locked out, so the escape hatch is a real one
+        rather than a read side waiting on a writer.
+        """
+        if not self.config_entry.options.get(
+            CONF_ALLOW_UNVERIFIED_ACCOUNT, DEFAULT_ALLOW_UNVERIFIED_ACCOUNT
+        ):
+            return False
+        _LOGGER.warning(
+            "Orion is loading this entry WITHOUT verifying which account its "
+            "tokens belong to, because %s is switched on in its options. The "
+            "account id this setup records will be whatever the server just "
+            "returned, and the entity migration keys every person's history "
+            "on it. Turn this off once the entry has loaded",
+            CONF_ALLOW_UNVERIFIED_ACCOUNT,
+        )
+        return True
 
     async def _async_setup(self) -> None:
         """Load one-time data: user profile, device list."""
@@ -126,6 +352,82 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
                 # Orion has been measured returning {"response": null}
                 # here, so this is an observed shape, not a hypothetical.
                 raise UpdateFailed("Orion returned a profile with no account id")
+            # The account id decides which human every person-scoped entity
+            # belongs to, and the migration re-keys existing history onto
+            # it. `api.py` already refuses an insights payload naming the
+            # wrong account. The endpoint that DECIDES the expected account
+            # had no such check, so a cached or mixed-up /v1/auth/me could
+            # silently move one person's history onto another identity.
+            recorded = recorded_account_id(self.config_entry)
+            typed = str(self.config_entry.data.get(CONF_AUTH_VALUE) or "").strip().lower()
+            if recorded:
+                if recorded != self.user_id:
+                    raise ConfigEntryAuthFailed(
+                        "Orion returned a different account than this entry was "
+                        "set up for. Reauthenticate to confirm which account it is"
+                    )
+            elif typed:
+                # No recorded account id, so there is nothing to compare the
+                # returned id against. That is not a rare state: the config
+                # flow only began writing CONF_ACCOUNT_ID in 3.0, so EVERY
+                # entry created before then arrives here on its first 3.x
+                # boot, and that same boot performs the destructive re-key.
+                # `async_migrate_entry_identity` moves the entry's unique_id
+                # onto whatever id this response carried, and
+                # `async_migrate_unique_ids` renames the pre-3.0 registry
+                # rows, with all of their recorder history, onto ids derived
+                # from it. Every later boot then compares the id to itself
+                # and reports agreement forever.
+                #
+                # The check above cannot catch that, because it only fires
+                # when a recorded id already exists. Neither can anything
+                # else: the id is a well-formed non-empty uuid, so the
+                # emptiness guard passes, and `entry_identity_conflict` only
+                # detects a collision with another Orion entry on this same
+                # Home Assistant instance, not a wrong-but-unused account.
+                # Writing it unverified was trust on first use over an
+                # endpoint measured returning {"response": null}.
+                #
+                # CONF_AUTH_VALUE is the address the user typed when they
+                # set the entry up, so requiring the profile to carry it
+                # turns that first write into a real identity assertion,
+                # using a field already present in the response in hand.
+                #
+                # Fails closed, which is right, and fails closed onto a
+                # locked door if the assertion can never be satisfied. If
+                # Orion ever returns a profile carrying none of `email`,
+                # `phone` or `phone_number`, a legacy entry stops loading,
+                # and the reauth flow this error launches applies the SAME
+                # test in `_async_reauth_account_matches`, so completing it
+                # aborts with reauth_account_mismatch. The user has no way
+                # out, and this endpoint has been measured returning
+                # {"response": null}, so an account-shape change is not a
+                # hypothetical. `self._unverified_account_allowed()` is the
+                # documented way out, and it is checked here rather than
+                # around the whole block on purpose. See its docstring.
+                if not profile_carries_address(
+                    self.user, typed
+                ) and not self._unverified_account_allowed():
+                    raise ConfigEntryAuthFailed(
+                        "Orion returned an account that does not match the "
+                        "address this entry was set up with. Reauthenticate to "
+                        "confirm which account it is"
+                    )
+            else:
+                # Neither a recorded account id nor a typed address. There
+                # is no reference value in existence to check against, so
+                # any test here would be theatre. Deliberately NOT fatal:
+                # refusing would brick an entry whose CONF_AUTH_VALUE was
+                # lost or was never written, and those entries are not
+                # suspect, merely unverifiable. Warn instead, because the
+                # write that follows in async_setup_entry is genuinely
+                # unverified and the re-key it feeds is not reversible
+                # without the recovery action.
+                _LOGGER.warning(
+                    "This Orion entry records neither an account id nor the "
+                    "address it was set up with, so the account behind these "
+                    "tokens cannot be verified. Reauthenticate to confirm it"
+                )
             self.devices = util.dedupe_devices_by_id(await self.api_client.list_devices())
         except OrionAuthError as err:
             raise ConfigEntryAuthFailed(str(err)) from err
@@ -133,6 +435,109 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
             raise UpdateFailed(f"Error fetching initial data: {err}") from err
 
         await self._async_refresh_partner_identity()
+
+    def _partner_identity_verified(self, partner_id: object) -> bool:
+        """Whether these partner tokens still belong to the linked partner.
+
+        The partner half of the identity check `_async_setup` runs on the
+        primary account. Before this existed the two were asymmetric in the
+        worst possible direction: the primary compared a recorded account id
+        against the returned one, and the partner accepted whatever
+        `get_current_user()` said. `partner_mapping_valid` looked like a
+        guard and is not one. It compares device serials and device counts,
+        which establishes that the two accounts still share exactly one bed
+        and establishes nothing at all about which partner account this is.
+        `has_partner_for_device` adds only that the partner is not the
+        primary.
+
+        What that unverified id then drives is not cosmetic. It is the id
+        `migrations._partner_recovery_renames` builds its pairs from, and
+        those pairs become the partner records in the downgrade journal.
+        2.x has exactly ONE role-keyed row per partner key, fed by whichever
+        partner account is linked at the time, so reverting a journal that
+        names the wrong partner hands the previous partner's entities to the
+        current one. Two people's heart rate, HRV and apnea history merge
+        under one identity, with every rename reporting success. That is the
+        same class of damage `evict_partner_journal` exists to prevent from
+        a different direction, and the primary already had a recorded-versus-
+        returned check protecting the same journal.
+
+        Never raises, and in particular never raises ConfigEntryAuthFailed.
+        The reauth flow that exception launches re-verifies the PRIMARY
+        account's address, so a partner problem would prompt the wrong
+        person for credentials that cannot fix it, and the primary's
+        entities would go down for the duration. Returning False disables
+        the partner-derived entities and leaves everything else running,
+        which is the correct blast radius for a partner fault.
+
+        Three cases, in order of how much evidence exists:
+
+        1. A recorded partner account id. Compare directly. A mismatch is a
+           real finding against a real reference value.
+        2. No recorded id but a recorded partner address. Apply
+           `profile_carries_address`, exactly as the primary does when it
+           has no recorded id. Every partner linked by the current config
+           flow has this, because `_write_partner_change` writes
+           CONF_PARTNER_AUTH_VALUE in the same call as the tokens and
+           removes it in the same call as the tokens.
+        3. Neither. Fail closed. This differs from the primary's
+           equivalent branch, which warns and continues, and the difference
+           is deliberate: refusing there would brick the whole entry, and
+           refusing here costs the household its partner insight entities
+           and nothing else. Case 3 is also not reachable from any
+           supported flow, since the tokens and the address are written and
+           removed together, so failing closed on it forfeits nothing that
+           a working install has. Relinking the partner in Orion options
+           resolves it.
+        """
+        if not isinstance(partner_id, str) or not partner_id:
+            # No id to check. Topology already rejects this, so returning
+            # False here is agreement rather than a second opinion, and it
+            # keeps this method total instead of relying on its caller.
+            return False
+
+        recorded = recorded_partner_account_id(self.config_entry)
+        typed = (
+            str(self.config_entry.data.get(CONF_PARTNER_AUTH_VALUE) or "").strip().lower()
+        )
+
+        problem: str | None = None
+        if recorded:
+            if recorded != partner_id:
+                problem = (
+                    "Orion returned a different partner account than this entry "
+                    "recorded. Partner insights are disabled and no partner "
+                    "downgrade records will be kept until the partner account "
+                    "is relinked in the Orion options"
+                )
+        elif typed:
+            if not profile_carries_address(self.partner_user, typed):
+                problem = (
+                    "Orion returned a partner account that does not match the "
+                    "address the partner was linked with. Partner insights are "
+                    "disabled until the partner account is relinked in the "
+                    "Orion options"
+                )
+        else:
+            problem = (
+                "This Orion entry has partner tokens but records neither a "
+                "partner account id nor the address the partner was linked "
+                "with, so the account behind those tokens cannot be verified. "
+                "Partner insights are disabled until the partner account is "
+                "relinked in the Orion options"
+            )
+
+        # Latched, for the same reason the topology warning is. This method
+        # runs from every poll, so an unlatched warning would repeat once
+        # per scan interval forever for any household whose partner will
+        # not verify on its own.
+        if problem is None:
+            self._warned_partner_identity = False
+            return True
+        if not self._warned_partner_identity:
+            self._warned_partner_identity = True
+            _LOGGER.warning("%s", problem)
+        return False
 
     async def _async_refresh_partner_identity(self) -> None:
         """Refresh partner profile and device visibility when configured."""
@@ -144,7 +549,12 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
                 await self.partner_api_client.list_devices()
             )
             partner_id = self.partner_user.get("id")
-            self.partner_mapping_valid = (
+            # Topology says the two accounts still share exactly one bed.
+            # It says nothing about WHICH partner account is behind these
+            # tokens, which is a different question with a different
+            # answer, so the two verdicts are computed separately and the
+            # log names whichever one actually failed.
+            topology_ok = (
                 isinstance(partner_id, str)
                 and bool(partner_id)
                 and len(self.devices) == 1
@@ -152,10 +562,17 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
                 and self.devices[0].get("serial_number") == self.partner_device_serial
                 and self.partner_devices[0].get("serial_number") == self.partner_device_serial
             )
+            identity_ok = self._partner_identity_verified(partner_id)
+            # Recorded separately from the combined verdict below. A caller
+            # that needs "do we know who this partner is" must not have to
+            # infer it from a flag that also folds in bed topology.
+            self.partner_identity_confirmed = identity_ok
+            self.partner_topology_ok = topology_ok
+            self.partner_mapping_valid = topology_ok and identity_ok
             # Latched. This runs on every poll, so an unlatched warning
             # repeated once per scan interval forever for any household
             # whose topology genuinely will not resolve on its own.
-            if not self.partner_mapping_valid:
+            if not topology_ok:
                 if not self._warned_partner_topology:
                     self._warned_partner_topology = True
                     _LOGGER.warning(
@@ -165,15 +582,49 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
             else:
                 self._warned_partner_topology = False
         except OrionAuthError as err:
+            # A rejected token IS evidence, unlike the branch below. These
+            # credentials do not currently speak for anyone, so the partner
+            # entities go unavailable until the account is relinked.
             self.partner_update_ok = False
+            self.partner_identity_confirmed = False
+            self.partner_topology_ok = False
             self.partner_mapping_valid = False
             _LOGGER.warning(
                 "Partner authentication failed. Replace it in Orion options: %s",
                 err,
             )
         except (OrionApiError, OrionConnectionError) as err:
+            # `partner_mapping_valid` is deliberately LEFT ALONE here.
+            #
+            # A 500 or a dropped connection is an absence of evidence, not
+            # evidence of a change. Forcing this flag false on one failed
+            # request tore down every partner entity's availability, and on
+            # a restart inside that window the entities were never
+            # constructed at all, because `has_partner_for_device` gates
+            # construction on this flag in `sensor.py` and
+            # `binary_sensor.py`. One unlucky 800ms was enough to remove a
+            # person's biometric entities from the system.
+            #
+            # Leaving it means the flag keeps whatever the last SUCCESSFUL
+            # fetch established. That is safe because no consumer acts on
+            # this flag alone: every one of them also requires a real id out
+            # of `partner_user`, and `partner_user` is only ever replaced by
+            # a successful response. On a cold start the last successful
+            # fetch has not happened, `partner_user` is empty, and the
+            # partner entities are correctly absent regardless of this flag.
+            #
+            # `partner_topology_ok` is left alone for the same reason and
+            # on the same terms. It is the other half of the verdict above,
+            # and a request that never arrived did not disprove it either.
+            #
+            # `partner_identity_confirmed` DOES go false, because we cannot
+            # confirm anything right now. That is what stops the migration
+            # treating this blip as proof the partner was replaced, and it
+            # is also why `partner_mapping_valid` must NOT be derived from
+            # it: deriving it would make this handler tear down the partner
+            # entities it exists to keep alive.
             self.partner_update_ok = False
-            self.partner_mapping_valid = False
+            self.partner_identity_confirmed = False
             _LOGGER.warning("Failed to initialize partner account: %s", err)
 
     async def _async_update_data(self) -> dict:
@@ -216,24 +667,45 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
                 if isinstance(device.get("id"), str) and device["id"]
             )
             recorded_ids = list(self.config_entry.data.get(CONF_DEVICE_IDS) or [])
-            from .migrations import bed_owner, overlapping_entry_ids
-
-            rivals = overlapping_entry_ids(
+            if overlapping_entry_ids(
                 self.hass, self.config_entry.entry_id, set(refreshed_ids)
-            )
-            if rivals:
-                # Same rule setup uses. Overlap alone is not a failure: a
-                # claim left behind by another entry's failed setup looks
-                # identical to one held by a healthy entry, so treating any
-                # overlap as fatal let a dead entry lock out the one that
-                # actually holds the history.
-                owner = bed_owner(self.hass, set(refreshed_ids)) or min(
-                    rivals | {self.config_entry.entry_id}
+            ):
+                # Overlap alone is not a failure: a claim left behind by
+                # another entry's failed setup looks identical to one held
+                # by a healthy entry, so treating any overlap as fatal let a
+                # dead entry lock out the one that actually holds the
+                # history. `resolve_bed_owner` is the single copy of that
+                # rule, shared with `async_migrate_unique_ids`.
+                owner = resolve_bed_owner(
+                    self.hass, self.config_entry.entry_id, set(refreshed_ids)
                 )
                 if owner != self.config_entry.entry_id:
-                    raise UpdateFailed(
-                        "Another Orion config entry holds this bed's entity "
-                        f"history ({owner})"
+                    # ConfigEntryError, NOT UpdateFailed, and this is the
+                    # message the user actually reads.
+                    #
+                    # This check runs inside the first refresh, which is
+                    # before `async_migrate_unique_ids` gets to run its
+                    # copy, so the migration's carefully worded refusal was
+                    # never reached. What people saw instead was this one,
+                    # which named the owner and then stopped, saying nothing
+                    # about what to do next.
+                    #
+                    # UpdateFailed was also the wrong shape. It becomes
+                    # ConfigEntryNotReady and puts the entry in SETUP_RETRY,
+                    # so it re-ran this same doomed refresh on a backoff
+                    # forever. Retrying cannot resolve a conflict that only
+                    # the user can resolve, and the retry loop buried the
+                    # one line explaining how. ConfigEntryError fails once,
+                    # loudly, with the instruction attached. On a later
+                    # scheduled poll Home Assistant logs it and marks the
+                    # update failed without any retry storm, because
+                    # `raise_on_entry_error` is only set for the first
+                    # refresh.
+                    raise ConfigEntryError(
+                        "Another Orion config entry already holds this bed's "
+                        f"entity history ({owner}). Two entries cannot both "
+                        "own it. Remove whichever entry you do not want, then "
+                        "reload"
                     )
             if refreshed_ids != recorded_ids:
                 self.hass.config_entries.async_update_entry(
@@ -255,7 +727,7 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
         self._ws_manager.sync_to_serials(list(self._serial_to_id.keys()))
 
         # Fetch the live snapshot for each device (zone on/temp + status).
-        # GET /v1/devices does NOT include the `on` field; GET /v1/devices/
+        # GET /v1/devices does NOT include the `on` field. GET /v1/devices/
         # {serial}/live does. The /live path uses serial_number, not UUID.
         #
         # We still poll /live even with the WS in place — the WS is best-
@@ -297,8 +769,19 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
         except (OrionApiError, OrionConnectionError) as err:
             _LOGGER.warning("Failed to fetch sleep schedules: %s", err)
 
+        # Read outside the try, because it is read again by the partner
+        # fetch thirty-odd lines below. Binding it inside meant the only
+        # statement that could raise before the binding, the insights call
+        # itself, left `insights_days` undefined for the rest of the poll.
+        # It never actually blew up, purely because the failing call was
+        # the second statement rather than the first, which is a property
+        # of the current line order and not a guarantee. A reordering, or
+        # an options lookup that ever raises, turns a logged warning into
+        # an UnboundLocalError that takes the whole poll down.
+        insights_days = self.config_entry.options.get(
+            CONF_INSIGHTS_DAYS, DEFAULT_INSIGHTS_DAYS
+        )
         try:
-            insights_days = self.config_entry.options.get(CONF_INSIGHTS_DAYS, DEFAULT_INSIGHTS_DAYS)
             data["insights"] = await self.api_client.get_insights(
                 days=insights_days, expected_user_id=self.user_id
             )
@@ -418,39 +901,280 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
     def display_name_for_user(self, user_id: object) -> str:
         """Friendly name for one Orion user.
 
-        Resolution order: configured alias, then whatever the vendor calls
-        them, then a stable id-derived fallback. Never raises and never
-        returns an empty string, because an entity with a blank name is
-        worse than one with an ugly name.
+        Resolution order: configured alias, then a vendor-supplied name,
+        then a stable id-derived fallback. Never raises and never returns
+        an empty string, because an entity with a blank name is worse than
+        one with an ugly name.
 
-        Affects friendly names ONLY. Unique ids are built from device and
-        zone ids, never from a person, so renaming cannot orphan history.
+        BOTH of the first two are filtered for login credentials, not just
+        the vendor's. The filter guards a permanent identifier, and a
+        permanent identifier does not become safe because the household
+        typed the value itself.
+
+        Unique ids are built from device and zone ids, never from a
+        person, so an alias change cannot orphan history. The entity_id
+        is a different matter and this docstring used to imply otherwise.
+        Home Assistant slugifies the first name an entity registers with
+        and then keeps that entity_id forever, through every later
+        rename. So the vendor's label is filtered through
+        `helpers.is_safe_display_name` rather than trusted: its fallback
+        chain ends at email and then phone, and a login credential must
+        never reach a permanent identifier.
         """
         if not isinstance(user_id, str) or not user_id:
             return "Unknown"
         alias = self.display_aliases.get(user_id)
-        if isinstance(alias, str) and alias.strip():
+        if (
+            isinstance(alias, str)
+            and alias.strip()
+            and helpers.is_safe_display_name(alias)
+        ):
+            # The household's own choice, and the documented way to recover
+            # from an ugly fallback name below. Taken as given in every
+            # respect EXCEPT the credential shape, which is filtered by the
+            # same predicate the vendor's label goes through a few lines
+            # down.
+            #
+            # The filter is here because permanence does not care who typed
+            # the string. Home Assistant slugifies the first name an entity
+            # registers with into its entity_id and never revisits it on
+            # rename, so an alias of "alice@example.com" becomes
+            # `climate.alice_example_com_climate` in the entity registry,
+            # in every recorder row, in every long term statistics row, and
+            # in every backup, permanently. The household typed it, so it
+            # is self-inflicted, but self-inflicted and irreversible is
+            # still irreversible, and "you typed it" is not a remedy once
+            # the id is minted.
+            #
+            # Without this branch the two naming paths disagreed for no
+            # reason anyone could state. A vendor-supplied
+            # "alice@example.com" was refused here and an alias of the
+            # identical string was accepted, so the credential the filter
+            # exists to keep out of a permanent identifier walked in
+            # through the field next to it.
+            #
+            # `config_flow.async_step_aliases` refuses the same value at
+            # the write boundary, which is the half that can explain itself
+            # to the household and the half where the value is not yet
+            # permanent. This half covers an alias that was already stored
+            # before that validation existed, which the form will never see
+            # again because nothing re-validates an option on read.
+            #
+            # Deliberately NOT filtered inside `helpers.clean_alias_map`.
+            # That runs in `__init__` over already-stored options, so
+            # filtering there would silently blank an alias a household is
+            # relying on, with no message and no way to tell why the name
+            # changed. Refusing to USE a value is recoverable. Deleting it
+            # is not.
             return alias.strip()
         for record in self.known_users():
-            if record["id"] == user_id and record["name"]:
-                return record["name"]
+            # `record["name"]` is `orion_user_label` output, so it is an
+            # email or a phone number whenever the account has no name
+            # set. Filtered here rather than inside `known_users` because
+            # the alias options form is the other caller and it still
+            # wants the vendor's own label to tell two people apart. A
+            # form field is transient. An entity_id is not.
+            if record["id"] == user_id and helpers.is_safe_display_name(
+                record["name"]
+            ):
+                return record["name"].strip()
+        # Ugly but safe, and recoverable through the alias options flow.
+        # Eight characters of the user id, matching `unique_alias_labels`
+        # so the field in that form is recognizably the same person as
+        # the entity it renames. The full id is already in every
+        # `person_unique_id`, so this exposes nothing new.
         return f"User {user_id[:8]}"
 
     def primary_name(self) -> str:
-        """Display name for the authenticated account holder."""
+        """Display name for the authenticated account holder.
+
+        Feeds `_attr_name` on the insight, schedule and climate entities,
+        so whatever this returns is slugified into a permanent entity_id.
+        """
         if self.user_id:
             return self.display_name_for_user(self.user_id)
-        return util.orion_user_label(self.user) or "You"
+        # NOT orion_user_label. Its fallback chain ends at email and then
+        # phone, and this branch runs precisely when identity is thin
+        # enough that those are what it would return. "You" is worse to
+        # read and impossible to leak.
+        return "You"
 
     def partner_name(self) -> str:
-        """Display name for the linked partner account."""
+        """Display name for the linked partner account.
+
+        Same permanence as `primary_name`. See its comment.
+
+        The fetched id is consulted FIRST, so a healthy entry resolves the
+        vendor's own label exactly as it always has and this method's
+        output is unchanged for every household whose partner fetch
+        succeeded.
+
+        The recorded-id branch below exists only for the run whose first
+        partner fetch failed. `has_partner_configured_for_device` now
+        builds the partner's entities on that run, so this method is
+        reached with an empty `partner_user`, and whatever it returns is
+        slugified into a permanent entity_id the very first time those
+        entities register. A household that has already named this person
+        in the alias options should keep that name rather than be given
+        `sensor.partner_sleep_score` forever because of one dropped
+        connection.
+
+        `display_name_for_user` is deliberately NOT called on the recorded
+        id. Its last fallback is `User 22222222`, which is worse to read
+        than "Partner" and is permanent, and its middle fallback walks
+        `known_users()`, which is built from `partner_user` and is empty
+        in precisely the case this branch handles. Only the alias, the one
+        value the household chose itself, is worth minting an id from.
+        The credential filter still applies, for the reason spelled out at
+        length in `display_name_for_user`: permanence does not care who
+        typed the string.
+        """
         partner_id = self.partner_user.get("id")
         if isinstance(partner_id, str) and partner_id:
             return self.display_name_for_user(partner_id)
-        return util.orion_user_label(self.partner_user) or "Partner"
+        recorded = recorded_partner_account_id(self.config_entry)
+        if recorded:
+            alias = self.display_aliases.get(recorded)
+            if (
+                isinstance(alias, str)
+                and alias.strip()
+                and helpers.is_safe_display_name(alias)
+            ):
+                return alias.strip()
+        return "Partner"
+
+    def partner_entity_key_id(self) -> str | None:
+        """The Orion account id the partner's entities are keyed on, or None.
+
+        Exists because `has_partner_configured_for_device` lets a partner
+        entity be BUILT before any fetch has succeeded, and an entity has
+        to choose a unique_id at construction time and then keep it
+        forever. `helpers.person_unique_id` falls back to the 2.x
+        role-keyed `{device}_partner_{key}` string when it is handed no
+        account id, so building from an empty `partner_user` would mint
+        every partner entity on a legacy id. The registry would then hold
+        that id permanently, the verified id would be minted as a SECOND
+        entity on the next boot that reached the server, and the household
+        would own two of everything with the history split between them.
+        That is worse than the absent-entity bug this whole change exists
+        to fix, so existence-based construction is only safe alongside a
+        durable answer to "which account".
+
+        The recorded id is preferred over the fetched one, in that order,
+        and the order is the point:
+
+          * `CONF_PARTNER_ACCOUNT_ID` is a configuration fact. It is
+            written once by the config flow when the partner is linked and
+            it does not depend on any request succeeding. It is also
+            exactly the value `_partner_identity_verified` demands the
+            fetched id equal, so on every healthy entry these two agree
+            and this preference changes nothing at all.
+          * They disagree in one case: the partner was REPLACED at the
+            vendor and the fetch returned somebody else. Keying on the
+            recorded id there is deliberate. Those registry entries belong
+            to the partner this entry was set up with, and re-keying them
+            onto an account this integration has explicitly refused to
+            verify is the cross-person merge three waves of work went into
+            preventing. The entities stay on the old id and report
+            unavailable until the household relinks, which is the same
+            outcome the identity check already produces everywhere else.
+          * The fetched id is used only when nothing is recorded. That is
+            an entry whose partner was linked before
+            `CONF_PARTNER_ACCOUNT_ID` existed, and using it there
+            reproduces exactly what those entries do today.
+
+        This value NEVER reaches `_partner_identity_verified`, and it must
+        not. That function's entire job is to compare the fetched id
+        against the recorded one, so feeding the recorded one back in as
+        the fetched one would make it agree with itself and the partner
+        identity check would become a tautology.
+        """
+        fetched = (self.partner_user or {}).get("id")
+        recorded = recorded_partner_account_id(self.config_entry)
+        if recorded:
+            return recorded
+        if isinstance(fetched, str) and fetched:
+            return fetched
+        return None
+
+    def has_partner_configured_for_device(self, device_id: str) -> bool:
+        """Whether this household HAS a partner on this bed. Not whether we trust one.
+
+        The existence half of a question `has_partner_for_device` used to
+        answer on its own, split out because the two halves have different
+        lifetimes and conflating them lost a household its entities.
+
+        Read the pair together:
+
+          * THIS predicate answers a question about CONFIGURATION. Partner
+            tokens and a partner serial are written on the config entry,
+            so a second person sleeps on this bed. That is durable. It was
+            true before this boot and it stays true across every failed
+            request.
+          * `has_partner_for_device` answers a question about THIS
+            SESSION. The last successful fetch established that these two
+            accounts still share exactly one bed and that the partner is
+            the one we recorded. That is perishable by design.
+
+        Entity CONSTRUCTION is gated on this one, in `sensor.py` and
+        `binary_sensor.py`. Entity AVAILABILITY and every piece of partner
+        DATA stay gated on the trust predicate. The bug that forced the
+        split was that construction was gated on trust: if the very first
+        partner fetch of a run failed, `partner_user` stayed empty,
+        `partner_mapping_valid` stayed False, and the partner's sleep,
+        heart rate, HRV and apnea entities were never built. Not
+        unavailable. Absent. Every dashboard card and automation naming
+        them broke, with nothing in the log connecting one dropped
+        connection to a missing half of the household, and no recovery
+        until somebody reloaded the entry by hand.
+
+        Reporting `unavailable` is the correct answer to "this exists and
+        I cannot currently speak for it", and it is what Home Assistant
+        expects. Deleting the entity is not a stronger version of the same
+        statement, it is a different and much more destructive one.
+
+        Note what is NOT relaxed. This still requires a durable account id
+        out of `partner_entity_key_id`, still refuses an account linked as
+        its own partner, and still requires the bed to be the single
+        device this entry owns. It only drops the requirement that a
+        request succeeded recently.
+        """
+        if self.partner_api_client is None or not self.partner_device_serial:
+            return False
+        # An account linked as its own partner is one person, not two.
+        # Same guard, same reasoning, as the trust predicate below. Left
+        # duplicated rather than factored out because the two predicates
+        # are meant to be readable side by side, and a shared private
+        # helper would hide that they agree here on purpose.
+        partner_id = self.partner_entity_key_id()
+        if not partner_id:
+            return False
+        if self.user_id and partner_id == self.user_id:
+            return False
+        primary = next((d for d in self.devices if d.get("id") == device_id), None)
+        if not primary:
+            return False
+        serial = primary.get("serial_number")
+        if not serial:
+            return False
+        return len(self.devices) == 1 and serial == self.partner_device_serial
 
     def has_partner_for_device(self, device_id: str) -> bool:
-        """Return whether the partner account was verified for this bed."""
+        """Return whether the partner account was verified for this bed.
+
+        The TRUST predicate. Deliberately unchanged by the existence split
+        described in `has_partner_configured_for_device`, because three
+        separate consumers depend on it meaning exactly this and one of
+        them is the downgrade journal.
+
+        `migrations._partner_recovery_renames` calls this, and the pairs it
+        returns become the partner records that `async_revert_unique_ids`
+        applies. Loosening this method would let an unverified partner's id
+        reach those records, which is the cross-person biometric merge.
+        Anything that wants "does a partner exist" wants the other
+        predicate. Nothing that writes a journal record or performs a
+        rename may use it.
+        """
         if (
             self.partner_api_client is None
             or not self.partner_device_serial
@@ -904,7 +1628,7 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
         """Raw thermal-relief block for one zone, or None."""
         return live_state.zone_thermal_relief(self.live_devices.get(device_id), zone_id)
 
-    def thermal_relief_until(self, device_id: str, zone_id: str):
+    def thermal_relief_until(self, device_id: str, zone_id: str) -> datetime | None:
         """When active hot flash relief on this zone ends, else None.
 
         Returns an aware datetime. Mirrors the app's own test: relief
@@ -975,8 +1699,9 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
         """Human label for one zone, preferring the assigned user's name.
 
         Routes through `display_name_for_user` so a configured alias wins
-        over the vendor's own first name. Falls back to the raw user
-        object, then to a title-cased zone id.
+        over the vendor's own first name, and so the credential filter in
+        that method covers this path too. Falls back to a title-cased
+        zone id.
 
         Deliberately NOT left/right. The device carries an `orientation`
         field, but the zone -> physical side mapping has never been
@@ -994,9 +1719,13 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
                     user_id = user.get("id")
                     if isinstance(user_id, str) and user_id:
                         return self.display_name_for_user(user_id)
-                    label = util.orion_user_label(user)
-                    if label:
-                        return label
+                    # No id means no alias key and no way to look the
+                    # person up, so there is deliberately no fallback to
+                    # orion_user_label here. A zone's embedded user object
+                    # is the sparsest copy this API sends, which makes it
+                    # the likeliest of all of them to fall through that
+                    # chain to email or phone, and this label is slugified
+                    # into a permanent entity_id.
                 break
             break
         return zone_id.replace("_", " ").title()

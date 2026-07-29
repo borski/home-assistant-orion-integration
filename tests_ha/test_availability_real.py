@@ -78,7 +78,11 @@ async def test_live_entities_stay_available_on_a_fresh_socket(
     coordinator.async_update_listeners()
     await hass.async_block_till_done()
 
-    live = hass.states.get("climate.sleepy_alice_example_com_climate")
+    # Was `climate.sleepy_alice_example_com_climate`. The account email
+    # was in the entity_id because the fixture profile had no name and
+    # `orion_user_label` falls through to email. That id was the bug, not
+    # the expectation. See `helpers.is_safe_display_name`.
+    live = hass.states.get("climate.sleepy_alex_climate")
     assert live is not None, "expected a live climate entity"
     assert live.state != "unavailable", (
         "a live-fed entity went unavailable while its socket was fresh"
@@ -96,7 +100,8 @@ async def test_poll_fed_entities_do_go_unavailable_on_a_failed_poll(
     coordinator.async_update_listeners()
     await hass.async_block_till_done()
 
-    score = hass.states.get("sensor.sleepy_alice_example_com_sleep_score")
+    # Renamed for the same reason as the climate entity above.
+    score = hass.states.get("sensor.sleepy_alex_sleep_score")
     assert score is not None, "expected a sleep score sensor"
     assert score.state == "unavailable", (
         "an insight sensor reported available while its poll was failing, so "
