@@ -69,7 +69,10 @@ AUTH_METHOD_PHONE = "phone"
 class OrionSleepConfigFlow(ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Orion Sleep."""
 
-    VERSION = 1
+    # 2 since 3.1. See `async_migrate_entry` for why this is the downgrade
+    # guard rather than a statement about the shape of `entry.data`, which
+    # has not changed.
+    VERSION = 2
 
     def __init__(self) -> None:
         """Initialize the config flow."""

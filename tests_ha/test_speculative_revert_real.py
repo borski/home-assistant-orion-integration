@@ -28,6 +28,7 @@ import logging
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import Context
 from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers import entity_registry as er
 
 from custom_components.orion_sleep.const import (
     CONF_UID_MIGRATION,
@@ -161,4 +162,84 @@ async def test_a_real_revert_still_restores_the_entry_identity(hass, patched):
     assert entry.unique_id == "alice@example.com", (
         "a revert that moved real entities left the entry on its account "
         "id, so 2.x will not recognise it by the address it was set up with"
+    )
+
+
+async def test_running_the_revert_twice_does_not_un_prepare_the_entry(hass, patched):
+    """Confirming the first run worked must not undo it.
+
+    A completed revert rewrites the journal as `remaining + stale`, which
+    on success is empty. So a second call finds nothing to do and takes
+    the "nothing changed" exit, whose `finally` pops the recovery latch
+    because that run itself prepared nothing.
+
+    Both halves of that were wrong. The message said "nothing is prepared
+    for a downgrade" while every entity was already sitting on its 2.x
+    id, which is the opposite of the truth at the exact moment the
+    household is deciding whether to install 2.x. And popping the latch
+    re-armed the forward migration, so starting 3.x put everything back
+    on 3.x ids with no warning, silently undoing the preparation.
+
+    Running it twice is not a contrived sequence. It is what somebody
+    does to check the first run took.
+    """
+    entry = make_entry(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    assert entry.data.get(CONF_UID_MIGRATION), "fresh install journalled nothing"
+
+    await run_revert(hass, entry)
+    assert entry.data.get(CONF_UID_RECOVERY_ACTIVE), (
+        "the first revert did not latch, so this test cannot observe the "
+        "second one un-latching"
+    )
+    prepared_ids = {
+        row.unique_id
+        for row in er.async_entries_for_config_entry(
+            er.async_get(hass), entry.entry_id
+        )
+    }
+
+    await run_revert(hass, entry)
+
+    assert entry.data.get(CONF_UID_RECOVERY_ACTIVE), (
+        "the second revert cleared the recovery latch, so starting 3.x "
+        "would re-run the forward migration and put every entity back on "
+        "a 3.x id, undoing the downgrade this household just prepared"
+    )
+    still = {
+        row.unique_id
+        for row in er.async_entries_for_config_entry(
+            er.async_get(hass), entry.entry_id
+        )
+    }
+    assert still == prepared_ids, (
+        f"the second run moved entity ids that were already reverted: "
+        f"{still ^ prepared_ids}"
+    )
+
+
+async def test_the_second_revert_says_the_entry_is_already_prepared(hass, patched, caplog):
+    """The message is the other half of the defect.
+
+    A household reading "nothing is prepared for a downgrade" after a
+    revert that succeeded will either install 2.x believing it is unsafe
+    to, or not install it believing it is. Both readings are wrong and
+    the second one is the one that wastes the rollback path.
+    """
+    entry = make_entry(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+
+    await run_revert(hass, entry)
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="custom_components.orion_sleep"):
+        await run_revert(hass, entry)
+
+    logged = "\n".join(record.message for record in caplog.records)
+    assert "already prepared" in logged.lower(), (
+        f"the second run did not say the entry was already prepared: {logged}"
+    )
+    assert "nothing is prepared" not in logged.lower(), (
+        f"the second run claimed nothing was prepared, which is false: {logged}"
     )

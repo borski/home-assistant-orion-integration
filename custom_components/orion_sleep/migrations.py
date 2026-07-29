@@ -1158,6 +1158,37 @@ def async_migrate_unique_ids(
                 if not old_exists and key not in journal:
                     journal[key] = _journal_record(row, old, new, role)
 
+    # Retarget account-level records that name a bed this account no
+    # longer has.
+    #
+    # These records are the one place a 2.x id is chosen rather than
+    # observed. There was never a per-bed original to point at: 2.x built
+    # one of these per device, so the plan picks the lowest bed and the
+    # journal records that choice. Selling that bed leaves the record
+    # naming an id no row can ever hold again, and the revert then renames
+    # the surviving control onto it. 2.x, seeing only the bed it still
+    # has, looks for a different id, finds nothing, and mints a fresh row
+    # beside the orphan.
+    #
+    # Cheap to fix and only reachable through a supported user action,
+    # which is the combination that makes it worth doing rather than
+    # documenting. The surplus row for the surviving bed still holds the
+    # pre-3.0 history, so the practical loss was one config entity, but
+    # the same reasoning is what keeps the choice honest if another
+    # account-level key ever carries something that matters.
+    account_beds = sorted(device_ids)
+    if account_beds:
+        for key in _ACCOUNT_LEVEL_KEYS:
+            target = helpers.account_unique_id(entry.entry_id, key)
+            suffix = f"_{key}"
+            for record in journal.values():
+                old = str(record.get("old") or "")
+                if record.get("new") != target or not old.endswith(suffix):
+                    continue
+                if old[: -len(suffix)] in device_ids:
+                    continue
+                record["old"] = f"{account_beds[0]}{suffix}"
+
     _write_journal(hass, entry, list(journal.values()))
 
     if migrated:

@@ -18,6 +18,7 @@ from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from orion_sleep_api import util
 
+from . import helpers
 from .coordinator import OrionDataUpdateCoordinator
 from .entity import OrionBaseEntity
 from .errors import orion_call
@@ -163,7 +164,13 @@ class OrionTemperatureDisplaySelect(OrionBaseEntity, SelectEntity):
 
     def __init__(self, coordinator, device_id: str, entry_id: str) -> None:
         super().__init__(coordinator, device_id)
-        self._attr_unique_id = f"{entry_id}_temperature_display_unit"
+        # Through the shared helper, like every other account-scoped
+        # entity. This was the first entity keyed on the entry and it
+        # built the string by hand, which is why the migration had to
+        # spell the same format out a second time.
+        self._attr_unique_id = helpers.account_unique_id(
+            entry_id, "temperature_display_unit"
+        )
         self._attr_name = "App Temperature Scale"
 
     @property
@@ -185,12 +192,21 @@ class OrionTemperatureDisplaySelect(OrionBaseEntity, SelectEntity):
         and it predated the `OrionAuthError` arm so an expired token here
         was reported as a rejected scale change.
         """
+        # No warning log. This used to say the write "has not been
+        # observed against the live API", which stopped being true and
+        # then stayed in the code: `set_temperature_units` records
+        # `display_unit` as MEASURED, set to `fahrenheit`, confirmed on
+        # the server and restored to `relative`.
+        #
+        # A stale confidence note is worse than none. Everything else in
+        # this integration uses that marker to decide whether a control is
+        # safe to ship, so one that overstates the risk of a verified,
+        # cosmetic, reversible write teaches readers to discount the ones
+        # that mean it.
+        #
+        # `control_unit` on the same route genuinely has never been sent,
+        # and this entity does not touch it.
         async with orion_call("change the app's temperature scale"):
-            _LOGGER.warning(
-                "Changing the Orion app's temperature scale to %s. This write "
-                "has not been observed against the live API.",
-                option,
-            )
             await self.coordinator.api_client.set_temperature_units(
                 display_unit=option
             )

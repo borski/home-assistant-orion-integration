@@ -105,13 +105,17 @@ can see them disagree.
 
 ### Home Assistant version
 
-The declared minimum is **2025.1.0**, derived from the newest Home Assistant
-APIs this integration actually calls: `ConfigEntry.runtime_data` and the
-`update` entity's `update_percentage`.
+The declared minimum is **2026.7.4**, and `hacs.json` enforces it.
 
-That floor is inferred from API usage, not tested. The only version this has
-ever run on is 2026.4. If it works on something older, or does not, open an
-issue and the floor will be corrected to match reality.
+That is the version this has actually been executed against, not the oldest
+it might work on. The full test suite runs against it and the only install
+there is runs it.
+
+An earlier floor of 2025.1.0 was inferred from API usage rather than tested,
+which is the same mistake `pyproject.toml` made when it claimed Python 3.11:
+declared, never executed, and it failed the first time anything ran it.
+Lowering a floor is a non-breaking one-line change, so if it works on
+something older, open an issue and it will come down to match reality.
 
 ## Configuration
 

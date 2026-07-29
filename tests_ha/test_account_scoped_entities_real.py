@@ -264,3 +264,65 @@ async def test_the_downgrade_journal_still_points_at_the_2_x_id(hass, patched):
         f"revert lands somewhere 2.x never asks for: {records[0]}"
     )
     assert records[0]["new"] == f"{ENTRY}_user_{ACCOUNT}_sleep_score"
+
+
+async def test_a_sold_bed_does_not_strand_the_account_level_journal(hass, ws_manager):
+    """The one 2.x id the journal CHOOSES rather than observes.
+
+    2.x built these account-level controls once per bed, so there was
+    never a single per-bed original to point at. The plan picks the
+    lowest bed and the journal records that choice.
+
+    Selling that bed leaves the record naming an id no row can ever hold
+    again. The revert renames the surviving control onto it, and 2.x,
+    seeing only the bed it still has, looks for a different id, finds
+    nothing, and mints a fresh row beside the orphan.
+    """
+    beds = [device(BED_A, SERIAL_A), device(BED_B, SERIAL_B)]
+
+    class ShrinkingClient(FakeClient):
+        async def list_devices(self) -> list[dict[str, Any]]:
+            return list(beds)
+
+    with (
+        patch(
+            "custom_components.orion_sleep.OrionApiClient",
+            side_effect=lambda *a, **k: ShrinkingClient(),
+        ),
+        patch(
+            "custom_components.orion_sleep.coordinator.OrionWebSocketManager",
+            return_value=ws_manager,
+        ),
+    ):
+        entry = make_entry(
+            hass, data={CONF_DEVICE_IDS: [BED_A, BED_B], CONF_ACCOUNT_ID: ACCOUNT}
+        )
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+        def account_record():
+            return next(
+                (
+                    record
+                    for record in (entry.data.get(CONF_UID_MIGRATION) or [])
+                    if record.get("new") == f"{ENTRY}_temperature_display_unit"
+                ),
+                None,
+            )
+
+        first = account_record()
+        assert first and first["old"] == f"{BED_A}_temperature_display_unit", (
+            f"the plan did not key the account control on the lowest bed: {first}"
+        )
+
+        # The lowest bed is sold.
+        beds[:] = [device(BED_B, SERIAL_B)]
+        await hass.config_entries.async_reload(entry.entry_id)
+        await hass.async_block_till_done()
+
+        after = account_record()
+        assert after and after["old"] == f"{BED_B}_temperature_display_unit", (
+            "the journal still names the sold bed, so a downgrade renames "
+            "the surviving control onto an id 2.x will never ask for: "
+            f"{after}"
+        )

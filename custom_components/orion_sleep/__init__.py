@@ -173,6 +173,33 @@ async def async_setup(hass: HomeAssistant, _config: dict[str, Any]) -> bool:
     return True
 
 
+async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    """Move a 2.x entry to version 2, which is what fails a downgrade closed.
+
+    The entry data is not touched. Nothing about it changed shape, and the
+    version is doing a different job here than it usually does.
+
+    Home Assistant refuses to load an entry whose stored version is HIGHER
+    than the running integration's, and that refusal is the only
+    mechanical protection against installing 2.x on a registry that has
+    been re-keyed. Both 2.x and 3.0 shipped `VERSION = 1`, so that check
+    could never fire, and an unprepared downgrade loaded normally: 2.x
+    asked for its old unique ids, did not find them, and built a second
+    entity for every key. History stayed on the 3.x rows while new data
+    went to the replacements, splitting each person's record in two with
+    nothing said about it.
+
+    `revert_unique_ids` puts the version back to 1 as part of preparing a
+    downgrade, so the supported path still works and only the unsupported
+    one is blocked. That is the whole design: the guard is not there to
+    stop downgrades, it is there to stop downgrades that skipped the step
+    which makes them safe.
+    """
+    if entry.version < 2:
+        hass.config_entries.async_update_entry(entry, version=2)
+    return True
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Orion Sleep from a config entry."""
     if entry.data.get(CONF_UID_RECOVERY_ACTIVE):
@@ -552,6 +579,23 @@ def _async_register_recovery_service(hass: HomeAssistant) -> None:
                 "then run this again"
             )
 
+        # Read BEFORE the guard is armed below, because arming it makes a
+        # second run indistinguishable from a first one.
+        #
+        # A completed revert rewrites the journal as `remaining + stale`,
+        # which on success is empty. So running this action again finds
+        # nothing to do and takes the "nothing changed" exit, whose
+        # `finally` pops the latch because this run prepared nothing. The
+        # message said "Nothing changed, and nothing is prepared for a
+        # downgrade" while every entity sat on its 2.x id, and popping the
+        # latch un-prepared the entry: starting 3.x then re-ran the forward
+        # migration and put everything back on 3.x ids, silently undoing
+        # the preparation the household had just been told to trust.
+        #
+        # Running it twice is not exotic. It is what someone does to
+        # confirm the first run worked.
+        was_prepared = bool(entry.data.get(CONF_UID_RECOVERY_ACTIVE))
+
         # Set the guard before unloading. A pending retry or an update
         # listener must not start the forward migration between unload and
         # the reverse registry transaction.
@@ -699,6 +743,19 @@ def _async_register_recovery_service(hass: HomeAssistant) -> None:
                 # The `finally` below still runs on the way out, so the
                 # latch is popped exactly as it would be on any other
                 # non-prepared exit.
+                if was_prepared:
+                    # Already done, by an earlier run of this same action.
+                    # `prepared` is set so the `finally` leaves the latch
+                    # alone: popping it here would re-arm the forward
+                    # migration and put every entity back on a 3.x id.
+                    prepared = True
+                    _LOGGER.info(
+                        "Orion entity ids were already prepared for a "
+                        "downgrade by an earlier run, and nothing further "
+                        "was needed. The entry is unloaded. Install 2.x, or "
+                        "run resume_unique_ids to go back to 3.x"
+                    )
+                    return
                 _LOGGER.info(
                     "No recorded Orion renames to undo. Nothing changed, and "
                     "nothing is prepared for a downgrade. If this entry has "
@@ -780,6 +837,17 @@ def _async_register_recovery_service(hass: HomeAssistant) -> None:
                 # `remaining` is non-zero, which is the same gate arrived at
                 # by the other route.
                 raise _partner_unmapped_error()
+            # Put the entry back on version 1, which is what lets 2.x load
+            # it at all. `async_migrate_entry` raises the version so an
+            # UNPREPARED downgrade fails closed, and this is the other end
+            # of that: preparing a downgrade is exactly when 2.x is
+            # supposed to be able to take the entry.
+            #
+            # Last, after every refusal above. A run that raised must leave
+            # the guard standing, because the registry it would have been
+            # protecting is still on 3.x ids.
+            if entry.version != 1:
+                hass.config_entries.async_update_entry(entry, version=1)
             prepared = True
         finally:
             # The latch survives only a run that genuinely left the entry
@@ -839,6 +907,13 @@ def _async_register_recovery_service(hass: HomeAssistant) -> None:
         data = dict(entry.data)
         data.pop(CONF_UID_RECOVERY_ACTIVE, None)
         hass.config_entries.async_update_entry(entry, data=data)
+        # The entry version is deliberately NOT written back here.
+        # `revert_unique_ids` lowered it to 1 so 2.x could take the entry,
+        # and the reload below runs `async_migrate_entry`, which raises it
+        # again. Writing it here as well would be a second copy of that
+        # rule, in the one file that already carries the argument for why
+        # duplicated recovery logic is how these two ends drift apart.
+        #
         # Reload, not setup. `async_setup` refuses anything that is not
         # NOT_LOADED, and the likeliest way to reach this action is to
         # prepare a downgrade, restart Home Assistant, and change your

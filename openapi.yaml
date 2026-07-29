@@ -783,11 +783,32 @@ paths:
       operationId: updateSleepSchedule
       summary: Update a sleep schedule
       description: |
-        Partially updates the authenticated user's schedule. The measured
-        request body is `{"schedules": [{"day": N, field: value}]}`.
-        Unspecified fields are preserved. Global enable and disable actions
-        have not been verified and are intentionally omitted.
+        Partially updates a schedule. The measured request body is
+        `{"schedules": [{"day": N, field: value}]}`. Unspecified fields
+        are preserved. Global enable and disable actions have not been
+        verified and are intentionally omitted.
+
+        CROSS-ACCOUNT. A top-level `user_id` targets a specific sleeper
+        rather than the authenticated one, and the server honours it, so
+        one account sets both people's schedules on a shared bed. Omitting
+        it means the caller. This is the most consequential property of
+        the route and it was previously undocumented here.
+
+        `?action=override` selects a DIFFERENT body shape and a different
+        effect. The body becomes flat rather than nested, and the change
+        applies to today only, leaving the stored weekday rows alone.
+        Without it the write is permanent.
       tags: [Sleep Schedules]
+      parameters:
+        - name: action
+          in: query
+          required: false
+          description: |
+            `override` applies a one-day change and takes the flat body.
+            Omitted means a permanent edit to the stored weekday row.
+          schema:
+            type: string
+            enum: [override]
       requestBody:
         required: true
         content:
@@ -969,6 +990,434 @@ paths:
       responses:
         "200":
           description: Opt-in status updated
+
+  # ──────────────────────────────────────────────
+  #  Sleep Sessions
+  # ──────────────────────────────────────────────
+  /v1/sleep-session:
+    get:
+      x-verification-status: measured-live
+      operationId: getLiveSession
+      summary: What the bed thinks is happening right now
+      description: |
+        Returns `is_in_bed`, `in_bed_start`, `in_bed_end`, `session_id`,
+        `zone_id`, `device_id`, `current_phase`, and `phases`, the last
+        being a map of schedule phase names to `{start, end}` Unix
+        seconds.
+
+        `is_in_bed` is Orion's own server-side occupancy call, which
+        makes it an independent second opinion on the topper's
+        `status_text`. The vendor app reads this and never reads
+        `status_text`.
+
+        Account-scoped. There is no device in the request.
+      tags: [Sleep Sessions]
+      responses:
+        "200":
+          description: Current live session
+
+  /v1/sleep-sessions/end:
+    post:
+      x-verification-status: app-derived
+      operationId: endSleepSession
+      summary: End whichever session is currently open
+      description: |
+        No session id and no body: the decompiled client calls `post`
+        with the path as its only argument. Ends the open session for
+        the authenticated account, so it cannot be aimed at a specific
+        night.
+
+        Never executed, because provoking it needs a live session to
+        throw away.
+      tags: [Sleep Sessions]
+      responses:
+        "200":
+          description: Session ended
+
+  /v1/sleep-sessions/{sessionId}:
+    parameters:
+      - name: sessionId
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    patch:
+      x-verification-status: measured-live
+      operationId: editSleepSession
+      summary: Move a session's boundaries and force a reanalysis
+      description: |
+        Not a relabel. The server recomputes sleep stages, heart rate,
+        breathing, apnea, movement and temperature from the new window,
+        so the numbers afterwards are different numbers rather than the
+        same ones shifted.
+
+        Reversible: calling this again with the original pair restores
+        every derived metric exactly. That was measured, not assumed.
+
+        Slow. The recomputation has been measured taking longer than a
+        default client read timeout allows.
+      tags: [Sleep Sessions]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [fell_asleep, woke_up]
+              properties:
+                fell_asleep:
+                  type: string
+                  format: date-time
+                woke_up:
+                  type: string
+                  format: date-time
+      responses:
+        "200":
+          description: Session re-analysed
+    delete:
+      x-verification-status: measured-live
+      operationId: deleteSleepSession
+      summary: Delete one recorded night
+      description: |
+        Not recoverable. The reason is a required field and the server
+        rejects values outside its own set.
+      tags: [Sleep Sessions]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reason]
+              properties:
+                reason:
+                  type: string
+                  enum: [not_real_session, no_longer_needed]
+      responses:
+        "200":
+          description: Session deleted
+
+  /v1/sleep-sessions/{sessionId}/confirm:
+    put:
+      x-verification-status: measured-live
+      operationId: confirmSleepSession
+      summary: Tell the bed who a session belongs to
+      description: |
+        Answers the vendor's own "was this you?" prompt. Passing more
+        than one user id attributes the night to both sleepers, which is
+        the app's "both of us" option.
+
+        Writing a named person into a session they may not have slept is
+        somebody else's record being edited, which is why the Home
+        Assistant service in front of this is admin gated.
+      tags: [Sleep Sessions]
+      parameters:
+        - name: sessionId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [user_ids]
+              properties:
+                user_ids:
+                  type: array
+                  items:
+                    type: string
+                    format: uuid
+      responses:
+        "200":
+          description: Ownership recorded
+
+  # ──────────────────────────────────────────────
+  #  Account Configuration
+  # ──────────────────────────────────────────────
+  /v1/sleep-configurations:
+    get:
+      x-verification-status: measured-live
+      operationId: getSleepConfigurations
+      summary: Account-level settings
+      description: |
+        Returns `away` (`{is_away, returns_at, return_device_id}`),
+        `temperature` (`{control_unit, display_unit}`),
+        `zone_split_mode`, `text_opt_in`, `text_opt_in_at`, and
+        `healthkit_last_synced_at`.
+
+        `zone_split_mode` is the answer to whether the two halves of the
+        bed are being driven as one. Observed `combined`, with `split`
+        as the other state the app's Split Zones action produces.
+
+        Account-scoped, not per bed.
+      tags: [Sleep Configurations]
+      responses:
+        "200":
+          description: Account configuration
+
+  /v1/sleep-configurations/temperature:
+    put:
+      x-verification-status: measured-live
+      operationId: setTemperatureUnits
+      summary: Temperature display preferences
+      description: |
+        Account level, so this changes what the phone app shows rather
+        than anything the bed does.
+
+        MEASURED through `display_unit`: set to `fahrenheit`, confirmed
+        on the server, restored to `relative`. `control_unit` rides the
+        same request and has never been sent, so that key on its own
+        remains app-derived.
+      tags: [Sleep Configurations]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                temp_display_unit:
+                  type: string
+                  enum: [relative, fahrenheit]
+                temp_control_unit:
+                  type: integer
+      responses:
+        "200":
+          description: Preferences updated
+
+  /v1/sleep-configurations/devices:
+    put:
+      x-verification-status: app-derived
+      operationId: assignZones
+      summary: Put somebody on one or more zones of a bed
+      description: |
+        The app calls this "Replace {name}". Moving somebody onto an
+        occupied zone displaces whoever was there, which is deliberate
+        on the vendor's side and is what the `push_away_behavior` the
+        app always sends governs.
+      tags: [Sleep Configurations]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [user_id, device_id, zone_ids]
+              properties:
+                user_id:
+                  type: string
+                  format: uuid
+                device_id:
+                  type: string
+                  format: uuid
+                zone_ids:
+                  type: array
+                  items:
+                    type: string
+                push_away_behavior:
+                  type: string
+      responses:
+        "200":
+          description: Zones assigned
+
+  /v1/sleep-configurations/user-swap:
+    post:
+      x-verification-status: app-derived
+      operationId: swapUserSides
+      summary: Swap which physical side each sleeper is on
+      description: |
+        Re-attributes which zone a sleeper owns. Never executed, and it
+        has no observable state that would confirm what a call did.
+      tags: [Sleep Configurations]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [user_id]
+              properties:
+                user_id:
+                  type: string
+                  format: uuid
+      responses:
+        "200":
+          description: Sides swapped
+
+  /v1/sleep-configurations/user-split:
+    post:
+      x-verification-status: app-derived
+      operationId: splitUserZones
+      summary: Drive the two halves of the bed independently
+      description: |
+        The counterpart to `zone_split_mode: combined`. Never executed,
+        and like `user-swap` there is no observable state confirming
+        what a call did.
+      tags: [Sleep Configurations]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [user_id]
+              properties:
+                user_id:
+                  type: string
+                  format: uuid
+      responses:
+        "200":
+          description: Zones split
+
+  # ──────────────────────────────────────────────
+  #  Thermal Relief
+  # ──────────────────────────────────────────────
+  /v1/devices/{serial_number}/live/thermal-relief:
+    post:
+      x-verification-status: app-derived
+      operationId: startThermalRelief
+      summary: Start hot flash relief on one zone
+      description: |
+        Rapid cooling on a single zone for a bounded duration. Path
+        takes the `serial_number`, not the device UUID.
+      tags: [Devices]
+      parameters:
+        - name: serial_number
+          in: path
+          required: true
+          description: Device serial_number (NOT its UUID `id`)
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [zone_id]
+              properties:
+                zone_id:
+                  type: string
+                duration:
+                  type: integer
+                  description: Minutes
+      responses:
+        "200":
+          description: Relief started
+
+  /v1/devices/{serial_number}/live/thermal-relief/cancel:
+    post:
+      x-verification-status: app-derived
+      operationId: cancelThermalRelief
+      summary: Stop hot flash relief on one zone
+      tags: [Devices]
+      parameters:
+        - name: serial_number
+          in: path
+          required: true
+          description: Device serial_number (NOT its UUID `id`)
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [zone_id]
+              properties:
+                zone_id:
+                  type: string
+      responses:
+        "200":
+          description: Relief cancelled
+
+  # ──────────────────────────────────────────────
+  #  Bed Access and Invitations
+  # ──────────────────────────────────────────────
+  /v1/user-device-invites:
+    get:
+      x-verification-status: app-derived
+      operationId: listDeviceInvites
+      summary: Pending invitations
+      description: |
+        Keyed on phone numbers, which for this vendor is where login
+        codes are delivered. The Home Assistant service in front of this
+        is admin gated for that reason.
+      tags: [Access]
+      responses:
+        "200":
+          description: Pending invites
+    post:
+      x-verification-status: app-derived
+      operationId: inviteUser
+      summary: Invite somebody to one or more beds by phone number
+      tags: [Access]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [device_ids, phone_number, role]
+              properties:
+                device_ids:
+                  type: array
+                  items:
+                    type: string
+                    format: uuid
+                phone_number:
+                  type: string
+                role:
+                  type: string
+                  enum: [guest, member]
+      responses:
+        "200":
+          description: Invite sent
+
+  /v1/user-device-invites/{inviteId}:
+    delete:
+      x-verification-status: app-derived
+      operationId: cancelDeviceInvite
+      summary: Withdraw an invitation that has not been accepted
+      tags: [Access]
+      parameters:
+        - name: inviteId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Invite cancelled
+
+  /v1/user-device-invites/accept:
+    post:
+      x-verification-status: app-derived
+      operationId: acceptDeviceInvite
+      summary: Redeem an invite code
+      description: |
+        The only call in this group that acts on the RECEIVING side. It
+        adds the authenticated account to somebody else's bed.
+      tags: [Access]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [code]
+              properties:
+                code:
+                  type: string
+      responses:
+        "200":
+          description: Invite accepted
 
   # ──────────────────────────────────────────────
   #  Surveys
