@@ -86,7 +86,7 @@ https://api1.orionbed.com
 
 | Path | Status | Notes |
 |------|--------|-------|
-| `/v1/sleep-configurations/devices` | **404** | A prior speculative contract listed it. The route does not exist. |
+| `/v1/sleep-configurations/devices` | App-derived, never sent | An early probe returned **404**, but that probe used the shape a speculative contract invented, from the same batch as the nine fabricated routes. The decompile later found the app itself calling `PUT` here from two call sites with `{user_id, device_id, zone_ids, push_away_behavior}`. A 404 against a made-up body says nothing about the real route, so "does not exist" was the wrong conclusion. Wrapped as `assign_zones`. Still app-derived: nobody has sent the real body. |
 | `/v1/sleep-configurations/temperature` | Removed from measured contract | Use the verified live zone endpoints for runtime temperature writes. |
 | `/v1/sleep-schedules?action=enable` | Unverified and not exposed | Only partial schedule field updates are verified. |
 | `/v1/session-state` | Returns onboarding state | `{patch_step, is_survey_complete, ...}` — NOT sleep session state |

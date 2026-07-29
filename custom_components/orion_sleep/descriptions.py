@@ -136,11 +136,30 @@ def _get_movement(session: dict | None) -> dict:
     return util.session_subsection(session, "movement")
 
 
-def _minutes_to_hm(minutes: float | int | None) -> str | None:
-    """Convert minutes to 'Xh Ym' string like the app shows."""
-    if minutes is None:
+def _duration_number(value: Any) -> int | None:
+    """Round a vendor duration to whole units, or None if it is not one.
+
+    The formatters below used to call `int(round(value))` straight off
+    the payload. A field arriving as a string raised TypeError inside
+    `SensorEntity.native_value`, which breaks the state write for the
+    whole entity rather than leaving one value unknown. This vendor has
+    already been observed changing a field's type, so the guard belongs
+    here rather than at each call site.
+
+    Rejects bool explicitly. It subclasses int, so `True` would
+    otherwise format as a one-minute duration, which is the same trap
+    `_minutes_value` documents.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    total = int(round(minutes))
+    return int(round(value))
+
+
+def _minutes_to_hm(minutes: Any) -> str | None:
+    """Convert minutes to 'Xh Ym' string like the app shows."""
+    total = _duration_number(minutes)
+    if total is None:
+        return None
     h, m = divmod(total, 60)
     if h > 0:
         return f"{h}h {m}m"
@@ -178,11 +197,11 @@ def _session_end(session: dict | None) -> Any:
     return util.parse_iso_datetime(session.get("end_time"))
 
 
-def _seconds_to_ms(seconds: float | int | None) -> str | None:
+def _seconds_to_ms(seconds: Any) -> str | None:
     """Convert seconds to 'Xm Ys' string like the app shows."""
-    if seconds is None:
+    total = _duration_number(seconds)
+    if total is None:
         return None
-    total = int(round(seconds))
     m, s = divmod(total, 60)
     if m > 0:
         return f"{m}m {s}s"

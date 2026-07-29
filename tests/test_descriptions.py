@@ -48,40 +48,27 @@ ALL_DESCRIPTIONS = INSIGHTS + SCHEDULES
 # list, a scalar where a block was expected, and a bool where a number
 # was expected.
 
-# A KNOWN, UNFIXED DEFECT, recorded rather than hidden.
+# A FIXED DEFECT, kept as a regression test.
 #
-# `_minutes_to_hm` and `_seconds_to_ms` do `int(round(value))` with no
-# type guard, so a numeric field arriving as a JSON string raises
-# TypeError inside `native_value`. Their numeric sibling `_minutes_value`
-# guards exactly this and says why in its docstring, which is what makes
-# this an oversight rather than a decision: the same payload is safe on
-# `total_sleep_time_minutes` and fatal on `total_sleep_time`.
+# `_minutes_to_hm` and `_seconds_to_ms` did `int(round(value))` with no
+# type guard, so a numeric field arriving as a JSON string raised
+# TypeError inside `native_value`, which breaks the state write for the
+# whole entity rather than leaving one value unknown. Their numeric
+# sibling `_minutes_value` already guarded exactly this and said why in
+# its docstring, which is what made it an oversight rather than a
+# decision: the same payload was safe on `total_sleep_time_minutes` and
+# fatal on `total_sleep_time`.
 #
-# Blast radius is every human-readable duration sensor, so
+# Blast radius was every human-readable duration sensor, so
 # `total_sleep_time`, `deep_sleep_time`, `rem_sleep_time`,
 # `light_sleep_time` and `awake_time` through `_minutes_to_hm`, plus
-# `restless_time` through `_seconds_to_ms`.
+# `restless_time` through `_seconds_to_ms`. Both now route through
+# `_duration_number`, which rejects a non-number and rejects bool.
 #
-# The fix is one guard in each function, mirroring `_minutes_value`.
-# `descriptions.py` is not this agent's file to edit, so these two are
-# marked xfail(strict=True) instead. Strict on purpose: the moment
-# somebody adds the guard, these turn into XPASS failures and force this
-# marker to be deleted, so the suite cannot quietly keep tolerating a bug
-# that no longer exists.
-_STRING_NUMBER_BUG = pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "_minutes_to_hm and _seconds_to_ms do int(round(value)) with no type "
-        "guard, so a numeric field sent as a JSON string raises TypeError "
-        "inside SensorEntity.native_value. Fix is the guard _minutes_value "
-        "already has."
-    ),
-)
-
-# The two payloads that trip the defect above. Kept separate so the
-# marker lands only on the test that actually fails. `extra_attrs_fn`
-# never reaches the duration formatters, so marking it xfail there would
-# be an XPASS and a false alarm.
+# These payloads carried an xfail(strict=True) marker while the bug was
+# open. Adding the guard turned them into XPASS failures, which is what
+# forced the marker out. Kept here unmarked so the guard cannot be
+# removed without the suite noticing.
 STRING_NUMBER_PAYLOADS = [
     {"sleep_summary": {"time_asleep": "420"}},
     {"movement": {"total_seconds": "125"}},
@@ -114,13 +101,8 @@ HOSTILE_PAYLOADS = [
     0,
 ]
 
-# `value_fn` sees the string-number payloads too, and fails on them.
-VALUE_FN_PAYLOADS = HOSTILE_PAYLOADS + [
-    pytest.param(payload, marks=_STRING_NUMBER_BUG)
-    for payload in STRING_NUMBER_PAYLOADS
-]
-
-# `extra_attrs_fn` sees them and handles them, so they go in unmarked.
+# Both formatter paths handle the string-number payloads now.
+VALUE_FN_PAYLOADS = HOSTILE_PAYLOADS + STRING_NUMBER_PAYLOADS
 ATTRS_FN_PAYLOADS = HOSTILE_PAYLOADS + STRING_NUMBER_PAYLOADS
 
 
