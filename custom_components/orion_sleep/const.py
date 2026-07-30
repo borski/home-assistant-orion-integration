@@ -3,11 +3,17 @@
 DOMAIN = "orion_sleep"
 
 # Config entry data keys (stored in config_entry.data)
-CONF_AUTH_METHOD = "auth_method"  # "email" or "phone"
+CONF_AUTH_METHOD = "auth_method"  # "email", "phone", or "api_key"
 CONF_AUTH_VALUE = "auth_value"  # the email address or phone number
 CONF_ACCESS_TOKEN = "access_token"
 CONF_REFRESH_TOKEN = "refresh_token"
 CONF_EXPIRES_AT = "expires_at"  # Unix timestamp
+# The raw Orion API key (os_live_...) when the account is key-authed. It is
+# stored as the access token for the client and never expires on a schedule
+# this integration can predict, so no refresh token or expiry is recorded
+# alongside it. MUST be redacted from diagnostics.
+CONF_API_KEY = "api_key"
+CONF_PARTNER_API_KEY = "partner_api_key"
 CONF_ACCOUNT_ID = "_account_id_v3"
 CONF_DEVICE_IDS = "_device_ids_v3"
 CONF_UID_MIGRATION = "_uid_migration_v3"

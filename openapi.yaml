@@ -268,6 +268,98 @@ paths:
         "400":
           $ref: "#/components/responses/BadRequest"
 
+  /v1/api-keys:
+    get:
+      x-verification-status: measured-live
+      operationId: listApiKeys
+      summary: List the account's API keys
+      description: |
+        Returns the account's API keys. Never returns the raw key or its
+        hash: each record carries only `id`, `name`, `key_prefix`,
+        `last_four`, `created_at`, `expires_at`, `last_used_at`, and
+        `revoked_at`. The `id` is the UUID used to revoke, not the raw key.
+      tags: [Auth]
+      responses:
+        "200":
+          description: List of API keys (redacted)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  response:
+                    type: object
+                    properties:
+                      api_keys:
+                        type: array
+                        items:
+                          $ref: "#/components/schemas/ApiKey"
+    post:
+      x-verification-status: measured-live
+      operationId: createApiKey
+      summary: Create an API key
+      description: |
+        Mints a new API key and returns its raw `api_key` value EXACTLY
+        ONCE. A later GET only shows the prefix and last four. The caller
+        must store the returned value; it cannot be retrieved again.
+
+        Measured live 2026-07-30 by creating a throwaway key and deleting
+        it.
+      tags: [Auth]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name:
+                  type: string
+                expires_at:
+                  type: string
+                  format: date-time
+                  description: ISO 8601. Omit for a key that does not expire.
+      responses:
+        "200":
+          description: Created key, including its raw value (returned once)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  response:
+                    allOf:
+                      - $ref: "#/components/schemas/ApiKey"
+                      - type: object
+                        properties:
+                          api_key:
+                            type: string
+                            description: The raw key. Returned once, never again.
+
+  /v1/api-keys/{id}:
+    delete:
+      x-verification-status: measured-live
+      operationId: revokeApiKey
+      summary: Revoke an API key
+      description: |
+        Revokes a key by its UUID (the `id` field from create or list, NOT
+        the raw `os_live_...` string). Takes effect on the next request.
+        Revoking the key the request is authenticated with is allowed.
+
+        Measured live 2026-07-30.
+      tags: [Auth]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Key revoked
+
   /v1/devices:
     get:
       operationId: listDevices
@@ -1840,6 +1932,40 @@ components:
         expires_at:
           type: number
           description: Unix timestamp when the access token expires
+
+    ApiKey:
+      type: object
+      description: |
+        A redacted API key record as returned by list and create. The raw
+        key value is NEVER present here; create returns it once in a
+        separate `api_key` field.
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Key UUID, used to revoke. Not the raw key.
+        name:
+          type: string
+        key_prefix:
+          type: string
+          description: The `os_live_` prefix, not the secret.
+        last_four:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: string
+          format: date-time
+          nullable: true
+        last_used_at:
+          type: string
+          format: date-time
+          nullable: true
+        revoked_at:
+          type: string
+          format: date-time
+          nullable: true
 
     User:
       type: object

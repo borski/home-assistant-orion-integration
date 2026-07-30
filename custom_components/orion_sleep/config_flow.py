@@ -28,6 +28,7 @@ from .const import (
     CONF_ACCESS_TOKEN,
     CONF_ACCOUNT_ID,
     CONF_ALLOW_UNVERIFIED_ACCOUNT,
+    CONF_API_KEY,
     CONF_AUTH_METHOD,
     CONF_AUTH_VALUE,
     CONF_DEVICE_IDS,
@@ -36,6 +37,7 @@ from .const import (
     CONF_INSIGHTS_DAYS,
     CONF_PARTNER_ACCESS_TOKEN,
     CONF_PARTNER_ACCOUNT_ID,
+    CONF_PARTNER_API_KEY,
     CONF_PARTNER_AUTH_METHOD,
     CONF_PARTNER_AUTH_VALUE,
     CONF_PARTNER_CONFIGURED,
@@ -64,6 +66,7 @@ _LOGGER = logging.getLogger(__name__)
 
 AUTH_METHOD_EMAIL = "email"
 AUTH_METHOD_PHONE = "phone"
+AUTH_METHOD_API_KEY = "api_key"
 
 
 class OrionSleepConfigFlow(ConfigFlow, domain=DOMAIN):
@@ -89,11 +92,13 @@ class OrionSleepConfigFlow(ConfigFlow, domain=DOMAIN):
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Step 1: User picks login method (email or phone)."""
+        """Step 1: User picks login method (email, phone, or API key)."""
         if user_input is not None:
             self._auth_method = user_input[CONF_AUTH_METHOD]
             if self._auth_method == AUTH_METHOD_EMAIL:
                 return await self.async_step_email()
+            if self._auth_method == AUTH_METHOD_API_KEY:
+                return await self.async_step_api_key()
             return await self.async_step_phone()
 
         return self.async_show_form(
@@ -104,6 +109,7 @@ class OrionSleepConfigFlow(ConfigFlow, domain=DOMAIN):
                         {
                             AUTH_METHOD_EMAIL: "Email",
                             AUTH_METHOD_PHONE: "Phone",
+                            AUTH_METHOD_API_KEY: "API key",
                         }
                     ),
                 }
@@ -518,6 +524,135 @@ class OrionSleepConfigFlow(ConfigFlow, domain=DOMAIN):
             errors=errors,
         )
 
+    async def _async_key_identity(
+        self, api_key: str
+    ) -> tuple[dict, list[str]] | None:
+        """Validate an API key and return its account profile and beds.
+
+        The key half of `_async_account_identity`. There is no code to
+        verify and no token to rotate: the key IS the credential, so this
+        just authenticates a key-mode client against `/v1/auth/me` (the
+        endpoint this codebase already uses for identity) and lists the
+        beds. Returns None on any auth or transport failure so the caller
+        shows a form error rather than accepting an unvalidated key.
+        """
+        session = async_get_clientsession(self.hass)
+        client = OrionApiClient(
+            session=session, access_token=api_key, is_api_key=True
+        )
+        try:
+            profile = await client.get_current_user()
+            devices = await client.list_devices()
+        except (OrionApiError, OrionConnectionError, OrionAuthError):
+            return None
+        if (
+            not isinstance(profile, dict)
+            or not isinstance(profile.get("id"), str)
+            or not profile["id"]
+        ):
+            return None
+        device_ids = sorted(
+            {
+                str(device["id"])
+                for device in devices
+                if isinstance(device, dict) and device.get("id")
+            }
+        )
+        return profile, device_ids
+
+    async def async_step_api_key(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """API key path: paste a key, validate it, done. No OTP step.
+
+        An Orion API key authenticates directly, so this skips the
+        send-code / verify-code round trip entirely. The key is validated
+        against `/v1/auth/me` before anything is persisted, and a bad key
+        surfaces as `invalid_api_key` rather than being accepted.
+        """
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            self._auth_method = AUTH_METHOD_API_KEY
+            api_key = user_input[CONF_API_KEY].strip()
+
+            identity = await self._async_key_identity(api_key)
+            if identity is None:
+                errors["base"] = "invalid_api_key"
+            else:
+                profile, device_ids = identity
+                account_id = profile["id"]
+
+                if self._reauth_entry:
+                    if not self._async_reauth_account_matches(profile):
+                        return self.async_abort(reason="reauth_account_mismatch")
+                    if recorded_account_id(self._reauth_entry) is None:
+                        recorded_devices = self._reauth_entry.data.get(CONF_DEVICE_IDS)
+                        if recorded_devices is not None and set(device_ids) != {
+                            str(value) for value in recorded_devices
+                        }:
+                            return self.async_abort(reason="reauth_bed_mismatch")
+                    if overlapping_entry_ids(
+                        self.hass, self._reauth_entry.entry_id, set(device_ids)
+                    ):
+                        return self.async_abort(reason="bed_already_configured")
+                else:
+                    await self.async_set_unique_id(account_id)
+                    self._abort_if_unique_id_configured()
+                    if overlapping_entry_ids(self.hass, None, set(device_ids)):
+                        return self.async_abort(reason="bed_already_configured")
+
+                # An API-key entry stores the key as the access token, with
+                # the auth method recorded so setup rebuilds a key-mode
+                # client. No refresh token, no expiry: the key is static.
+                data = {
+                    CONF_AUTH_METHOD: AUTH_METHOD_API_KEY,
+                    CONF_API_KEY: api_key,
+                    CONF_ACCESS_TOKEN: api_key,
+                    CONF_ACCOUNT_ID: account_id,
+                    CONF_DEVICE_IDS: device_ids,
+                }
+
+                if self._reauth_entry:
+                    updated = dict(data)
+                    if recorded_account_id(self._reauth_entry) is not None:
+                        # Same invariant as the OTP reauth path: only ever
+                        # populate an absent account id, never overwrite a
+                        # recorded one.
+                        updated.pop(CONF_ACCOUNT_ID, None)
+                    # Drop any stale OTP-era credential keys so an entry
+                    # that used to be email/phone and is now key-authed does
+                    # not carry a dead refresh token beside its key.
+                    merged = {**self._reauth_entry.data, **updated}
+                    for stale in (CONF_REFRESH_TOKEN, CONF_EXPIRES_AT):
+                        merged.pop(stale, None)
+                    self.hass.config_entries.async_update_entry(
+                        self._reauth_entry, data=merged
+                    )
+                    await self.hass.config_entries.async_reload(
+                        self._reauth_entry.entry_id
+                    )
+                    return self.async_abort(reason="reauth_successful")
+
+                # Title carries the account label, not the key. The key must
+                # never appear in an entry title (it would leak into logs and
+                # the UI). A short profile-derived label is used instead.
+                label = util.orion_user_label(profile) or account_id
+                return self.async_create_entry(
+                    title=f"Orion Sleep ({label})",
+                    data=data,
+                )
+
+        return self.async_show_form(
+            step_id="api_key",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(CONF_API_KEY): str,
+                }
+            ),
+            errors=errors,
+        )
+
     async def async_step_reauth(self, entry_data: dict[str, Any]) -> ConfigFlowResult:
         """Handle reauth triggered by ConfigEntryAuthFailed."""
         self._reauth_entry = self.hass.config_entries.async_get_entry(
@@ -530,7 +665,16 @@ class OrionSleepConfigFlow(ConfigFlow, domain=DOMAIN):
     async def async_step_reauth_confirm(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Confirm reauth and send a new verification code."""
+        """Confirm reauth and send a new verification code.
+
+        A key-authed entry reauths by pasting a NEW key, not by receiving
+        an OTP code. A revoked key cannot be recovered with an emailed
+        code, so routing it to the code path would be a dead end. The key
+        step handles reauth on its own because `self._reauth_entry` is set.
+        """
+        if self._auth_method == AUTH_METHOD_API_KEY:
+            return await self.async_step_api_key()
+
         errors: dict[str, str] = {}
 
         if user_input is not None:
@@ -1005,6 +1149,10 @@ class OrionSleepOptionsFlow(OptionsFlow):
                 CONF_PARTNER_AUTH_METHOD,
                 CONF_PARTNER_AUTH_VALUE,
                 CONF_PARTNER_ACCESS_TOKEN,
+                # A key-authed partner stores the raw key here. Removing the
+                # partner must clear it too, or a revoked partnership leaves
+                # a live credential in the entry.
+                CONF_PARTNER_API_KEY,
                 CONF_PARTNER_REFRESH_TOKEN,
                 CONF_PARTNER_EXPIRES_AT,
                 CONF_PARTNER_DEVICE_SERIAL,
@@ -1032,11 +1180,17 @@ class OrionSleepOptionsFlow(OptionsFlow):
     async def async_step_partner_method(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Choose the partner login method."""
+        """Choose the partner login method.
+
+        Independent of the primary account's method, so a household can run
+        one side on OTP and the other on an API key.
+        """
         if user_input is not None:
             self._partner_auth_method = user_input[CONF_AUTH_METHOD]
             if self._partner_auth_method == AUTH_METHOD_EMAIL:
                 return await self.async_step_partner_email()
+            if self._partner_auth_method == AUTH_METHOD_API_KEY:
+                return await self.async_step_partner_api_key()
             return await self.async_step_partner_phone()
 
         return self.async_show_form(
@@ -1047,6 +1201,7 @@ class OrionSleepOptionsFlow(OptionsFlow):
                         {
                             AUTH_METHOD_EMAIL: "Email",
                             AUTH_METHOD_PHONE: "Phone",
+                            AUTH_METHOD_API_KEY: "API key",
                         }
                     )
                 }
@@ -1169,78 +1324,121 @@ class OrionSleepOptionsFlow(OptionsFlow):
                 except (OrionApiError, OrionConnectionError):
                     return self.async_abort(reason="cannot_connect")
                 else:
-                    if not isinstance(partner_profile, dict):
-                        partner_id = None
-                    else:
-                        partner_id = partner_profile.get("id")
-                    if not isinstance(partner_id, str) or not partner_id:
-                        return self.async_abort(reason="identity_unavailable")
-                    coordinator = getattr(self._config_entry, "runtime_data", None)
-                    primary_devices = getattr(coordinator, "devices", [])
-                    primary_id = getattr(coordinator, "user_id", "")
-                    shared_serials = util.shared_device_serials(
-                        primary_devices, partner_devices
-                    )
-                    if partner_id == primary_id:
-                        return self.async_abort(reason="partner_same_account")
-                    if (
-                        len(primary_devices) != 1
-                        or len(partner_devices) != 1
-                        or len(shared_serials) != 1
-                    ):
-                        return self.async_abort(reason="partner_device_ambiguous")
-                    else:
-                        partner_serial = next(iter(shared_serials))
-                        # CONF_PARTNER_ACCOUNT_ID is written HERE and only
-                        # here, in the same dict as the tokens it describes.
-                        #
-                        # It was read in three places and written in none.
-                        # `coordinator.recorded_partner_account_id` reads it
-                        # and `_partner_identity_verified` compares the
-                        # returned partner id against it, so once partner A
-                        # was recorded by any means, linking partner B stored
-                        # B's tokens beside A's recorded id. The next poll
-                        # compared B against A, called it a mismatch, and
-                        # disabled partner insights with a warning telling the
-                        # household to relink the partner in the Orion
-                        # options. Relinking is the action that had just
-                        # failed, so the prescribed remedy was the thing that
-                        # caused the problem, and the removal path did not
-                        # clear the key either. No supported flow could clear
-                        # it. Once A was linked, B could never be accepted.
-                        #
-                        # `partner_id` is the id from the profile fetched with
-                        # these exact tokens, and it has already been checked
-                        # non-empty and checked against the primary a few
-                        # lines above, so this records who the tokens actually
-                        # belong to rather than who the user said they were.
-                        #
-                        # In the same `_write_partner_change` call as the
-                        # tokens on purpose. A separate write would open a
-                        # window where a reload sees the new tokens next to
-                        # the previous partner's recorded id, which is the
-                        # exact pairing that whole method exists to prevent.
-                        self._write_partner_change({
-                            **self._config_entry.data,
+                    return self._finalize_partner_link(
+                        partner_profile,
+                        partner_devices,
+                        {
                             CONF_PARTNER_AUTH_METHOD: self._partner_auth_method,
                             CONF_PARTNER_AUTH_VALUE: self._partner_auth_value,
                             CONF_PARTNER_ACCESS_TOKEN: tokens["access_token"],
                             CONF_PARTNER_REFRESH_TOKEN: tokens["refresh_token"],
                             CONF_PARTNER_EXPIRES_AT: tokens["expires_at"],
-                            CONF_PARTNER_DEVICE_SERIAL: partner_serial,
-                            CONF_PARTNER_ACCOUNT_ID: partner_id,
-                        })
-                        # After `_write_partner_change`, never before. That
-                        # call runs the partner eviction and writes the
-                        # pruned options back to the entry, and the save
-                        # below reads the entry's options as they are now.
-                        # Reversing the order would carry the previous
-                        # partner's pair records forward past the eviction
-                        # that just removed them.
-                        return self._async_save_options(self._pending_options)
+                        },
+                    )
 
         return self.async_show_form(
             step_id="partner_verify",
             data_schema=vol.Schema({vol.Required("code"): str}),
             errors=errors,
         )
+
+    async def async_step_partner_api_key(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Link a partner account with an API key. No OTP step.
+
+        The partner equivalent of `async_step_api_key`. The key is
+        validated against the partner's own `/v1/auth/me`, then the same
+        shared-bed and identity checks run as for the OTP partner path.
+        """
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            self._partner_auth_method = AUTH_METHOD_API_KEY
+            api_key = user_input[CONF_PARTNER_API_KEY].strip()
+
+            client = OrionApiClient(
+                session=async_get_clientsession(self.hass),
+                access_token=api_key,
+                is_api_key=True,
+            )
+            try:
+                partner_profile = await client.get_current_user()
+                partner_devices = util.dedupe_devices_by_id(
+                    await client.list_devices()
+                )
+            except OrionAuthError:
+                errors["base"] = "invalid_api_key"
+            except (OrionApiError, OrionConnectionError):
+                errors["base"] = "cannot_connect"
+            else:
+                return self._finalize_partner_link(
+                    partner_profile,
+                    partner_devices,
+                    {
+                        CONF_PARTNER_AUTH_METHOD: AUTH_METHOD_API_KEY,
+                        CONF_PARTNER_API_KEY: api_key,
+                        CONF_PARTNER_ACCESS_TOKEN: api_key,
+                    },
+                )
+
+        return self.async_show_form(
+            step_id="partner_api_key",
+            data_schema=vol.Schema({vol.Required(CONF_PARTNER_API_KEY): str}),
+            errors=errors,
+        )
+
+    def _finalize_partner_link(
+        self,
+        partner_profile: object,
+        partner_devices: list,
+        credential: dict[str, Any],
+    ) -> ConfigFlowResult:
+        """Shared partner-link finalize for both OTP and API-key paths.
+
+        Runs the identity and shared-bed checks that must hold regardless
+        of how the partner authenticated, then writes the partner
+        credential (`credential`, whichever shape) alongside the recorded
+        partner account id and device serial in a single
+        `_write_partner_change`.
+        """
+        if not isinstance(partner_profile, dict):
+            partner_id = None
+        else:
+            partner_id = partner_profile.get("id")
+        if not isinstance(partner_id, str) or not partner_id:
+            return self.async_abort(reason="identity_unavailable")
+
+        coordinator = getattr(self._config_entry, "runtime_data", None)
+        primary_devices = getattr(coordinator, "devices", [])
+        primary_id = getattr(coordinator, "user_id", "")
+        shared_serials = util.shared_device_serials(primary_devices, partner_devices)
+        if partner_id == primary_id:
+            return self.async_abort(reason="partner_same_account")
+        if (
+            len(primary_devices) != 1
+            or len(partner_devices) != 1
+            or len(shared_serials) != 1
+        ):
+            return self.async_abort(reason="partner_device_ambiguous")
+
+        partner_serial = next(iter(shared_serials))
+        # CONF_PARTNER_ACCOUNT_ID and the device serial are written HERE,
+        # in the SAME `_write_partner_change` as the credential they
+        # describe. A separate write would open a window where a reload
+        # sees the new credential next to the previous partner's recorded
+        # id, which is the exact pairing that method exists to prevent.
+        # `partner_id` is from the profile fetched with these exact
+        # credentials, so it records who they actually belong to.
+        self._write_partner_change(
+            {
+                **self._config_entry.data,
+                **credential,
+                CONF_PARTNER_DEVICE_SERIAL: partner_serial,
+                CONF_PARTNER_ACCOUNT_ID: partner_id,
+            }
+        )
+        # After `_write_partner_change`, never before: that call runs the
+        # partner eviction and writes pruned options back to the entry, and
+        # the save reads the entry's options as they are now.
+        return self._async_save_options(self._pending_options)

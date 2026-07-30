@@ -32,6 +32,13 @@
       "reauth_confirm": {
         "title": "Re-authenticate Orion Sleep",
         "description": "Your Orion Sleep session has expired. Press submit to receive a new verification code."
+      },
+      "api_key": {
+        "title": "Orion Sleep Login",
+        "description": "Paste an Orion Sleep API key. Create one in the Orion app or at your Orion account settings. The key authenticates directly, so there is no verification code.",
+        "data": {
+          "api_key": "API key"
+        }
       }
     },
     "error": {
@@ -40,7 +47,8 @@
       "invalid_auth": "Authentication failed",
       "invalid_phone": "Phone number must include the leading 1 country code and be 11 digits total (e.g. 15551234567).",
       "partner_same_account": "The partner login belongs to the primary account. Link the other sleeper's Orion account.",
-      "unknown": "An unexpected error occurred"
+      "unknown": "An unexpected error occurred",
+      "invalid_api_key": "That API key was not accepted. Check it is correct and not revoked, then try again."
     },
     "abort": {
       "already_configured": "This account is already configured",
@@ -97,6 +105,13 @@
         "data": {
           "code": "Verification code"
         }
+      },
+      "partner_api_key": {
+        "title": "Link Partner Account",
+        "description": "Paste your partner's Orion Sleep API key. It authenticates directly, so there is no verification code.",
+        "data": {
+          "partner_api_key": "Partner API key"
+        }
       }
     },
     "error": {
@@ -106,7 +121,8 @@
       "partner_device_ambiguous": "Partner linking requires both accounts to contain exactly one matching Orion bed.",
       "partner_same_account": "The partner login belongs to the primary account. Link the other sleeper's Orion account.",
       "unknown": "An unexpected error occurred",
-      "unsafe_alias": "That looks like an email address or a phone number. Home Assistant turns the first name an entity is given into its entity ID and never changes it afterwards, so this would put a login credential permanently into your entity IDs, your history, and your backups. Use a name instead, or leave the field blank to use the name from the Orion account."
+      "unsafe_alias": "That looks like an email address or a phone number. Home Assistant turns the first name an entity is given into its entity ID and never changes it afterwards, so this would put a login credential permanently into your entity IDs, your history, and your backups. Use a name instead, or leave the field blank to use the name from the Orion account.",
+      "invalid_api_key": "That API key was not accepted. Check it is correct and not revoked, then try again."
     },
     "abort": {
       "identity_unavailable": "Orion accepted the code but the partner account details could not be read, so nothing was saved. The code is now used, try linking again.",

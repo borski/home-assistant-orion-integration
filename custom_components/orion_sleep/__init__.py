@@ -21,9 +21,11 @@ from orion_sleep_api import OrionApiClient
 from .const import (
     CONF_ACCESS_TOKEN,
     CONF_ACCOUNT_ID,
+    CONF_API_KEY,
     CONF_DEVICE_IDS,
     CONF_EXPIRES_AT,
     CONF_PARTNER_ACCESS_TOKEN,
+    CONF_PARTNER_API_KEY,
     CONF_PARTNER_EXPIRES_AT,
     CONF_PARTNER_REFRESH_TOKEN,
     CONF_REFRESH_TOKEN,
@@ -208,37 +210,55 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             "run the orion_sleep.resume_unique_ids action to return to 3.x"
         )
     session = async_get_clientsession(hass)
-    api_client = OrionApiClient(
-        session=session,
-        access_token=entry.data[CONF_ACCESS_TOKEN],
-        refresh_token=entry.data[CONF_REFRESH_TOKEN],
-        expires_at=entry.data[CONF_EXPIRES_AT],
-    )
 
-    # Register token refresh callback to persist new tokens
-    expected_primary_refresh_token = entry.data[CONF_REFRESH_TOKEN]
-
-    def on_token_refresh(
-        access_token: str, refresh_token: str, expires_at: float
-    ) -> None:
-        nonlocal expected_primary_refresh_token
-        if entry.data.get(CONF_REFRESH_TOKEN) != expected_primary_refresh_token:
-            return
-        expected_primary_refresh_token = refresh_token
-        hass.config_entries.async_update_entry(
-            entry,
-            data={
-                **entry.data,
-                CONF_ACCESS_TOKEN: access_token,
-                CONF_REFRESH_TOKEN: refresh_token,
-                CONF_EXPIRES_AT: expires_at,
-            },
+    # Primary and partner accounts each authenticate with EITHER OTP tokens
+    # OR a static API key, chosen independently. `CONF_API_KEY` present means
+    # key mode: the key is the access token, there is no refresh token or
+    # expiry, and no refresh callback is wired because the key never
+    # rotates. The two are deliberately independent, so one side can be OTP
+    # while the other is a key.
+    primary_api_key = entry.data.get(CONF_API_KEY)
+    if primary_api_key:
+        api_client = OrionApiClient(
+            session=session, access_token=primary_api_key, is_api_key=True
+        )
+    else:
+        api_client = OrionApiClient(
+            session=session,
+            access_token=entry.data[CONF_ACCESS_TOKEN],
+            refresh_token=entry.data[CONF_REFRESH_TOKEN],
+            expires_at=entry.data[CONF_EXPIRES_AT],
         )
 
-    api_client.set_token_refresh_callback(on_token_refresh)
+        # Register token refresh callback to persist new tokens. OTP only.
+        expected_primary_refresh_token = entry.data[CONF_REFRESH_TOKEN]
+
+        def on_token_refresh(
+            access_token: str, refresh_token: str, expires_at: float
+        ) -> None:
+            nonlocal expected_primary_refresh_token
+            if entry.data.get(CONF_REFRESH_TOKEN) != expected_primary_refresh_token:
+                return
+            expected_primary_refresh_token = refresh_token
+            hass.config_entries.async_update_entry(
+                entry,
+                data={
+                    **entry.data,
+                    CONF_ACCESS_TOKEN: access_token,
+                    CONF_REFRESH_TOKEN: refresh_token,
+                    CONF_EXPIRES_AT: expires_at,
+                },
+            )
+
+        api_client.set_token_refresh_callback(on_token_refresh)
 
     partner_api_client: OrionApiClient | None = None
-    if entry.data.get(CONF_PARTNER_ACCESS_TOKEN):
+    partner_api_key = entry.data.get(CONF_PARTNER_API_KEY)
+    if partner_api_key:
+        partner_api_client = OrionApiClient(
+            session=session, access_token=partner_api_key, is_api_key=True
+        )
+    elif entry.data.get(CONF_PARTNER_ACCESS_TOKEN):
         expected_partner_refresh_token = entry.data.get(CONF_PARTNER_REFRESH_TOKEN, "")
         partner_api_client = OrionApiClient(
             session=session,

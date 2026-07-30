@@ -79,7 +79,7 @@ can see them disagree.
 - **Sleep insights.** Score, HRV, heart and breath rate, sleep stages as both formatted durations and graphable minutes, plus a real timestamp for when the last session ended.
 - **Partner insights.** Link a second Orion login to pull the other sleeper's sleep data, which is scoped to their token and invisible otherwise.
 - **Firmware updates.** Exposed as a proper `update` entity with install support.
-- **Passwordless auth.** Same email or phone plus verification code flow as the app. Tokens refresh automatically.
+- **Passwordless or API key auth.** Log in with the same email or phone plus verification code flow as the app (tokens refresh automatically), or paste an Orion API key for a static credential that never needs a code. Either works for the primary and partner accounts independently.
 - **Redacted diagnostics.** The debug bundle strips tokens, identifiers, contact details, network PII, biometrics, and schedules.
 
 ## Installation
@@ -125,9 +125,19 @@ Or go to **Settings > Devices & Services > Add Integration** and search for "Ori
 
 ### Setup steps
 
-1. Choose **email** or **phone**.
-2. Enter your Orion account email or phone number. A verification code is sent the same way the app sends it.
-3. Enter the code.
+Choose **email**, **phone**, or **API key**.
+
+**Email or phone:**
+
+1. Enter your Orion account email or phone number. A verification code is sent the same way the app sends it.
+2. Enter the code.
+
+**API key:**
+
+1. Create an API key in the Orion app or your [Orion account settings](https://app.orionsleep.com/) (the key looks like `os_live_...` and is shown once).
+2. Paste it. It authenticates directly, so there is no verification code.
+
+An API key is a static credential: it never expires on its own and is not refreshed. If you revoke it in Orion, Home Assistant prompts you to enter a new one (a re-auth, not an OTP code). The key is redacted from diagnostics and never written to a log.
 
 ### Options
 
@@ -137,7 +147,7 @@ Or go to **Settings > Devices & Services > Add Integration** and search for "Ori
 |---|---|---|
 | Polling interval | 600 s | REST poll interval, 60 to 3600 s. The WebSocket runs continuously and ignores this. |
 | Insights days | 7 | Days of sleep history to retrieve, 1 to 30. |
-| Partner account | off | Link a second Orion login for the other sleeper's insights. Both accounts must resolve to the same physical bed, and the mapping is rechecked every poll. |
+| Partner account | off | Link a second Orion login for the other sleeper's insights, via email/phone code or its own API key. Both accounts must resolve to the same physical bed, and the mapping is rechecked every poll. |
 | Display names | off | Rename each sleeper. Affects friendly names only. |
 
 ### Display names

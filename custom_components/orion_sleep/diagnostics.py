@@ -12,11 +12,13 @@ from homeassistant.core import HomeAssistant
 from .const import (
     CONF_ACCESS_TOKEN,
     CONF_ACCOUNT_ID,
+    CONF_API_KEY,
     CONF_AUTH_VALUE,
     CONF_DEVICE_IDS,
     CONF_DISPLAY_ALIASES,
     CONF_PARTNER_ACCESS_TOKEN,
     CONF_PARTNER_ACCOUNT_ID,
+    CONF_PARTNER_API_KEY,
     CONF_PARTNER_AUTH_VALUE,
     CONF_PARTNER_DEVICE_SERIAL,
     CONF_PARTNER_REFRESH_TOKEN,
@@ -58,6 +60,12 @@ from .helpers import omit_sensitive_diagnostic_branches, redact_identifier_keys
 TO_REDACT = {
     CONF_ACCESS_TOKEN,
     CONF_REFRESH_TOKEN,
+    # The raw Orion API keys (os_live_...). A key IS a live credential, so
+    # a diagnostics download must never carry one. `CONF_API_KEY` is also
+    # stored as the access token, which is redacted above, but the key is
+    # recorded under its own field too and both must go.
+    CONF_API_KEY,
+    CONF_PARTNER_API_KEY,
     "email",
     "phone",
     "phone_number",

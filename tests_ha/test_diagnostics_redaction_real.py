@@ -62,7 +62,9 @@ PRIMARY_ACCOUNT = ACCOUNT
 # is spelled `_account_id_v3` on disk and `CONF_PARTNER_ACCOUNT_ID` is
 # `_partner_account_id_v3`, and no rule reading only those two strings
 # would group them together as obviously as their names do.
-_SENSITIVE_NAME_RE = re.compile(r"ACCOUNT_ID|TOKEN|AUTH_VALUE|SERIAL|DEVICE_IDS|UID_")
+_SENSITIVE_NAME_RE = re.compile(
+    r"ACCOUNT_ID|TOKEN|AUTH_VALUE|SERIAL|DEVICE_IDS|UID_|API_KEY"
+)
 
 # Config keys deliberately left in a diagnostics download, each with the
 # reason, so the guard below can tell "considered and allowed" apart from
@@ -282,3 +284,43 @@ async def test_the_partner_account_id_never_reaches_the_download(
     assert "partner-at" not in rendered
     assert "partner-rt" not in rendered
     assert SERIAL_A not in rendered
+
+
+# ── API keys never reach a diagnostics download ───────────────────────
+
+
+async def test_an_api_key_never_reaches_the_download(hass, patched, client):
+    """Definition-of-done item 4: no `os_live` string anywhere.
+
+    A key-authed entry stores the raw key both as CONF_API_KEY and, so the
+    client can send it, as CONF_ACCESS_TOKEN. Both must be redacted, and
+    the same for a key-authed partner. `os_live_` is the distinctive
+    prefix, so a grep for it is the exact check the spec calls for.
+    """
+    primary_key = "os_live_" + "P" * 43
+    partner_key = "os_live_" + "Q" * 43
+    entry = make_entry(
+        hass,
+        data={
+            const.CONF_ACCOUNT_ID: PRIMARY_ACCOUNT,
+            const.CONF_AUTH_METHOD: "api_key",
+            const.CONF_API_KEY: primary_key,
+            const.CONF_ACCESS_TOKEN: primary_key,
+            const.CONF_PARTNER_ACCOUNT_ID: PARTNER_ACCOUNT,
+            const.CONF_PARTNER_AUTH_METHOD: "api_key",
+            const.CONF_PARTNER_API_KEY: partner_key,
+            const.CONF_PARTNER_ACCESS_TOKEN: partner_key,
+            const.CONF_PARTNER_DEVICE_SERIAL: SERIAL_A,
+        },
+    )
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+
+    rendered = repr(await async_get_config_entry_diagnostics(hass, entry))
+
+    assert "os_live" not in rendered, (
+        "an Orion API key reached the diagnostics download. A key is a live "
+        "credential and must never appear in a bundle."
+    )
+    assert primary_key not in rendered
+    assert partner_key not in rendered
