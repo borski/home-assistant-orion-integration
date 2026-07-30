@@ -2052,6 +2052,41 @@ components:
         batteryLevel:
           type: number
           format: float
+        capabilities:
+          type: object
+          x-verification-status: measured-live
+          description: |
+            Declares which sensors, alarms, and accessories this device
+            supports. Found by Kevin Klaes (observed 2026-07-16);
+            re-measured live here 2026-07-30 and the shape matches. A
+            `false` is meaningful negative space: a device with
+            `sensors.heart_rate: false` should not be assumed to expose a
+            heart-rate reading, and `accessories.blanket: false` (as seen
+            on the measured device) means no blanket accessory is attached.
+          properties:
+            sensors:
+              type: object
+              properties:
+                sleep_tracking:
+                  type: boolean
+                heart_rate:
+                  type: boolean
+                weight_detection:
+                  type: boolean
+            alarms:
+              type: object
+              properties:
+                vibration:
+                  type: boolean
+                sound:
+                  type: boolean
+                temperature:
+                  type: boolean
+            accessories:
+              type: object
+              properties:
+                blanket:
+                  type: boolean
 
     LiveZoneUpdate:
       type: object

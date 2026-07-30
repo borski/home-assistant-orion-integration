@@ -58,7 +58,8 @@ jobs:
         run: |
           uv venv .venv-ha --python 3.14
           uv pip install --python .venv-ha --group test
-          uv pip install --python .venv-ha orion-sleep-api==0.1.0
+          PIN=$(python -c "import json,re; r=json.load(open('custom_components/orion_sleep/manifest.json'))['requirements']; print(next(x for x in r if x.startswith('orion-sleep-api')))")
+          uv pip install --python .venv-ha "$PIN"
       # `-p no:homeassistant` is required. pytest autoloads
       # pytest-homeassistant-custom-component by entry point, and its
       # autouse async fixtures make every synchronous test in the fast
@@ -87,6 +88,7 @@ jobs:
         run: |
           uv venv .venv-ha --python 3.14
           uv pip install --python .venv-ha --group test
-          uv pip install --python .venv-ha orion-sleep-api==0.1.0
+          PIN=$(python -c "import json,re; r=json.load(open('custom_components/orion_sleep/manifest.json'))['requirements']; print(next(x for x in r if x.startswith('orion-sleep-api')))")
+          uv pip install --python .venv-ha "$PIN"
       - name: Real Home Assistant suite
         run: .venv-ha/bin/python -m pytest tests_ha -q
