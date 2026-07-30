@@ -34,10 +34,12 @@ from .const import (
     CONF_PARTNER_AUTH_VALUE,
     CONF_PARTNER_DEVICE_SERIAL,
     CONF_SCAN_INTERVAL,
+    CONF_ZONE_LEFT,
     DEFAULT_ALLOW_UNVERIFIED_ACCOUNT,
     DEFAULT_COOLING_MINUTES,
     DEFAULT_INSIGHTS_DAYS,
     DEFAULT_SCAN_INTERVAL,
+    DEFAULT_ZONE_LEFT,
     MAX_COOLING_MINUTES,
     MIN_COOLING_MINUTES,
 )
@@ -1983,6 +1985,29 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
                 break
             break
         return zone_id.replace("_", " ").title()
+
+    def zone_side(self, zone_id: str) -> str | None:
+        """Left/right for one zone, from the CONF_ZONE_LEFT option.
+
+        Unlike `zone_label`, this deliberately DOES answer left/right,
+        because it is never slugified into an entity_id. It only labels a
+        side-anchored controller (a bedside dial). The dangerous case the
+        `zone_label` docstring guards against, a confidently mislabelled
+        side burned into a permanent entity_id, cannot happen here: this is
+        a user-set option that only feeds an attribute, and flipping it is
+        a one-line options change with no migration.
+
+        Returns None for a zone that is neither the configured left zone
+        nor its opposite, so a three-zone bed (were one to exist) does not
+        get a bogus side.
+        """
+        zone_left = self.config_entry.options.get(CONF_ZONE_LEFT, DEFAULT_ZONE_LEFT)
+        zone_right = "zone_b" if zone_left == "zone_a" else "zone_a"
+        if zone_id == zone_left:
+            return "left"
+        if zone_id == zone_right:
+            return "right"
+        return None
 
     # ── Device-level capabilities and diagnostics ─────────────────────
 

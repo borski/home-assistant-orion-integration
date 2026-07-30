@@ -211,7 +211,9 @@ def patched(client: FakeClient, ws_manager: FakeWebSocketManager):
 ENTRY = "entry-1"
 
 
-def make_entry(hass, *, entry_id=ENTRY, unique_id=ACCOUNT, data=None) -> MockConfigEntry:
+def make_entry(
+    hass, *, entry_id=ENTRY, unique_id=ACCOUNT, data=None, options=None
+) -> MockConfigEntry:
     entry = MockConfigEntry(
         domain=DOMAIN,
         entry_id=entry_id,
@@ -224,6 +226,7 @@ def make_entry(hass, *, entry_id=ENTRY, unique_id=ACCOUNT, data=None) -> MockCon
             CONF_EXPIRES_AT: 9e12,
             **(data or {}),
         },
+        options=options or {},
     )
     entry.add_to_hass(hass)
     return entry

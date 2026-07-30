@@ -216,13 +216,29 @@ class OrionZoneClimateEntity(OrionBaseEntity, ClimateEntity):
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        """Expose the zone id and the raw thermal state for debugging."""
-        return {
+        """Zone id, raw thermal state, and physical side.
+
+        `side` (left/right) is here for side-anchored controllers like a
+        bedside dial, which think in sides rather than in whichever person
+        sleeps there. Rather than rename this person-named entity (which would
+        break the naming the rest of the integration is built on and every
+        dashboard that references it), the side rides as an attribute. A dial
+        or automation resolves "the left climate" with a template over this
+        attribute, and it keeps working when the sleepers swap sides because
+        the CONF_ZONE_LEFT option moves with the bed, not with the person.
+        The key is omitted, not set to None, when the zone is neither
+        configured side.
+        """
+        attrs: dict[str, Any] = {
             "zone_id": self._zone_id,
             "thermal_state": self.coordinator.zone_thermal_state(
                 self._device_id, self._zone_id
             ),
         }
+        side = self.coordinator.zone_side(self._zone_id)
+        if side is not None:
+            attrs["side"] = side
+        return attrs
 
     async def async_set_temperature(self, **kwargs: Any) -> None:
         """Set this zone's target temperature."""

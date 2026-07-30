@@ -49,9 +49,11 @@ from .const import (
     CONF_REFRESH_TOKEN,
     CONF_SCAN_INTERVAL,
     CONF_UID_MIGRATION,
+    CONF_ZONE_LEFT,
     DEFAULT_ALLOW_UNVERIFIED_ACCOUNT,
     DEFAULT_INSIGHTS_DAYS,
     DEFAULT_SCAN_INTERVAL,
+    DEFAULT_ZONE_LEFT,
     DOMAIN,
 )
 from .coordinator import profile_carries_address, recorded_account_id
@@ -744,6 +746,19 @@ class OrionSleepOptionsFlow(OptionsFlow):
         current_allow_unverified = self._config_entry.options.get(
             CONF_ALLOW_UNVERIFIED_ACCOUNT, DEFAULT_ALLOW_UNVERIFIED_ACCOUNT
         )
+        current_zone_left = self._config_entry.options.get(
+            CONF_ZONE_LEFT, DEFAULT_ZONE_LEFT
+        )
+        # Which zone is the LEFT side of the bed, for side-anchored
+        # controllers like a bedside dial. Labelled by what each choice
+        # means rather than by the raw zone id, because "zone_a" tells a
+        # user nothing about which nightstand to reach for. Flipping it only
+        # relabels a climate attribute and a voice alias, so it is safe to
+        # expose here with no migration and no warning.
+        zone_left_choices = {
+            "zone_a": "Zone A is the left side",
+            "zone_b": "Zone B is the left side",
+        }
         partner_actions = {
             "keep": "Keep linked partner" if has_partner else "No partner account",
             "add": "Replace partner account" if has_partner else "Add partner account",
@@ -765,6 +780,9 @@ class OrionSleepOptionsFlow(OptionsFlow):
                         partner_actions
                     ),
                     vol.Required("edit_aliases", default=False): bool,
+                    vol.Required(
+                        CONF_ZONE_LEFT, default=current_zone_left
+                    ): vol.In(zone_left_choices),
                     # The recovery escape hatch, and the only way to reach
                     # `CONF_ALLOW_UNVERIFIED_ACCOUNT` at all.
                     #

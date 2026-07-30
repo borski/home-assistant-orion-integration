@@ -89,6 +89,12 @@ _DELIBERATELY_NOT_REDACTED = frozenset(
         "CONF_SCAN_INTERVAL",
         "CONF_ALLOW_UNVERIFIED_ACCOUNT",
         "CONF_INSIGHTS_DAYS",
+        # Which physical zone is the left side of the bed, "zone_a" or
+        # "zone_b". A furniture-orientation preference for a bedside dial.
+        # It names no person and carries no credential, and it is exactly
+        # the kind of setting a bug report about a dial pointing at the
+        # wrong side needs to show.
+        "CONF_ZONE_LEFT",
         # A bare `True`, written when a linked partner is swapped for a
         # different one. It names nobody. It does not carry the previous
         # partner's id, which is `CONF_PARTNER_ACCOUNT_ID` and is

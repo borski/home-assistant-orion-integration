@@ -68,7 +68,8 @@
           "insights_days": "Days of sleep insights to fetch",
           "partner_action": "Partner account",
           "edit_aliases": "Edit display names",
-          "allow_unverified_account": "Recovery only: load without confirming the account"
+          "allow_unverified_account": "Recovery only: load without confirming the account",
+          "zone_left": "Left side of the bed"
         },
         "data_description": {
           "allow_unverified_account": "Leave this off. It is a recovery step, not a setting to tune.\n\nTurn it on only if this entry refuses to load with an account verification error AND reauthenticating fails the same way. That happens when Orion returns a profile carrying no email and no phone number, which leaves nothing for this entry to check its account against. Both setup and reauthentication then fail the same check and there is no other way back in.\n\nWith this on, the entry loads once and records whichever account Orion reports. Turn it back off afterwards. It changes nothing on an entry that already knows its account, so it can never accept a different account than the one recorded.\n\nChanging this setting reloads Orion Sleep for you, so it applies as soon as you save. No manual reload is needed, in either direction."

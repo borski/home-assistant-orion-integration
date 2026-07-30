@@ -19,6 +19,24 @@ CONF_DEVICE_IDS = "_device_ids_v3"
 CONF_UID_MIGRATION = "_uid_migration_v3"
 CONF_UID_RECOVERY_ACTIVE = "_uid_recovery_active_v3"
 
+# Which physical zone is the LEFT side of the bed. Orion has no left/right
+# convention of its own, and left/right is genuinely ambiguous (it flips
+# depending on whether you stand at the foot of the bed or lie in it), so
+# this is a user-settable option rather than anything derived from the API.
+#
+# It exists for side-anchored controllers like a bedside rotary dial, which
+# think in "the left side" rather than in a person's name: a dial bolted
+# to the left nightstand wants to drive the left zone regardless of who
+# sleeps there tonight. This integration keeps its person-named entities as
+# the canonical ones; the side is exposed as a `side` attribute on each
+# climate entity, keyed off this option.
+#
+# Default zone_a=left is a starting guess. If the first physical test
+# disagrees, flip this in the options. It only moves the label, so there is
+# no migration and no unique_id is touched.
+CONF_ZONE_LEFT = "zone_left"
+DEFAULT_ZONE_LEFT = "zone_a"
+
 # Optional partner account. Tokens live in config entry data. The configured
 # flag lives in options so adding or removing a partner triggers one reload.
 CONF_PARTNER_AUTH_METHOD = "partner_auth_method"
