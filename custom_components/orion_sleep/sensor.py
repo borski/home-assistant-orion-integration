@@ -126,6 +126,9 @@ async def async_setup_entry(
         )
         entities.append(OrionWeeklyScoreSensor(coordinator, account_device_id))
         entities.append(OrionMonthlyScoreSensor(coordinator, account_device_id))
+        entities.append(
+            OrionTemperatureRecommendationsSensor(coordinator, account_device_id)
+        )
         # CONFIGURED, not verified. This gate decides whether the partner's
         # entities EXIST, which is a fact about how this entry was set up,
         # not about whether an HTTP request succeeded thirty seconds ago.
@@ -173,6 +176,11 @@ async def async_setup_entry(
             )
             entities.append(
                 OrionMonthlyScoreSensor(
+                    coordinator, account_device_id, is_partner=True
+                )
+            )
+            entities.append(
+                OrionTemperatureRecommendationsSensor(
                     coordinator, account_device_id, is_partner=True
                 )
             )
@@ -1966,6 +1974,78 @@ class _OrionV3ScoreSensor(OrionBaseEntity, SensorEntity):
                 if comp is not None:
                     attrs[mk]["comparison_key"] = comparison_key
         return attrs or None
+
+
+class OrionTemperatureRecommendationsSensor(OrionBaseEntity, SensorEntity):
+    """Orion Intelligence temperature recommendations for one sleeper.
+
+    State is the number of recommendations (0 is a valid state, not an
+    error: it means Orion has none for this user yet). The typed items ride
+    as the `recommendations` attribute. The sensor is unavailable only when
+    the recommendations key is absent entirely.
+
+    MEASURED item schema (probed 2026-07-30 against a live account that,
+    unlike Kevin Klaes's, had a populated recommendation): `bedtime_temp`,
+    `phase_1_temp`, `phase_2_temp`, `wakeup_temp` (all numeric, per-phase),
+    `thermal_classification`, `source`, `version`, `created_at`. This
+    closes the open question in Kevin's fork, which only ever saw the list
+    empty. Recommendations ride in `/v1/sleep-schedules`, which he found.
+    """
+
+    _live_fed = False
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_icon = "mdi:thermometer-auto"
+
+    def __init__(
+        self,
+        coordinator: OrionDataUpdateCoordinator,
+        device_id: str,
+        *,
+        is_partner: bool = False,
+    ) -> None:
+        super().__init__(coordinator, device_id)
+        self._is_partner = is_partner
+        self._attr_translation_key = (
+            "partner_temperature_recommendations"
+            if is_partner
+            else "temperature_recommendations"
+        )
+        who = (
+            coordinator.partner_entity_key_id() if is_partner else coordinator.user_id
+        )
+        self._attr_unique_id = helpers.account_person_unique_id(
+            coordinator.config_entry.entry_id,
+            "temperature_recommendations",
+            who,
+            legacy=f"{device_id}_temperature_recommendations"
+            + ("_partner" if is_partner else ""),
+        )
+
+    def _user_id(self) -> str | None:
+        if self._is_partner:
+            return self.coordinator.partner_entity_key_id()
+        return self.coordinator.user_id
+
+    @property
+    def available(self) -> bool:
+        if not super().available:
+            return False
+        if self._is_partner and not self.coordinator.has_partner_for_device(
+            self._device_id
+        ):
+            return False
+        # Unavailable only when the key is absent. An empty list is a
+        # present-and-known state of "zero recommendations".
+        return self.coordinator.has_temperature_recommendations_key(self._user_id())
+
+    @property
+    def native_value(self) -> int:
+        return len(self.coordinator.temperature_recommendations(self._user_id()))
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any] | None:
+        items = self.coordinator.temperature_recommendations(self._user_id())
+        return {"recommendations": items} if items else None
 
 
 class OrionWeeklyScoreSensor(_OrionV3ScoreSensor):

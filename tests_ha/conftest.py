@@ -105,7 +105,11 @@ class FakeClient:
         return [dict(d) for d in self.devices]
 
     async def get_sleep_schedules(self) -> dict[str, Any]:
-        return {"schedules": {}, "today_sleep_schedule": {}}
+        payload: dict[str, Any] = {"schedules": {}, "today_sleep_schedule": {}}
+        recs = getattr(self, "recommendations", None)
+        if recs is not None:
+            payload["recommendations"] = recs
+        return payload
 
     async def get_insights(self, days: int = 7, *, expected_user_id=None) -> dict:
         self.calls.append("get_insights")

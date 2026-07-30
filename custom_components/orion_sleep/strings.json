@@ -304,6 +304,12 @@
       },
       "partner_monthly_sleep_score": {
         "name": "Partner Monthly Sleep Score"
+      },
+      "temperature_recommendations": {
+        "name": "Temperature Recommendations"
+      },
+      "partner_temperature_recommendations": {
+        "name": "Partner Temperature Recommendations"
       }
     },
     "select": {

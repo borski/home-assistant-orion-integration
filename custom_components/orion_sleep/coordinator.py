@@ -1417,6 +1417,44 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
         )
         return row if isinstance(row, dict) else None
 
+    def temperature_recommendations(self, user_id: str | None = None) -> list[dict]:
+        """Orion Intelligence temperature recommendations for one user.
+
+        Rides in the `/v1/sleep-schedules` response under
+        `recommendations.{user_id}`, so it costs no extra request. Returns
+        a list of recommendation items (possibly empty). Each measured item
+        carries `bedtime_temp`, `phase_1_temp`, `phase_2_temp`,
+        `wakeup_temp`, `thermal_classification`, `source`, `version`, and
+        `created_at`.
+
+        An EMPTY list is a real state, not an error: it means Orion has no
+        recommendation for this user yet. The list being ABSENT entirely
+        (the key missing) is different and the sensor reports unavailable
+        for that.
+        """
+        target = user_id or self.user_id
+        if not target:
+            return []
+        recs = helpers.nested_mapping(self.data, "schedules", "recommendations").get(
+            target
+        )
+        return [item for item in recs if isinstance(item, dict)] if isinstance(
+            recs, list
+        ) else []
+
+    def has_temperature_recommendations_key(self, user_id: str | None = None) -> bool:
+        """Whether the recommendations key exists for this user at all.
+
+        Distinguishes "the server returned a (possibly empty) list for this
+        user" from "the key is absent", which is the availability signal:
+        a count of 0 is a valid state, a missing key is unavailable.
+        """
+        target = user_id or self.user_id
+        if not target:
+            return False
+        recs = helpers.nested_mapping(self.data, "schedules", "recommendations")
+        return isinstance(recs.get(target), list)
+
     def account_device_id(self) -> str | None:
         """The bed that PRESENTS the account's own entities.
 

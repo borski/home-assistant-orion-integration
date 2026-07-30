@@ -2183,11 +2183,43 @@ components:
                 $ref: "#/components/schemas/ScheduleDay"
             recommendations:
               type: object
+              description: |
+                Orion Intelligence temperature recommendations, keyed by
+                user_id. Each value is a list of recommendation items
+                (often empty). MEASURED item schema 2026-07-30 against an
+                account that had a populated recommendation; Kevin Klaes,
+                who found this field, only ever observed it empty.
               additionalProperties:
                 type: array
                 items:
-                  type: object
-                  additionalProperties: true
+                  $ref: "#/components/schemas/TemperatureRecommendation"
+
+    TemperatureRecommendation:
+      type: object
+      x-verification-status: measured-live
+      description: |
+        One Orion Intelligence temperature recommendation. The four
+        per-phase temperatures are the model's suggested settings for a
+        night; the rest is provenance.
+      properties:
+        bedtime_temp:
+          type: number
+        phase_1_temp:
+          type: number
+        phase_2_temp:
+          type: number
+        wakeup_temp:
+          type: number
+        thermal_classification:
+          type: string
+          description: e.g. "neutral".
+        source:
+          type: string
+        version:
+          type: string
+        created_at:
+          type: string
+          format: date-time
 
     ScheduleDay:
       type: object
