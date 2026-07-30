@@ -974,6 +974,48 @@ paths:
               schema:
                 $ref: "#/components/schemas/InsightsResponse"
 
+  /v3/insights:
+    get:
+      x-verification-status: measured-live
+      operationId: getInsightsV3
+      summary: Get Orion Intelligence analytics (v3)
+      description: |
+        Pre-aggregated day / week / month analytics from Orion
+        Intelligence. A richer, different surface from `/v2/insights`:
+        each period carries an `overview.score` and a fixed metric set
+        (`consistency`, `sleep_debt`, `breathing_disturbances`,
+        `sleep_duration`, `body_movements`, `hrv`, `heart_rate`,
+        `breath_rate`), each with prior-period comparisons.
+
+        NOT wrapped in a `response` key. Top-level `has_subscription`
+        gates the whole metric surface: without it the metrics come back
+        empty. A metric with no data reports `value: null` and a `state`
+        such as `calibrating` or `empty`, which consumers must treat as
+        unknown rather than zero.
+
+        Measured live 2026-07-30. The v3 surface was found by Kevin Klaes.
+      tags: [Insights]
+      responses:
+        "200":
+          description: Orion Intelligence analytics
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  user_id:
+                    type: string
+                    format: uuid
+                  has_subscription:
+                    type: boolean
+                  timezone:
+                    type: string
+                  data_availability:
+                    type: object
+                  granularities:
+                    type: object
+                    description: Keyed by `day`, `week`, `month`.
+
   # ──────────────────────────────────────────────
   #  Onboarding
   # ──────────────────────────────────────────────

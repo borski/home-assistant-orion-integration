@@ -274,6 +274,36 @@
       },
       "avg_bed_temperature": {
         "name": "Average Bed Temperature"
+      },
+      "consistency": {
+        "name": "Consistency"
+      },
+      "partner_consistency": {
+        "name": "Partner Consistency"
+      },
+      "sleep_debt": {
+        "name": "Sleep Debt"
+      },
+      "partner_sleep_debt": {
+        "name": "Partner Sleep Debt"
+      },
+      "breathing_disturbances": {
+        "name": "Breathing Disturbances"
+      },
+      "partner_breathing_disturbances": {
+        "name": "Partner Breathing Disturbances"
+      },
+      "weekly_sleep_score": {
+        "name": "Weekly Sleep Score"
+      },
+      "partner_weekly_sleep_score": {
+        "name": "Partner Weekly Sleep Score"
+      },
+      "monthly_sleep_score": {
+        "name": "Monthly Sleep Score"
+      },
+      "partner_monthly_sleep_score": {
+        "name": "Partner Monthly Sleep Score"
       }
     },
     "select": {

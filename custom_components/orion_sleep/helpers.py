@@ -36,6 +36,12 @@ _SENSITIVE_DIAGNOSTIC_BRANCHES = frozenset(
     {
         "insights",
         "partner_insights",
+        # v3 / Orion Intelligence analytics. Same biometric class as the v2
+        # `insights` above: sleep debt, breathing disturbances, HRV, heart
+        # and breath rate, per period. Must not reach a diagnostics
+        # download any more than the v2 data does.
+        "insights_v3",
+        "partner_insights_v3",
         "recommendations",
         "schedules",
         "sensors",

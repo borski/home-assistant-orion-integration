@@ -14,7 +14,7 @@ from homeassistant.components.sensor import (
     SensorStateClass,
 )
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import PERCENTAGE, UnitOfTemperature
+from homeassistant.const import PERCENTAGE, UnitOfTemperature, UnitOfTime
 from homeassistant.core import HomeAssistant, SupportsResponse
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import config_validation as cv
@@ -115,6 +115,17 @@ async def async_setup_entry(
                 )
         entities.append(OrionSchedulePhaseSensor(coordinator, account_device_id))
         entities.append(OrionZoneSplitModeSensor(coordinator, account_device_id))
+
+        # v3 / Orion Intelligence analytics. Account-scoped like the other
+        # insight sensors: day metrics as their own sensors, week and month
+        # as one score sensor each with the metric breakdown as attributes.
+        entities.append(OrionConsistencySensor(coordinator, account_device_id))
+        entities.append(OrionSleepDebtSensor(coordinator, account_device_id))
+        entities.append(
+            OrionBreathingDisturbancesSensor(coordinator, account_device_id)
+        )
+        entities.append(OrionWeeklyScoreSensor(coordinator, account_device_id))
+        entities.append(OrionMonthlyScoreSensor(coordinator, account_device_id))
         # CONFIGURED, not verified. This gate decides whether the partner's
         # entities EXIST, which is a fact about how this entry was set up,
         # not about whether an HTTP request succeeded thirty seconds ago.
@@ -141,6 +152,30 @@ async def async_setup_entry(
                         coordinator, account_device_id, description
                     )
                 )
+            # Partner v3 analytics, from the partner's own /v3/insights.
+            entities.append(
+                OrionConsistencySensor(
+                    coordinator, account_device_id, is_partner=True
+                )
+            )
+            entities.append(
+                OrionSleepDebtSensor(coordinator, account_device_id, is_partner=True)
+            )
+            entities.append(
+                OrionBreathingDisturbancesSensor(
+                    coordinator, account_device_id, is_partner=True
+                )
+            )
+            entities.append(
+                OrionWeeklyScoreSensor(
+                    coordinator, account_device_id, is_partner=True
+                )
+            )
+            entities.append(
+                OrionMonthlyScoreSensor(
+                    coordinator, account_device_id, is_partner=True
+                )
+            )
 
     for device in coordinator.devices:
         device_id = device.get("id")
@@ -1614,3 +1649,334 @@ class OrionZoneSplitModeSensor(OrionBaseEntity, SensorEntity):
     def native_value(self) -> str | None:
         mode = self.coordinator.zone_split_mode()
         return mode.title() if isinstance(mode, str) else None
+
+
+# ── v3 insights: Orion Intelligence analytics ─────────────────────────
+#
+# The v3 surface is pre-aggregated by period. These entities read the
+# LATEST period of a granularity from the coordinator, which returns None
+# for any no-data / no-subscription / calibrating case. Every value_fn
+# here therefore treats a missing metric or a null value as `unknown`,
+# NEVER as 0, because zero sleep debt and no data are different facts.
+#
+# `key` selects the primary (`insights_v3`) or partner
+# (`partner_insights_v3`) payload, so one class serves both by passing a
+# different key and a `partner_`-prefixed translation key. The translation
+# keys match Kevin Klaes's fork so a dashboard written against his
+# entity_ids works against this one; the v3 surface and these metrics were
+# found by him.
+
+
+def _v3_comparison(metric: dict | None, granularity: str) -> dict | None:
+    """The prior-period comparison for a metric, keyed by granularity."""
+    if not isinstance(metric, dict):
+        return None
+    comparisons = metric.get("comparisons")
+    if not isinstance(comparisons, dict):
+        return None
+    key = {
+        "day": "vs_prior_day",
+        "week": "vs_prior_week",
+        "month": "vs_prior_month",
+    }[granularity]
+    value = comparisons.get(key)
+    return value if isinstance(value, dict) else None
+
+
+class _OrionV3MetricSensor(OrionBaseEntity, SensorEntity):
+    """One v3 day-granularity metric as a sensor.
+
+    Subclasses set `_metric`, `_translation_key` (and its partner form),
+    the unit, and any extra attributes. The base handles the shared
+    unknown-not-zero gating and the comparison/insight attributes.
+    """
+
+    _metric: str = ""
+    _base_translation_key: str = ""
+    _live_fed = False
+
+    def __init__(
+        self,
+        coordinator: OrionDataUpdateCoordinator,
+        device_id: str,
+        *,
+        is_partner: bool = False,
+    ) -> None:
+        super().__init__(coordinator, device_id)
+        self._is_partner = is_partner
+        self._data_key = "partner_insights_v3" if is_partner else "insights_v3"
+        tk = self._base_translation_key
+        self._attr_translation_key = f"partner_{tk}" if is_partner else tk
+        # unique_id is account-scoped and person-keyed, exactly like the v2
+        # insight sensors, so it is stable and never collides with them.
+        who = (
+            coordinator.partner_entity_key_id() if is_partner else coordinator.user_id
+        )
+        self._attr_unique_id = helpers.account_person_unique_id(
+            coordinator.config_entry.entry_id,
+            f"v3_{self._metric}",
+            who,
+            legacy=f"{device_id}_v3_{self._metric}"
+            + ("_partner" if is_partner else ""),
+        )
+
+    def _metric_dict(self) -> dict | None:
+        return self.coordinator.v3_metric(
+            self._metric, granularity="day", key=self._data_key
+        )
+
+    @property
+    def available(self) -> bool:
+        # Available whenever the coordinator poll is healthy. A present-but-
+        # null metric is reported as `unknown` through native_value, which
+        # is the correct "no data" state, not unavailable. A partner's
+        # entities additionally require the partner to be verified.
+        if not super().available:
+            return False
+        if self._is_partner:
+            return self.coordinator.has_partner_for_device(self._device_id)
+        return True
+
+    @property
+    def native_value(self) -> Any:
+        metric = self._metric_dict()
+        if metric is None:
+            return None
+        value = metric.get("value")
+        # A null value is "calibrating" / "empty": unknown, not zero.
+        return value if isinstance(value, (int, float)) else None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any] | None:
+        metric = self._metric_dict()
+        if metric is None:
+            return None
+        attrs: dict[str, Any] = {}
+        insight = metric.get("insight")
+        if isinstance(insight, str) and insight:
+            attrs["insight"] = insight
+        for gran, label in (
+            ("day", "vs_prior_day"),
+            ("week", "vs_prior_week"),
+            ("month", "vs_prior_month"),
+        ):
+            comp = _v3_comparison(metric, gran)
+            if comp is not None:
+                attrs[label] = comp
+        return attrs or None
+
+
+class OrionConsistencySensor(_OrionV3MetricSensor):
+    """Sleep consistency (%), latest day. v3 / Orion Intelligence."""
+
+    _metric = "consistency"
+    _base_translation_key = "consistency"
+    _attr_native_unit_of_measurement = PERCENTAGE
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_icon = "mdi:calendar-check"
+
+
+class OrionSleepDebtSensor(_OrionV3MetricSensor):
+    """Sleep debt (min), latest day. v3 / Orion Intelligence.
+
+    Carries `need` (the computed baseline in minutes) and `status`
+    (`balanced` / `low`) alongside the shared comparison attributes.
+    """
+
+    _metric = "sleep_debt"
+    _base_translation_key = "sleep_debt"
+    _attr_native_unit_of_measurement = UnitOfTime.MINUTES
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_icon = "mdi:sleep"
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any] | None:
+        attrs = super().extra_state_attributes or {}
+        metric = self._metric_dict()
+        if isinstance(metric, dict):
+            need = metric.get("need")
+            if isinstance(need, (int, float)):
+                attrs = {**attrs, "need": need}
+            status = metric.get("status")
+            if isinstance(status, str) and status:
+                attrs = {**attrs, "status": status}
+        return attrs or None
+
+
+class OrionBreathingDisturbancesSensor(_OrionV3MetricSensor):
+    """Breathing disturbances (sec), latest day. v3 / Orion Intelligence.
+
+    NOT a duplicate of the apnea suite. The apnea sensors (apnea_ahi,
+    apnea_obstructive_time, apnea_central_time, apnea_longest_event) come
+    from the v2 per-session data and are an AHI-based clinical breakdown.
+    This is Orion Intelligence's own single roll-up in seconds, with a
+    low/high band, and it is the number the v3 app shows on its trend
+    screen.
+
+    They are kept separate on purpose because they are different
+    measurements that can legitimately disagree, but the matching v2 AHI is
+    cross-referenced as an `ahi` attribute so the two are visibly linked
+    rather than silently divergent.
+    """
+
+    _metric = "breathing_disturbances"
+    _base_translation_key = "breathing_disturbances"
+    _attr_native_unit_of_measurement = UnitOfTime.SECONDS
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_icon = "mdi:lungs"
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any] | None:
+        attrs = super().extra_state_attributes or {}
+        metric = self._metric_dict()
+        if isinstance(metric, dict):
+            details = metric.get("details")
+            if isinstance(details, dict):
+                for k in ("low_seconds", "high_seconds"):
+                    v = details.get(k)
+                    if isinstance(v, (int, float)):
+                        attrs = {**attrs, k: v}
+            state = metric.get("state")
+            if isinstance(state, str) and state:
+                attrs = {**attrs, "state": state}
+        # Cross-reference the AHI from the matching v2 session, so the two
+        # breathing measurements are visibly linked. `apnea_ahi` is the same
+        # value the apnea_index sensor reads.
+        session = (
+            self.coordinator.get_latest_completed_partner_session(self._device_id)
+            if self._is_partner
+            else self.coordinator.get_latest_completed_session()
+        )
+        if isinstance(session, dict):
+            from .descriptions import _get_apnea
+
+            ahi = _get_apnea(session).get("ahi")
+            if isinstance(ahi, (int, float)):
+                attrs = {**attrs, "ahi": ahi}
+        return attrs or None
+
+
+class _OrionV3ScoreSensor(OrionBaseEntity, SensorEntity):
+    """A whole granularity's overview score, with metrics as attributes.
+
+    One sensor per granularity (week, month) rather than eight metric
+    entities per granularity. State is the period's `overview.score`;
+    attributes carry the rating/award/dates plus one entry per metric,
+    each `{value, unit, insight, comparison}` where comparison is the
+    prior-period one for that granularity.
+    """
+
+    _granularity: str = ""
+    _base_translation_key: str = ""
+    _live_fed = False
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_native_unit_of_measurement = "points"
+    _attr_icon = "mdi:medal-outline"
+
+    _METRIC_KEYS = (
+        "sleep_duration",
+        "body_movements",
+        "breathing_disturbances",
+        "consistency",
+        "sleep_debt",
+        "hrv",
+        "heart_rate",
+        "breath_rate",
+    )
+
+    def __init__(
+        self,
+        coordinator: OrionDataUpdateCoordinator,
+        device_id: str,
+        *,
+        is_partner: bool = False,
+    ) -> None:
+        super().__init__(coordinator, device_id)
+        self._is_partner = is_partner
+        self._data_key = "partner_insights_v3" if is_partner else "insights_v3"
+        tk = self._base_translation_key
+        self._attr_translation_key = f"partner_{tk}" if is_partner else tk
+        who = (
+            coordinator.partner_entity_key_id() if is_partner else coordinator.user_id
+        )
+        self._attr_unique_id = helpers.account_person_unique_id(
+            coordinator.config_entry.entry_id,
+            f"v3_{self._granularity}_score",
+            who,
+            legacy=f"{device_id}_v3_{self._granularity}_score"
+            + ("_partner" if is_partner else ""),
+        )
+
+    def _overview(self) -> dict | None:
+        return self.coordinator.v3_overview(self._granularity, key=self._data_key)
+
+    def _period(self) -> dict | None:
+        return self.coordinator._latest_v3_period(self._data_key, self._granularity)
+
+    @property
+    def available(self) -> bool:
+        if not super().available:
+            return False
+        if self._is_partner:
+            return self.coordinator.has_partner_for_device(self._device_id)
+        return True
+
+    @property
+    def native_value(self) -> Any:
+        overview = self._overview()
+        if not isinstance(overview, dict):
+            return None
+        score = overview.get("score")
+        return score if isinstance(score, (int, float)) else None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any] | None:
+        period = self._period()
+        if not isinstance(period, dict):
+            return None
+        attrs: dict[str, Any] = {}
+        overview = period.get("overview")
+        if isinstance(overview, dict):
+            for k in ("rating", "color", "award", "state"):
+                v = overview.get(k)
+                if v is not None:
+                    attrs[k] = v
+        for k in ("start_date", "end_date", "days_with_data"):
+            v = period.get(k)
+            if v is not None:
+                attrs[k] = v
+        metrics = period.get("metrics")
+        comparison_key = {
+            "week": "vs_prior_week",
+            "month": "vs_prior_month",
+        }[self._granularity]
+        if isinstance(metrics, dict):
+            for mk in self._METRIC_KEYS:
+                metric = metrics.get(mk)
+                if not isinstance(metric, dict):
+                    continue
+                comp = _v3_comparison(metric, self._granularity)
+                attrs[mk] = {
+                    "value": metric.get("value"),
+                    "unit": metric.get("unit"),
+                    "insight": metric.get("insight"),
+                    "comparison": comp,
+                }
+                # Name the comparison key so the shape is self-describing.
+                if comp is not None:
+                    attrs[mk]["comparison_key"] = comparison_key
+        return attrs or None
+
+
+class OrionWeeklyScoreSensor(_OrionV3ScoreSensor):
+    """Latest week's Orion Intelligence sleep score, metrics as attributes."""
+
+    _granularity = "week"
+    _base_translation_key = "weekly_sleep_score"
+
+
+class OrionMonthlyScoreSensor(_OrionV3ScoreSensor):
+    """Latest month's Orion Intelligence sleep score, metrics as attributes."""
+
+    _granularity = "month"
+    _base_translation_key = "monthly_sleep_score"

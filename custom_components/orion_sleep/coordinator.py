@@ -664,7 +664,9 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
         data: dict = {
             "schedules": (self.data or {}).get("schedules", {}),
             "insights": (self.data or {}).get("insights", {}),
+            "insights_v3": (self.data or {}).get("insights_v3", {}),
             "partner_insights": (self.data or {}).get("partner_insights", {}),
+            "partner_insights_v3": (self.data or {}).get("partner_insights_v3", {}),
             "live_session": (self.data or {}).get("live_session", {}),
             "sleep_config": (self.data or {}).get("sleep_config", {}),
         }
@@ -840,6 +842,18 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
         except (OrionApiError, OrionConnectionError) as err:
             _LOGGER.warning("Failed to fetch insights: %s", err)
 
+        # Orion Intelligence pre-aggregated day/week/month analytics. A
+        # separate, richer surface from v2 above. Fetched on its own so a
+        # v3 failure never blanks the v2-backed entities and vice versa.
+        try:
+            data["insights_v3"] = await self.api_client.get_insights_v3(
+                expected_user_id=self.user_id
+            )
+        except OrionAuthError as err:
+            raise ConfigEntryAuthFailed(str(err)) from err
+        except (OrionApiError, OrionConnectionError) as err:
+            _LOGGER.warning("Failed to fetch v3 insights: %s", err)
+
         # Orion's own view of whether anyone is in bed, and where the
         # schedule currently is. Both are cheap, and `is_in_bed` is the
         # only occupancy signal in this API that the vendor's own app
@@ -880,6 +894,23 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
                     self.partner_update_ok = False
                     _LOGGER.warning("Failed to fetch partner insights: %s", err)
 
+                # Partner v3, on the partner's own token and guarded by the
+                # partner's account id. Separate try so a v3 failure does
+                # not flip `partner_update_ok` for the v2 fetch above.
+                try:
+                    data["partner_insights_v3"] = (
+                        await self.partner_api_client.get_insights_v3(
+                            expected_user_id=partner_id,
+                        )
+                    )
+                except OrionAuthError as err:
+                    _LOGGER.warning(
+                        "Partner authentication failed. Replace it in Orion options: %s",
+                        err,
+                    )
+                except (OrionApiError, OrionConnectionError) as err:
+                    _LOGGER.warning("Failed to fetch partner v3 insights: %s", err)
+
         if topology_changed and not self.reload_started:
             self.reload_started = True
 
@@ -899,6 +930,84 @@ class OrionDataUpdateCoordinator(DataUpdateCoordinator[dict]):
             )
 
         return data
+
+    # ── v3 insights (Orion Intelligence day/week/month analytics) ─────
+    #
+    # The v3 surface is pre-aggregated by period. Entities read the LATEST
+    # period of a granularity. A metric with no data reports `value: null`
+    # and a `state` like `calibrating`/`empty`, and every accessor here
+    # returns None for that so the entity reports `unknown`, never 0. Zero
+    # sleep debt and no data are different facts.
+
+    def _v3_root(self, key: str) -> dict:
+        """The v3 payload for the primary (`insights_v3`) or partner."""
+        root = (self.data or {}).get(key)
+        return root if isinstance(root, dict) else {}
+
+    def v3_has_subscription(self, key: str = "insights_v3") -> bool:
+        """Whether the account has an active Orion Intelligence subscription.
+
+        Without it the whole metrics surface comes back empty, which the
+        entities must render as unknown rather than as a real zero.
+        """
+        return self._v3_root(key).get("has_subscription") is True
+
+    def _latest_v3_period(self, key: str, granularity: str) -> dict | None:
+        """The most recent period dict for a granularity, or None.
+
+        Latest by `period_key` (the date-shaped key), so it does not depend
+        on dict ordering. Returns None if v3 is empty or the granularity is
+        absent, which is the no-data path.
+        """
+        gran = self._v3_root(key).get("granularities")
+        if not isinstance(gran, dict):
+            return None
+        block = gran.get(granularity)
+        if not isinstance(block, dict):
+            return None
+        periods = block.get("data")
+        if not isinstance(periods, dict) or not periods:
+            return None
+        latest_key = max(periods)
+        period = periods.get(latest_key)
+        return period if isinstance(period, dict) else None
+
+    def v3_metric(
+        self, metric: str, granularity: str = "day", key: str = "insights_v3"
+    ) -> dict | None:
+        """One metric dict from the latest period of a granularity.
+
+        Returns the raw metric dict (value, unit, insight, comparisons,
+        state, status, and metric-specific extras). None when v3 is
+        unavailable, the subscription is inactive, or the metric is absent.
+        The entity decides whether a present-but-null value is `unknown`.
+        """
+        if not self.v3_has_subscription(key):
+            return None
+        period = self._latest_v3_period(key, granularity)
+        if period is None:
+            return None
+        metrics = period.get("metrics")
+        if not isinstance(metrics, dict):
+            return None
+        value = metrics.get(metric)
+        return value if isinstance(value, dict) else None
+
+    def v3_overview(
+        self, granularity: str, key: str = "insights_v3"
+    ) -> dict | None:
+        """The `overview` dict (score, rating, ...) of the latest period.
+
+        Used by the week/month score sensors. None when v3 is unavailable
+        or the subscription is inactive.
+        """
+        if not self.v3_has_subscription(key):
+            return None
+        period = self._latest_v3_period(key, granularity)
+        if period is None:
+            return None
+        overview = period.get("overview")
+        return overview if isinstance(overview, dict) else None
 
     def get_latest_session(self) -> dict | None:
         """Get the most recent sleep session from insights data."""

@@ -113,6 +113,20 @@ class FakeClient:
             raise self.fail_insights
         return {"user_id": expected_user_id or ACCOUNT, "data": {}, "overview": {}}
 
+    async def get_insights_v3(self, *, expected_user_id=None) -> dict:
+        self.calls.append("get_insights_v3")
+        # `insights_v3` mirrors `fail_insights` so a test that fails one
+        # insights fetch fails both, keeping the two consistent. Default is
+        # a subscribed account with no periods, which exercises the
+        # unknown-not-zero path in the v3 sensors.
+        if self.fail_insights is not None:
+            raise self.fail_insights
+        return {
+            "user_id": expected_user_id or ACCOUNT,
+            "has_subscription": True,
+            "granularities": {},
+        }
+
     async def get_live_session(self) -> dict[str, Any]:
         return {}
 
