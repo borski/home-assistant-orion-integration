@@ -1,7 +1,7 @@
 {
   "domain": "orion_sleep",
   "name": "Orion Sleep",
-  "version": "3.0.0",
+  "version": "3.1.0",
   "documentation": "https://github.com/borski/home-assistant-orion-integration",
   "issue_tracker": "https://github.com/borski/home-assistant-orion-integration/issues",
   "codeowners": [
@@ -10,7 +10,7 @@
   "config_flow": true,
   "dependencies": [],
   "requirements": [
-    "orion-sleep-api==0.3.0"
+    "orion-sleep-api==0.2.0"
   ],
   "integration_type": "hub",
   "iot_class": "cloud_push",
